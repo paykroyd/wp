@@ -247,6 +247,18 @@ pub enum OpaqueKind {
     Close(u32),
 }
 
+/// Where an opaque element sat in the file, so it goes back to the same place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum OpaqueLevel {
+    /// Inside a `w:r`.
+    #[default]
+    Run,
+    /// A direct child of `w:p`, outside any run.
+    Para,
+    /// A direct child of `w:body`, next to the paragraph rather than in it.
+    Body,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OpaqueXml {
     pub xml: String,
@@ -260,16 +272,22 @@ pub struct OpaqueXml {
     /// A rendering hint Word regenerates itself (`w:lastRenderedPageBreak`,
     /// `w:proofErr`): preserved, but hidden in Reveal Codes unless asked.
     pub hint: bool,
+    pub level: OpaqueLevel,
 }
 
 impl OpaqueXml {
     pub fn element(xml: impl Into<String>, label: impl Into<String>) -> OpaqueXml {
-        OpaqueXml { xml: xml.into(), label: label.into(), kind: OpaqueKind::Element, protected: false, deleted: false, hint: false }
+        OpaqueXml { xml: xml.into(), label: label.into(), kind: OpaqueKind::Element, protected: false, deleted: false, hint: false, level: OpaqueLevel::Run }
     }
     pub fn hint(xml: impl Into<String>, label: impl Into<String>) -> OpaqueXml {
         OpaqueXml { hint: true, ..OpaqueXml::element(xml, label) }
     }
+    pub fn at(mut self, level: OpaqueLevel) -> OpaqueXml {
+        self.level = level;
+        self
+    }
 }
+
 
 /// A formatting code in the item stream.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

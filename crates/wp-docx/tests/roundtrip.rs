@@ -58,6 +58,13 @@ fn canonical(xml: &str) -> Vec<String> {
                     attrs.push(format!("{}={}", k, v));
                 }
                 attrs.sort();
+                // `w:cr` and a plain `w:br` are the same break; the hyphen
+                // elements are the characters they stand for.
+                let name = if name == "w:cr" { "w:br".to_string() } else { name };
+                if name == "w:softHyphen" || name == "w:noBreakHyphen" {
+                    out.push(format!("T {}", if name == "w:softHyphen" { '\u{ad}' } else { '\u{2011}' }));
+                    continue;
+                }
                 out.push(format!("S {} {}", name, attrs.join(" ")));
                 if is_empty_event {
                     out.push(format!("E {}", name));
@@ -69,6 +76,19 @@ fn canonical(xml: &str) -> Vec<String> {
                     continue;
                 }
                 out.push(format!("E {}", String::from_utf8_lossy(e.name().as_ref())));
+            }
+            Ok(Event::CData(c)) => {
+                if skip_depth > 0 {
+                    continue;
+                }
+                let s = String::from_utf8_lossy(&c).into_owned();
+                if let Some(last) = out.last_mut() {
+                    if let Some(prev) = last.strip_prefix("T ") {
+                        *last = format!("T {}{}", prev, s);
+                        continue;
+                    }
+                }
+                out.push(format!("T {}", s));
             }
             Ok(Event::Text(t)) => {
                 if skip_depth > 0 {
@@ -94,13 +114,35 @@ fn canonical(xml: &str) -> Vec<String> {
     merge_runs(out)
 }
 
-/// Merge `</w:r><w:r><w:rPr>same</w:rPr>` boundaries and adjacent `w:t`s.
+/// Merge `</w:r><w:r><w:rPr>same</w:rPr>` boundaries and adjacent `w:t`s,
+/// after dropping empty text elements (`<w:t/>`), which show nothing.
 fn merge_runs(tokens: Vec<String>) -> Vec<String> {
-    // Pass 1: collapse run boundaries with identical rPr.
+    // Pass 0: drop empty w:t / w:delText.
+    let mut stripped: Vec<String> = Vec::new();
+    for t in tokens {
+        let n = stripped.len();
+        if (t == "E w:t" || t == "E w:delText") && n >= 1 && stripped[n - 1] == format!("S {} ", &t[2..]) {
+            stripped.pop();
+            continue;
+        }
+        stripped.push(t);
+    }
+    let tokens = stripped;
+    // Pass 1: collapse run boundaries with identical rPr. Runs nested inside
+    // a drawing's text box are separate paragraphs and never merge with the
+    // run that holds them.
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
-    let mut prev_rpr: Option<Vec<String>> = None;
+    let mut prev_rpr: Vec<Option<Vec<String>>> = vec![None];
+    let mut depth = 0usize;
     while i < tokens.len() {
+        if tokens[i] == "E w:r" {
+            depth = depth.saturating_sub(1);
+            prev_rpr.truncate(depth + 1);
+            out.push(tokens[i].clone());
+            i += 1;
+            continue;
+        }
         if tokens[i].starts_with("S w:r ") {
             // gather this run's rPr block
             let mut j = i + 1;
@@ -125,39 +167,50 @@ fn merge_runs(tokens: Vec<String>) -> Vec<String> {
                 i = j + 1;
                 continue;
             }
-            if out.last().map(|s| s.as_str()) == Some("E w:r") && prev_rpr.as_ref() == Some(&rpr) {
+            if out.last().map(|s| s.as_str()) == Some("E w:r") && prev_rpr[depth].as_ref() == Some(&rpr) {
                 out.pop();
                 i = j;
+                depth += 1;
+                prev_rpr.push(None);
                 continue;
             }
             out.push(tokens[i].clone());
             out.extend(rpr.iter().cloned());
-            prev_rpr = Some(rpr);
+            prev_rpr[depth] = Some(rpr);
+            depth += 1;
+            prev_rpr.push(None);
             i = j;
             continue;
         }
-        if tokens[i] != "E w:r" {
-            // Anything other than a run boundary breaks the merge chain,
-            // except content inside runs.
+        if tokens[i].starts_with("S w:p ") || tokens[i] == "E w:p" {
+            // A paragraph boundary (also inside text boxes) ends any merge chain.
+            if let Some(p) = prev_rpr.get_mut(depth) {
+                *p = None;
+            }
         }
         out.push(tokens[i].clone());
         i += 1;
     }
-    // Pass 2: merge adjacent w:t elements.
+
+    // Pass 2: merge text separated only by w:t boundaries (or nothing at all).
     let mut merged: Vec<String> = Vec::new();
     for t in out {
-        let n = merged.len();
-        if n >= 3 && t.starts_with("T ") && merged[n - 1].starts_with("S w:t ") && merged[n - 2] == "E w:t" && merged[n - 3].starts_with("T ") {
-            let text = t[2..].to_string();
-            merged.truncate(n - 2);
-            let last = merged.last_mut().unwrap();
-            last.push_str(&text);
-            // we removed "E w:t" and "S w:t"; the following "E w:t" closes the merged element
-            continue;
+        if t.starts_with("T ") {
+            let mut k = merged.len();
+            while k > 0 && (merged[k - 1] == "E w:t" || merged[k - 1] == "S w:t ") {
+                k -= 1;
+            }
+            if k > 0 && merged[k - 1].starts_with("T ") {
+                let text = t[2..].to_string();
+                merged.truncate(k);
+                merged.last_mut().unwrap().push_str(&text);
+                continue;
+            }
         }
         merged.push(t);
     }
     merged
+
 }
 
 /// Every bookmark element with its attributes, sorted — position-independent.
@@ -258,7 +311,7 @@ fn new_document_writes_and_reads() {
 #[test]
 fn edits_survive_write() {
     use wp_core::model::*;
-    let path = corpus_dir().join("pathological.docx");
+    let path = corpus_dir().join("path-mixed.docx");
     if !path.exists() {
         return;
     }

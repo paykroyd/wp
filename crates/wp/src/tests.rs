@@ -129,7 +129,7 @@ fn palette_finds_and_runs_commands() {
 
 #[test]
 fn open_docx_render_and_page_rules() {
-    let p = corpus("report.docx");
+    let p = corpus("gen-report.docx");
     if !p.exists() {
         return;
     }
@@ -160,7 +160,7 @@ fn open_docx_render_and_page_rules() {
 
 #[test]
 fn protected_content_refuses_edits() {
-    let p = corpus("pathological.docx");
+    let p = corpus("path-mixed.docx");
     if !p.exists() {
         return;
     }

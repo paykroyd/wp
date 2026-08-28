@@ -46,12 +46,51 @@ pub fn write_bytes(doc: &Document, pkg: Option<&DocxPackage>) -> Result<Vec<u8>>
     let main = render_document(doc, &pkg, &ctx);
     let main_part = pkg.main_part.clone();
     pkg.put(&main_part, main.into_bytes());
-    let styles_part = pkg.styles_part.clone().unwrap_or_else(|| "word/styles.xml".to_string());
-    if doc.styles.dirty || !pkg.has(&styles_part) {
+    let styles_part = pkg.styles_part.clone().unwrap_or_else(|| {
+        let dir = pkg.main_part.rsplit_once('/').map(|(d, _)| format!("{}/", d)).unwrap_or_default();
+        format!("{}styles.xml", dir)
+    });
+    // A file that never had a styles part keeps not having one, unless a
+    // style was added or changed — then the part is created and registered.
+    if doc.styles.dirty || (!pkg.has(&styles_part) && pkg.styles_part.is_some()) {
         pkg.put(&styles_part, render_styles(&doc.styles, &ctx).into_bytes());
+        register_part(&mut pkg, &styles_part, "styles", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml");
         pkg.styles_part = Some(styles_part);
     }
     pkg.to_bytes()
+}
+
+/// Make sure a part is reachable: a content-type override and a relationship
+/// from the main part. Both are inserted only when missing.
+pub fn register_part(pkg: &mut DocxPackage, part: &str, rel_type: &str, content_type: &str) {
+    let ct_name = "[Content_Types].xml";
+    let ct = pkg.get_str(ct_name).unwrap_or_else(|| format!("{}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"></Types>", XML_DECL));
+    let part_name = format!("/{}", part);
+    if !ct.contains(&format!("PartName=\"{}\"", part_name)) {
+        let ov = format!("<Override PartName=\"{}\" ContentType=\"{}\"/>", part_name, content_type);
+        let new = match ct.rfind("</Types>") {
+            Some(i) => format!("{}{}{}", &ct[..i], ov, &ct[i..]),
+            None => ct,
+        };
+        pkg.put(ct_name, new.into_bytes());
+    }
+    let (dir, file) = pkg.main_part.rsplit_once('/').map(|(d, f)| (d.to_string(), f.to_string())).unwrap_or((String::new(), pkg.main_part.clone()));
+    let rels_name = if dir.is_empty() { format!("_rels/{}.rels", file) } else { format!("{}/_rels/{}.rels", dir, file) };
+    let target = part.strip_prefix(&format!("{}/", dir)).unwrap_or(part).to_string();
+    let rels = pkg.get_str(&rels_name).unwrap_or_else(|| format!("{}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"></Relationships>", XML_DECL));
+    let ty = format!("http://schemas.openxmlformats.org/officeDocument/2006/relationships/{}", rel_type);
+    if !rels.contains(&format!("Type=\"{}\"", ty)) {
+        let mut n = 1;
+        while rels.contains(&format!("Id=\"rId{}\"", n)) {
+            n += 1;
+        }
+        let rel = format!("<Relationship Id=\"rId{}\" Type=\"{}\" Target=\"{}\"/>", n, ty, escape_attr(&target));
+        let new = match rels.rfind("</Relationships>") {
+            Some(i) => format!("{}{}{}", &rels[..i], rel, &rels[i..]),
+            None => rels,
+        };
+        pkg.put(&rels_name, new.into_bytes());
+    }
 }
 
 fn minimal_package() -> DocxPackage {
@@ -127,6 +166,7 @@ fn minimal_package() -> DocxPackage {
     });
     pkg.main_part = "word/document.xml".into();
     pkg.styles_part = Some("word/styles.xml".into());
+    pkg.had_sectpr = true;
     pkg
 }
 
@@ -158,7 +198,9 @@ pub fn render_document(doc: &Document, pkg: &DocxPackage, ctx: &Ctx) -> String {
             render_paragraph(doc, i, &mut out, ctx, &mut bookmark_id);
         }
     }
-    render_sectpr(&doc.section, &mut out);
+    if pkg.had_sectpr || doc.section != SectionProps::default() {
+        render_sectpr(&doc.section, &mut out);
+    }
     out.push_str("</w:body></w:document>");
     out
 }
@@ -195,6 +237,16 @@ fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bo
             }
         }
         return;
+    }
+    // Elements that sat next to the paragraph in the body (a comment range
+    // start, a bookmark before a table) go back outside it.
+    let is_body = |it: &Item| matches!(it, Item::Code(Code::Opaque(o)) if o.kind == OpaqueKind::Element && o.level == OpaqueLevel::Body);
+    let lead = p.items.iter().take_while(|it| is_body(it)).count();
+    let trail = if lead == p.items.len() { 0 } else { p.items.iter().rev().take_while(|it| is_body(it)).count() };
+    for it in &p.items[..lead] {
+        if let Item::Code(Code::Opaque(o)) = it {
+            out.push_str(&o.xml);
+        }
     }
     out.push_str("<w:p");
     if let Some(a) = &p.props.p_attrs {
@@ -248,8 +300,16 @@ fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bo
             };
         }
 
-        for it in &p.items[run.start..run.end] {
+        for it in &p.items[run.start.max(lead)..run.end.min(p.items.len() - trail).max(run.start.max(lead))] {
             match it {
+                Item::Char('\u{ad}') => {
+                    ensure_run!();
+                    out.push_str("<w:softHyphen/>");
+                }
+                Item::Char('\u{2011}') => {
+                    ensure_run!();
+                    out.push_str("<w:noBreakHyphen/>");
+                }
                 Item::Char(c) => text.push(*c),
                 Item::Code(Code::On(_)) | Item::Code(Code::Off(_)) => {}
                 Item::Code(Code::Tab) => {
@@ -276,7 +336,7 @@ fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bo
                 }
                 Item::Code(Code::Opaque(o)) => match o.kind {
                     OpaqueKind::Element => {
-                        if is_run_level(&o.xml) {
+                        if o.level == OpaqueLevel::Run && is_run_level(&o.xml) {
                             ensure_run!();
                             out.push_str(&o.xml);
                         } else {
@@ -307,7 +367,13 @@ fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bo
     // Close any wrapper left open (its close marker was deleted).
     close_unclosed_wrappers(p, out);
     out.push_str("</w:p>");
+    for it in &p.items[p.items.len() - trail..] {
+        if let Item::Code(Code::Opaque(o)) = it {
+            out.push_str(&o.xml);
+        }
+    }
 }
+
 
 
 /// Elements that must live inside `<w:r>`.

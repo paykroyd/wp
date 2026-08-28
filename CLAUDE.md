@@ -12,9 +12,9 @@ built and why; §11 is the current status and gap list), `KEYBINDINGS.md`.
 - `cargo test` runs everything: core unit tests, the `.docx` corpus gate, and
   headless UI tests (ratatui `TestBackend`). It must be green before a commit.
 - `cargo build --release` → `target/release/wp`. Try it with
-  `./target/release/wp corpus/report.docx`; `wp --probe-keys` shows what the
+  `./target/release/wp corpus/gen-report.docx`; `wp --probe-keys` shows what the
   terminal delivers for each key.
-- Fixtures: `python3 tools/make_fixtures.py corpus` (needs `python-docx`;
+- Corpus: `python3 tools/make_corpus.py corpus` regenerates all ~60 fixtures (needs `python-docx`;
   use a venv, the system Python is PEP 668-locked). `tools/fontgen.py`
   regenerates embedded font metrics; `tools/gen_keybindings.py` regenerates
   `KEYBINDINGS.md` — run it after touching `keymap.rs` or `commands.rs`.

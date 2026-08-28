@@ -30,6 +30,10 @@ pub struct DocxPackage {
     pub theme_minor: Option<String>,
     /// The body had no paragraphs at all when read (only a `w:sectPr`).
     pub empty_body: bool,
+    /// The body ended with a `w:sectPr` when read. A file without one is
+    /// written without one unless the page setup was changed.
+    pub had_sectpr: bool,
+
     /// Original `w:id` of each bookmark by name, so they are written back
     /// unchanged.
     pub bookmark_ids: HashMap<String, u32>,
