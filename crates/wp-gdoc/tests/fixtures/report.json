@@ -1,0 +1,956 @@
+{
+ "documentId": "1AbCdEfGhIjKlMnOpQrStUvWxYz",
+ "title": "Quarterly Report",
+ "revisionId": "ALBJ4LtRev1",
+ "body": {
+  "content": [
+   {
+    "startIndex": 0,
+    "endIndex": 1,
+    "sectionBreak": {
+     "sectionStyle": {
+      "columnSeparatorStyle": "NONE",
+      "contentDirection": "LEFT_TO_RIGHT",
+      "sectionType": "CONTINUOUS"
+     }
+    }
+   },
+   {
+    "startIndex": 1,
+    "endIndex": 18,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 1,
+       "endIndex": 18,
+       "textRun": {
+        "content": "Quarterly Report\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "HEADING_1",
+      "direction": "LEFT_TO_RIGHT",
+      "headingId": "h.abc123"
+     }
+    }
+   },
+   {
+    "startIndex": 18,
+    "endIndex": 47,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 18,
+       "endIndex": 22,
+       "textRun": {
+        "content": "The ",
+        "textStyle": {}
+       }
+      },
+      {
+       "startIndex": 22,
+       "endIndex": 29,
+       "textRun": {
+        "content": "results",
+        "textStyle": {
+         "bold": true
+        }
+       }
+      },
+      {
+       "startIndex": 29,
+       "endIndex": 35,
+       "textRun": {
+        "content": " were ",
+        "textStyle": {}
+       }
+      },
+      {
+       "startIndex": 35,
+       "endIndex": 44,
+       "textRun": {
+        "content": "published",
+        "textStyle": {
+         "underline": true,
+         "foregroundColor": {
+          "color": {
+           "rgbColor": {
+            "red": 0.06666667,
+            "green": 0.33333334,
+            "blue": 0.8
+           }
+          }
+         },
+         "link": {
+          "url": "https://example.com/report"
+         }
+        }
+       }
+      },
+      {
+       "startIndex": 44,
+       "endIndex": 45,
+       "textRun": {
+        "content": ".",
+        "textStyle": {}
+       }
+      },
+      {
+       "startIndex": 45,
+       "endIndex": 46,
+       "footnoteReference": {
+        "footnoteId": "kix.fn1",
+        "footnoteNumber": "1",
+        "textStyle": {
+         "baselineOffset": "SUPERSCRIPT"
+        }
+       }
+      },
+      {
+       "startIndex": 46,
+       "endIndex": 47,
+       "textRun": {
+        "content": "\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT"
+     }
+    }
+   },
+   {
+    "startIndex": 47,
+    "endIndex": 58,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 47,
+       "endIndex": 58,
+       "textRun": {
+        "content": "Revenue up\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT",
+      "indentFirstLine": {
+       "magnitude": 18,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 36,
+       "unit": "PT"
+      }
+     },
+     "bullet": {
+      "listId": "kix.list1",
+      "textStyle": {
+       "underline": false
+      }
+     }
+    }
+   },
+   {
+    "startIndex": 58,
+    "endIndex": 69,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 58,
+       "endIndex": 69,
+       "textRun": {
+        "content": "Costs down\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT",
+      "indentFirstLine": {
+       "magnitude": 18,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 36,
+       "unit": "PT"
+      }
+     },
+     "bullet": {
+      "listId": "kix.list1",
+      "textStyle": {
+       "underline": false
+      }
+     }
+    }
+   },
+   {
+    "startIndex": 69,
+    "endIndex": 93,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 69,
+       "endIndex": 93,
+       "textRun": {
+        "content": "Name:\tValue\u000bSecond line\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT",
+      "alignment": "CENTER",
+      "tabStops": [
+       {
+        "offset": {
+         "magnitude": 144,
+         "unit": "PT"
+        },
+        "alignment": "START"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "startIndex": 93,
+    "endIndex": 112,
+    "table": {
+     "rows": 2,
+     "columns": 2,
+     "tableRows": [
+      {
+       "startIndex": 94,
+       "endIndex": 103,
+       "tableCells": [
+        {
+         "startIndex": 95,
+         "endIndex": 99,
+         "content": [
+          {
+           "startIndex": 96,
+           "endIndex": 99,
+           "paragraph": {
+            "elements": [
+             {
+              "startIndex": 96,
+              "endIndex": 99,
+              "textRun": {
+               "content": "A1\n",
+               "textStyle": {}
+              }
+             }
+            ],
+            "paragraphStyle": {
+             "namedStyleType": "NORMAL_TEXT",
+             "direction": "LEFT_TO_RIGHT"
+            }
+           }
+          }
+         ],
+         "tableCellStyle": {
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "backgroundColor": {},
+          "paddingLeft": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingRight": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingTop": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingBottom": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "contentAlignment": "TOP"
+         }
+        },
+        {
+         "startIndex": 99,
+         "endIndex": 103,
+         "content": [
+          {
+           "startIndex": 100,
+           "endIndex": 103,
+           "paragraph": {
+            "elements": [
+             {
+              "startIndex": 100,
+              "endIndex": 103,
+              "textRun": {
+               "content": "B1\n",
+               "textStyle": {}
+              }
+             }
+            ],
+            "paragraphStyle": {
+             "namedStyleType": "NORMAL_TEXT",
+             "direction": "LEFT_TO_RIGHT"
+            }
+           }
+          }
+         ],
+         "tableCellStyle": {
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "backgroundColor": {},
+          "paddingLeft": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingRight": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingTop": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingBottom": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "contentAlignment": "TOP"
+         }
+        }
+       ],
+       "tableRowStyle": {
+        "minRowHeight": {
+         "magnitude": 0,
+         "unit": "PT"
+        }
+       }
+      },
+      {
+       "startIndex": 103,
+       "endIndex": 112,
+       "tableCells": [
+        {
+         "startIndex": 104,
+         "endIndex": 108,
+         "content": [
+          {
+           "startIndex": 105,
+           "endIndex": 108,
+           "paragraph": {
+            "elements": [
+             {
+              "startIndex": 105,
+              "endIndex": 108,
+              "textRun": {
+               "content": "A2\n",
+               "textStyle": {}
+              }
+             }
+            ],
+            "paragraphStyle": {
+             "namedStyleType": "NORMAL_TEXT",
+             "direction": "LEFT_TO_RIGHT"
+            }
+           }
+          }
+         ],
+         "tableCellStyle": {
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "backgroundColor": {},
+          "paddingLeft": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingRight": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingTop": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingBottom": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "contentAlignment": "TOP"
+         }
+        },
+        {
+         "startIndex": 108,
+         "endIndex": 112,
+         "content": [
+          {
+           "startIndex": 109,
+           "endIndex": 112,
+           "paragraph": {
+            "elements": [
+             {
+              "startIndex": 109,
+              "endIndex": 112,
+              "textRun": {
+               "content": "B2\n",
+               "textStyle": {}
+              }
+             }
+            ],
+            "paragraphStyle": {
+             "namedStyleType": "NORMAL_TEXT",
+             "direction": "LEFT_TO_RIGHT"
+            }
+           }
+          }
+         ],
+         "tableCellStyle": {
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "backgroundColor": {},
+          "paddingLeft": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingRight": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingTop": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "paddingBottom": {
+           "magnitude": 5,
+           "unit": "PT"
+          },
+          "contentAlignment": "TOP"
+         }
+        }
+       ],
+       "tableRowStyle": {
+        "minRowHeight": {
+         "magnitude": 0,
+         "unit": "PT"
+        }
+       }
+      }
+     ],
+     "tableStyle": {
+      "tableColumnProperties": [
+       {
+        "widthType": "FIXED_WIDTH",
+        "width": {
+         "magnitude": 234,
+         "unit": "PT"
+        }
+       },
+       {
+        "widthType": "FIXED_WIDTH",
+        "width": {
+         "magnitude": 234,
+         "unit": "PT"
+        }
+       }
+      ]
+     }
+    }
+   },
+   {
+    "startIndex": 112,
+    "endIndex": 122,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 112,
+       "endIndex": 120,
+       "textRun": {
+        "content": "Figure: ",
+        "textStyle": {}
+       }
+      },
+      {
+       "startIndex": 120,
+       "endIndex": 121,
+       "inlineObjectElement": {
+        "inlineObjectId": "kix.img1",
+        "textStyle": {}
+       }
+      },
+      {
+       "startIndex": 121,
+       "endIndex": 122,
+       "textRun": {
+        "content": "\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT"
+     }
+    }
+   },
+   {
+    "startIndex": 122,
+    "endIndex": 124,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 122,
+       "endIndex": 123,
+       "pageBreak": {
+        "textStyle": {}
+       }
+      },
+      {
+       "startIndex": 123,
+       "endIndex": 124,
+       "textRun": {
+        "content": "\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT"
+     }
+    }
+   },
+   {
+    "startIndex": 124,
+    "endIndex": 145,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 124,
+       "endIndex": 145,
+       "textRun": {
+        "content": "Café — naïve 😀 end.\n",
+        "textStyle": {
+         "italic": true,
+         "fontSize": {
+          "magnitude": 14,
+          "unit": "PT"
+         },
+         "foregroundColor": {
+          "color": {
+           "rgbColor": {
+            "red": 1
+           }
+          }
+         },
+         "backgroundColor": {
+          "color": {
+           "rgbColor": {
+            "red": 1,
+            "green": 1
+           }
+          }
+         }
+        }
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT",
+      "spaceAbove": {
+       "magnitude": 12,
+       "unit": "PT"
+      },
+      "lineSpacing": 150
+     }
+    }
+   }
+  ]
+ },
+ "footnotes": {
+  "kix.fn1": {
+   "footnoteId": "kix.fn1",
+   "content": [
+    {
+     "startIndex": 0,
+     "endIndex": 23,
+     "paragraph": {
+      "elements": [
+       {
+        "startIndex": 0,
+        "endIndex": 8,
+        "textRun": {
+         "content": "Source: ",
+         "textStyle": {}
+        }
+       },
+       {
+        "startIndex": 8,
+        "endIndex": 21,
+        "textRun": {
+         "content": "annual filing",
+         "textStyle": {
+          "italic": true
+         }
+        }
+       },
+       {
+        "startIndex": 21,
+        "endIndex": 23,
+        "textRun": {
+         "content": ".\n",
+         "textStyle": {}
+        }
+       }
+      ],
+      "paragraphStyle": {
+       "namedStyleType": "NORMAL_TEXT",
+       "direction": "LEFT_TO_RIGHT"
+      }
+     }
+    }
+   ]
+  }
+ },
+ "lists": {
+  "kix.list1": {
+   "listProperties": {
+    "nestingLevels": [
+     {
+      "bulletAlignment": "START",
+      "glyphSymbol": "●",
+      "glyphFormat": "%0",
+      "indentFirstLine": {
+       "magnitude": 18,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 36,
+       "unit": "PT"
+      },
+      "textStyle": {
+       "underline": false
+      },
+      "startNumber": 1
+     },
+     {
+      "bulletAlignment": "START",
+      "glyphSymbol": "○",
+      "glyphFormat": "%1",
+      "indentFirstLine": {
+       "magnitude": 54,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 72,
+       "unit": "PT"
+      },
+      "startNumber": 1
+     },
+     {
+      "bulletAlignment": "START",
+      "glyphSymbol": "○",
+      "glyphFormat": "%1",
+      "indentFirstLine": {
+       "magnitude": 54,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 72,
+       "unit": "PT"
+      },
+      "startNumber": 1
+     },
+     {
+      "bulletAlignment": "START",
+      "glyphSymbol": "○",
+      "glyphFormat": "%1",
+      "indentFirstLine": {
+       "magnitude": 54,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 72,
+       "unit": "PT"
+      },
+      "startNumber": 1
+     },
+     {
+      "bulletAlignment": "START",
+      "glyphSymbol": "○",
+      "glyphFormat": "%1",
+      "indentFirstLine": {
+       "magnitude": 54,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 72,
+       "unit": "PT"
+      },
+      "startNumber": 1
+     },
+     {
+      "bulletAlignment": "START",
+      "glyphSymbol": "○",
+      "glyphFormat": "%1",
+      "indentFirstLine": {
+       "magnitude": 54,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 72,
+       "unit": "PT"
+      },
+      "startNumber": 1
+     },
+     {
+      "bulletAlignment": "START",
+      "glyphSymbol": "○",
+      "glyphFormat": "%1",
+      "indentFirstLine": {
+       "magnitude": 54,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 72,
+       "unit": "PT"
+      },
+      "startNumber": 1
+     },
+     {
+      "bulletAlignment": "START",
+      "glyphSymbol": "○",
+      "glyphFormat": "%1",
+      "indentFirstLine": {
+       "magnitude": 54,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 72,
+       "unit": "PT"
+      },
+      "startNumber": 1
+     },
+     {
+      "bulletAlignment": "START",
+      "glyphSymbol": "○",
+      "glyphFormat": "%1",
+      "indentFirstLine": {
+       "magnitude": 54,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 72,
+       "unit": "PT"
+      },
+      "startNumber": 1
+     }
+    ]
+   }
+  }
+ },
+ "namedStyles": {
+  "styles": [
+   {
+    "namedStyleType": "NORMAL_TEXT",
+    "textStyle": {
+     "bold": false,
+     "italic": false,
+     "underline": false,
+     "strikethrough": false,
+     "smallCaps": false,
+     "backgroundColor": {},
+     "foregroundColor": {
+      "color": {
+       "rgbColor": {}
+      }
+     },
+     "fontSize": {
+      "magnitude": 11,
+      "unit": "PT"
+     },
+     "weightedFontFamily": {
+      "fontFamily": "Arial",
+      "weight": 400
+     },
+     "baselineOffset": "NONE"
+    },
+    "paragraphStyle": {
+     "namedStyleType": "NORMAL_TEXT",
+     "alignment": "START",
+     "lineSpacing": 115,
+     "direction": "LEFT_TO_RIGHT",
+     "spacingMode": "COLLAPSE_LISTS",
+     "spaceAbove": {
+      "magnitude": 0,
+      "unit": "PT"
+     },
+     "spaceBelow": {
+      "magnitude": 0,
+      "unit": "PT"
+     },
+     "avoidWidowAndOrphan": true
+    }
+   },
+   {
+    "namedStyleType": "HEADING_1",
+    "textStyle": {
+     "fontSize": {
+      "magnitude": 20,
+      "unit": "PT"
+     }
+    },
+    "paragraphStyle": {
+     "namedStyleType": "NORMAL_TEXT",
+     "direction": "LEFT_TO_RIGHT",
+     "spaceAbove": {
+      "magnitude": 20,
+      "unit": "PT"
+     },
+     "spaceBelow": {
+      "magnitude": 6,
+      "unit": "PT"
+     },
+     "keepLinesTogether": true,
+     "keepWithNext": true
+    }
+   },
+   {
+    "namedStyleType": "HEADING_2",
+    "textStyle": {
+     "fontSize": {
+      "magnitude": 16,
+      "unit": "PT"
+     }
+    },
+    "paragraphStyle": {
+     "namedStyleType": "NORMAL_TEXT",
+     "direction": "LEFT_TO_RIGHT",
+     "spaceAbove": {
+      "magnitude": 18,
+      "unit": "PT"
+     },
+     "spaceBelow": {
+      "magnitude": 6,
+      "unit": "PT"
+     },
+     "keepLinesTogether": true,
+     "keepWithNext": true
+    }
+   },
+   {
+    "namedStyleType": "TITLE",
+    "textStyle": {
+     "fontSize": {
+      "magnitude": 26,
+      "unit": "PT"
+     }
+    },
+    "paragraphStyle": {
+     "namedStyleType": "NORMAL_TEXT",
+     "direction": "LEFT_TO_RIGHT",
+     "spaceAbove": {
+      "magnitude": 0,
+      "unit": "PT"
+     },
+     "spaceBelow": {
+      "magnitude": 3,
+      "unit": "PT"
+     },
+     "keepLinesTogether": true,
+     "keepWithNext": true
+    }
+   }
+  ]
+ },
+ "documentStyle": {
+  "background": {
+   "color": {}
+  },
+  "pageNumberStart": 1,
+  "marginTop": {
+   "magnitude": 72,
+   "unit": "PT"
+  },
+  "marginBottom": {
+   "magnitude": 72,
+   "unit": "PT"
+  },
+  "marginRight": {
+   "magnitude": 72,
+   "unit": "PT"
+  },
+  "marginLeft": {
+   "magnitude": 72,
+   "unit": "PT"
+  },
+  "pageSize": {
+   "height": {
+    "magnitude": 792,
+    "unit": "PT"
+   },
+   "width": {
+    "magnitude": 612,
+    "unit": "PT"
+   }
+  },
+  "marginHeader": {
+   "magnitude": 36,
+   "unit": "PT"
+  },
+  "marginFooter": {
+   "magnitude": 36,
+   "unit": "PT"
+  },
+  "useCustomHeaderFooterMargins": true
+ },
+ "inlineObjects": {
+  "kix.img1": {
+   "objectId": "kix.img1",
+   "inlineObjectProperties": {
+    "embeddedObject": {
+     "imageProperties": {
+      "contentUri": "https://lh7.example/img",
+      "cropProperties": {}
+     },
+     "size": {
+      "height": {
+       "magnitude": 120,
+       "unit": "PT"
+      },
+      "width": {
+       "magnitude": 200,
+       "unit": "PT"
+      }
+     },
+     "marginTop": {
+      "magnitude": 9,
+      "unit": "PT"
+     },
+     "marginBottom": {
+      "magnitude": 9,
+      "unit": "PT"
+     },
+     "marginRight": {
+      "magnitude": 9,
+      "unit": "PT"
+     },
+     "marginLeft": {
+      "magnitude": 9,
+      "unit": "PT"
+     }
+    }
+   }
+  }
+ },
+ "suggestionsViewMode": "SUGGESTIONS_INLINE"
+}

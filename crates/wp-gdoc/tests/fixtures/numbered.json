@@ -1,0 +1,423 @@
+{
+ "documentId": "1Numbered",
+ "title": "Steps",
+ "revisionId": "ALBJ4LtRev9",
+ "body": {
+  "content": [
+   {
+    "startIndex": 0,
+    "endIndex": 1,
+    "sectionBreak": {
+     "sectionStyle": {
+      "columnSeparatorStyle": "NONE",
+      "contentDirection": "LEFT_TO_RIGHT",
+      "sectionType": "CONTINUOUS"
+     }
+    }
+   },
+   {
+    "startIndex": 1,
+    "endIndex": 7,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 1,
+       "endIndex": 7,
+       "textRun": {
+        "content": "Steps\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "HEADING_2",
+      "direction": "LEFT_TO_RIGHT"
+     }
+    }
+   },
+   {
+    "startIndex": 7,
+    "endIndex": 13,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 7,
+       "endIndex": 13,
+       "textRun": {
+        "content": "First\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT",
+      "indentFirstLine": {
+       "magnitude": 18,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 36,
+       "unit": "PT"
+      }
+     },
+     "bullet": {
+      "listId": "kix.num"
+     }
+    }
+   },
+   {
+    "startIndex": 13,
+    "endIndex": 20,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 13,
+       "endIndex": 20,
+       "textRun": {
+        "content": "Nested\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT",
+      "indentFirstLine": {
+       "magnitude": 54,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 72,
+       "unit": "PT"
+      }
+     },
+     "bullet": {
+      "listId": "kix.num",
+      "nestingLevel": 1
+     }
+    }
+   },
+   {
+    "startIndex": 20,
+    "endIndex": 27,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 20,
+       "endIndex": 27,
+       "textRun": {
+        "content": "Second\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT",
+      "indentFirstLine": {
+       "magnitude": 18,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 36,
+       "unit": "PT"
+      }
+     },
+     "bullet": {
+      "listId": "kix.num"
+     }
+    }
+   },
+   {
+    "startIndex": 27,
+    "endIndex": 47,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 27,
+       "endIndex": 33,
+       "textRun": {
+        "content": "Plain ",
+        "textStyle": {}
+       }
+      },
+      {
+       "startIndex": 33,
+       "endIndex": 41,
+       "textRun": {
+        "content": "inserted",
+        "textStyle": {},
+        "suggestedInsertionIds": [
+         "suggest.1"
+        ]
+       }
+      },
+      {
+       "startIndex": 41,
+       "endIndex": 47,
+       "textRun": {
+        "content": " text\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT"
+     }
+    }
+   },
+   {
+    "startIndex": 47,
+    "endIndex": 62,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 47,
+       "endIndex": 52,
+       "textRun": {
+        "content": "Keep ",
+        "textStyle": {}
+       }
+      },
+      {
+       "startIndex": 52,
+       "endIndex": 56,
+       "textRun": {
+        "content": "gone",
+        "textStyle": {},
+        "suggestedDeletionIds": [
+         "suggest.2"
+        ]
+       }
+      },
+      {
+       "startIndex": 56,
+       "endIndex": 62,
+       "textRun": {
+        "content": " this\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT"
+     }
+    }
+   },
+   {
+    "startIndex": 62,
+    "endIndex": 67,
+    "paragraph": {
+     "elements": [
+      {
+       "startIndex": 62,
+       "endIndex": 67,
+       "textRun": {
+        "content": "Done\n",
+        "textStyle": {}
+       }
+      }
+     ],
+     "paragraphStyle": {
+      "namedStyleType": "NORMAL_TEXT",
+      "direction": "LEFT_TO_RIGHT"
+     }
+    }
+   }
+  ]
+ },
+ "lists": {
+  "kix.num": {
+   "listProperties": {
+    "nestingLevels": [
+     {
+      "bulletAlignment": "START",
+      "glyphType": "DECIMAL",
+      "glyphFormat": "%0.",
+      "indentFirstLine": {
+       "magnitude": 18,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 36,
+       "unit": "PT"
+      },
+      "startNumber": 1
+     },
+     {
+      "bulletAlignment": "START",
+      "glyphType": "ALPHA",
+      "glyphFormat": "%1.",
+      "indentFirstLine": {
+       "magnitude": 54,
+       "unit": "PT"
+      },
+      "indentStart": {
+       "magnitude": 72,
+       "unit": "PT"
+      },
+      "startNumber": 1
+     }
+    ]
+   }
+  }
+ },
+ "namedStyles": {
+  "styles": [
+   {
+    "namedStyleType": "NORMAL_TEXT",
+    "textStyle": {
+     "bold": false,
+     "italic": false,
+     "underline": false,
+     "strikethrough": false,
+     "smallCaps": false,
+     "backgroundColor": {},
+     "foregroundColor": {
+      "color": {
+       "rgbColor": {}
+      }
+     },
+     "fontSize": {
+      "magnitude": 11,
+      "unit": "PT"
+     },
+     "weightedFontFamily": {
+      "fontFamily": "Arial",
+      "weight": 400
+     },
+     "baselineOffset": "NONE"
+    },
+    "paragraphStyle": {
+     "namedStyleType": "NORMAL_TEXT",
+     "alignment": "START",
+     "lineSpacing": 115,
+     "direction": "LEFT_TO_RIGHT",
+     "spacingMode": "COLLAPSE_LISTS",
+     "spaceAbove": {
+      "magnitude": 0,
+      "unit": "PT"
+     },
+     "spaceBelow": {
+      "magnitude": 0,
+      "unit": "PT"
+     },
+     "avoidWidowAndOrphan": true
+    }
+   },
+   {
+    "namedStyleType": "HEADING_1",
+    "textStyle": {
+     "fontSize": {
+      "magnitude": 20,
+      "unit": "PT"
+     }
+    },
+    "paragraphStyle": {
+     "namedStyleType": "NORMAL_TEXT",
+     "direction": "LEFT_TO_RIGHT",
+     "spaceAbove": {
+      "magnitude": 20,
+      "unit": "PT"
+     },
+     "spaceBelow": {
+      "magnitude": 6,
+      "unit": "PT"
+     },
+     "keepLinesTogether": true,
+     "keepWithNext": true
+    }
+   },
+   {
+    "namedStyleType": "HEADING_2",
+    "textStyle": {
+     "fontSize": {
+      "magnitude": 16,
+      "unit": "PT"
+     }
+    },
+    "paragraphStyle": {
+     "namedStyleType": "NORMAL_TEXT",
+     "direction": "LEFT_TO_RIGHT",
+     "spaceAbove": {
+      "magnitude": 18,
+      "unit": "PT"
+     },
+     "spaceBelow": {
+      "magnitude": 6,
+      "unit": "PT"
+     },
+     "keepLinesTogether": true,
+     "keepWithNext": true
+    }
+   },
+   {
+    "namedStyleType": "TITLE",
+    "textStyle": {
+     "fontSize": {
+      "magnitude": 26,
+      "unit": "PT"
+     }
+    },
+    "paragraphStyle": {
+     "namedStyleType": "NORMAL_TEXT",
+     "direction": "LEFT_TO_RIGHT",
+     "spaceAbove": {
+      "magnitude": 0,
+      "unit": "PT"
+     },
+     "spaceBelow": {
+      "magnitude": 3,
+      "unit": "PT"
+     },
+     "keepLinesTogether": true,
+     "keepWithNext": true
+    }
+   }
+  ]
+ },
+ "documentStyle": {
+  "background": {
+   "color": {}
+  },
+  "pageNumberStart": 1,
+  "marginTop": {
+   "magnitude": 72,
+   "unit": "PT"
+  },
+  "marginBottom": {
+   "magnitude": 72,
+   "unit": "PT"
+  },
+  "marginRight": {
+   "magnitude": 72,
+   "unit": "PT"
+  },
+  "marginLeft": {
+   "magnitude": 72,
+   "unit": "PT"
+  },
+  "pageSize": {
+   "height": {
+    "magnitude": 792,
+    "unit": "PT"
+   },
+   "width": {
+    "magnitude": 612,
+    "unit": "PT"
+   }
+  },
+  "marginHeader": {
+   "magnitude": 36,
+   "unit": "PT"
+  },
+  "marginFooter": {
+   "magnitude": 36,
+   "unit": "PT"
+  },
+  "useCustomHeaderFooterMargins": true
+ }
+}

@@ -31,6 +31,10 @@ built and why; §11 is the current status and gap list), `KEYBINDINGS.md`.
 - `crates/wp-md` — Markdown import/export on top of `pulldown-cmark`; builds
   tables and footnotes in the model (it still uses `wp-docx` to read the cells
   of a preserved table block on export).
+- `crates/wp-gdoc` — Google Docs: `read.rs` turns `documents.get` JSON into
+  the model plus a `Baseline`; `write.rs` diffs the edited document against
+  it into `batchUpdate` requests (DESIGN.md §6a). No networking. Fixtures in
+  `tests/fixtures` come from `tools/make_gdoc_fixtures.py`.
 - `crates/wp` — the binary: `app.rs` (state + command execution), `ui.rs`
 
   (rendering), `commands.rs` (registry — every capability is a command),
@@ -53,6 +57,11 @@ built and why; §11 is the current status and gap list), `KEYBINDINGS.md`.
   codes in the item stream; change attributes through `rewrite_attrs`, never
   by splicing codes by hand. Paragraph properties are struct fields shown as
   pseudo-codes in Reveal Codes.
+- **Google Docs saves are diffs.** Never rebuild a Doc through the API;
+  `wp_gdoc::diff` emits only the ranges the user changed, in descending
+  index order, guarded by `requiredRevisionId`. An edit the diff can't
+  express returns an error naming why, and the document stays saveable as
+  `.docx` (after `wp_gdoc::detach`).
 - **Nothing is key-only.** Add a command to `commands.rs` first; keys and the
   palette both resolve to it. Palette completeness is tested.
 - Geometry is twips (`i32`), never floats. Layout is synchronous per keystroke

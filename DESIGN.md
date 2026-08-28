@@ -32,8 +32,11 @@ document into its own model and writes it back from that model, which is
 exactly the lossy round trip principle 1 forbids. We own the container and the
 XML.
 
-No network crate exists in the dependency tree. "No network access" (§8) is
-enforced by construction, not by policy.
+| JSON | `serde_json` | The Google Docs API speaks JSON (§6a) |
+
+No network crate exists in the dependency tree yet. "No network access" (§8)
+is enforced by construction, not by policy; the Google Docs client (§6a.4)
+will add one on the open/save path only.
 
 ---
 
@@ -47,6 +50,8 @@ wp/
 │   │                          layout & pagination, font metrics, plain text
 │   ├── wp-docx/               .docx read/write with opaque preservation
 │   ├── wp-md/                 Markdown import/export (pulldown-cmark)
+│   ├── wp-gdoc/               Google Docs API JSON reader and minimal-edit
+│   │                          batchUpdate writer (§6a)
 │   └── wp/                    the binary: terminal UI, keymaps, commands,
 │                              palette, views, config, autosave
 └── tools/
@@ -325,6 +330,113 @@ deliberately pathological cases. Growing it to that size is what found every
 
 ---
 
+## 6a. Google Docs (`wp-gdoc`)
+
+Google Docs is a third native format, next to `.docx` and Markdown — not a
+`.docx` export. Drive's "export as Word" and "upload as Google Doc" both run
+Google's converter, which drops what it does not model; going through it
+would break principle 1 on every save. The Docs API works on the document
+itself: `documents.get` returns the whole thing as JSON, and
+`documents.batchUpdate` applies *operations* (insert text here, delete this
+range, set these style fields there), addressed by UTF-16 index. `wp-gdoc`
+reads the former and writes the latter. No networking lives in the crate;
+the binary fetches and posts.
+
+### 6a.1 Reading
+
+The JSON is a closed, documented schema, so there is no "unknown XML". Text
+runs become characters with paired codes for the direct `TextStyle` fields
+`wp` models (bold, italic, underline, strikethrough, small caps, size, font,
+colour, background when it is one of Word's highlight colours, baseline
+offset); a `link` becomes the same hyperlink wrapper a Markdown import makes
+(`<w:hyperlink r:id>` + `extra_rels`), so `.docx` and Markdown export see an
+ordinary hyperlink. Paragraph style fields become `ParaProps`; `namedStyleType`
+becomes the style id (`HEADING_2` → `Heading2`); `namedStyles` fill the style
+sheet so layout has real sizes; `documentStyle` sets the page. A `bullet`
+becomes a `ListRef` on a numbering definition created per Docs list id from
+its level-0 glyph. Footnote references become `<w:footnoteReference>` items
+numbered in document order, with the bodies read into `Document::footnotes`.
+Tables with no spans become cell-tagged paragraphs (§3.7) with the grid from
+`tableColumnProperties`; a table with spans, a nested table, a table of
+contents and a section break after the first are preserved blocks.
+Everything else in a paragraph — inline image, equation, person chip, rich
+link, date, auto text, column break, horizontal rule — is a `Code::Opaque`
+whose `xml` is the element's JSON plus its index length. Suggestions
+(`suggestedInsertionIds` / `suggestedDeletionIds`) are wrapped as protected
+`w:ins` / `w:del` tracked changes, which is what they are.
+
+Alongside the `Document`, the reader returns a `Baseline`: the paragraphs
+exactly as read, each with its Docs index range, grouped by container
+(body stretch between tables, table cell, footnote), plus the revision id
+and the list / footnote id maps.
+
+### 6a.2 Writing: the diff
+
+The writer never rebuilds the document. It compares the baseline with the
+document as edited and emits only what changed, so content nobody touched
+produces no request and therefore keeps everything Docs holds for it —
+comments anchored to it, suggestions, chips, named ranges, the fields `wp`
+does not model. Both sides are put through one projection (`project.rs`):
+a paragraph becomes a list of *units* (a character, tab or soft line break
+with its direct formatting; a page break; a footnote reference by Docs id;
+any other element by its JSON), each carrying its UTF-16 length, plus the
+paragraph formatting Docs can hold. Because the baseline is projected from
+the reader's own paragraphs, an untouched paragraph projects identically on
+both sides by construction.
+
+Within each container, paragraphs are aligned by longest common subsequence
+on the full projection, and the gaps paired positionally as modified
+paragraphs; leftover baseline paragraphs are deleted, leftover model
+paragraphs inserted after the nearest surviving paragraph. A modified
+paragraph is diffed again at the unit level (by kind, ignoring style) into
+delete / insert hunks; then its characters are compared unit by unit and
+`updateTextStyle` is sent only for the ranges and fields that differ
+(inserted text gets every modelled field, since Docs gives it its
+neighbour's). Paragraph formatting is an `updateParagraphStyle` with a
+field mask of what changed; bullets are `createParagraphBullets` /
+`deleteParagraphBullets`.
+
+Two Docs rules shape the edit script. A container's final newline cannot be
+deleted, so deleting the last paragraph deletes from the previous
+paragraph's newline instead, and the survivor — which now ends with the
+deleted paragraph's newline, and with it that paragraph's style — is restyled
+in full. And a newline inserted into a paragraph creates a paragraph with
+that paragraph's style and bullets, so every inserted paragraph is set in
+full. Requests are generated in groups keyed by baseline index and emitted
+in descending order, so no request shifts the indexes of the ones after it;
+within a paragraph, text operations come before style operations, whose
+ranges are in the paragraph's post-edit coordinates.
+
+The `batchUpdate` body carries `writeControl.requiredRevisionId` from the
+read, so a save over someone else's concurrent edit is refused by Google
+rather than merged blind; the app then re-reads and asks. Not yet expressible
+as a diff (the writer returns an error naming the reason, and the document
+can still be saved as `.docx`): adding, removing or reshaping a table;
+creating a footnote; moving an image, footnote reference or page break into
+a new paragraph; deleting every paragraph of a cell or footnote.
+
+### 6a.3 What only Docs can hold
+
+`Code::Opaque` items whose `xml` is JSON have no meaning in a `.docx`.
+`wp_gdoc::detach` strips them (returning their labels for the save warning)
+before a Drive-native document is written as `.docx`, Markdown or text;
+hyperlinks, footnotes and tracked changes are ordinary `.docx` shapes and
+stay.
+
+### 6a.4 Privacy and the binary (not yet built)
+
+SPEC §8 says *no network access*. That stays true by default: nothing in
+`wp` opens a socket unless the user opens or saves a Google Doc, and the
+binary's Drive/Docs client will be a blocking `ureq` call on the open/save
+path only — no background sync, no token refresh on a timer. Authentication
+is OAuth 2.0 (loopback flow, scopes `documents` and `drive.file`) against a
+client id the user creates and puts in the config file; the refresh token is
+cached in the state directory. The commands (`Open from Drive`, `Save to
+Drive`, `wp gdoc:<id>` / a Docs URL) go in `commands.rs` like everything
+else.
+
+---
+
 ## 7. The terminal application
 
 ### 7.1 Structure
@@ -397,6 +509,7 @@ clean save or exit.
 | E5 | Embedded metrics from OFL metric-compatible fonts | Reading system fonts at runtime | One binary, works on a bare console with no fonts installed, identical pagination on every machine |
 | E6 | Synchronous layout in v0.1 | Background layout thread | Measured cost is negligible at 500 pages; keep the interface pure so it can move later |
 | E7 | Twips as `i32` | Points as `f32` | Lossless with the file format; no accumulated drift over a long document |
+| E9 | Google Docs as a native format via the Docs API, written as a minimal diff of `batchUpdate` operations (§6a) | Drive's `.docx` export/import; or delete-all-and-reinsert via the API | Both run everything through a converter or a rebuild and lose what `wp` does not model; a diff touches only what the user changed |
 | E8 | Table cells as tagged paragraphs in the flat stream, grid as a property (§3.7) | Nested `Block::Table { rows: Vec<Vec<Vec<Paragraph>>> }` with a path-shaped cursor | Keeps `Pos`, undo, search and the writer unchanged; matches both WordPerfect's stream and `.docx`'s serialisation; structural edits reduce to existing ops |
 
 ---
@@ -459,6 +572,17 @@ Known gaps carried into 0.3: a document that declares WordprocessingML as the
 images become links; right-aligned list labels (`lvlJc="right"`) are placed
 left-aligned; `[List:…]` in Reveal Codes shows the instance id rather than
 the format.
+
+**Google Docs, in progress (2026-08-28).** `wp-gdoc` (§6a) reads
+`documents.get` JSON into the model and turns edits into `batchUpdate`
+requests, tested against recorded fixtures (`tools/make_gdoc_fixtures.py`):
+typing, deleting, bolding, paragraph formatting, bullets, splitting and
+joining paragraphs, appending, table-cell and footnote edits, page breaks,
+UTF-16 surrogates, tabbed documents, suggestions. Not yet: the binary's
+OAuth client and Drive listing (needs a client id, §6a.4), and live
+verification against the API — the request shapes follow the reference, the
+newline/paragraph-style semantics in §6a.2 follow its documentation and
+have not been exercised on a real document yet.
 
 **0.3 Documents, in progress — tables (2026-08-28).** The model of §3.7:
 `.docx` tables read into editable cells and write back verbatim (the full
