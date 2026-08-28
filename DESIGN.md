@@ -372,10 +372,15 @@ Spec §6.2 names `Ctrl+K` as the palette key. In the **modern** map `Ctrl+K`
 is kill-to-end-of-line instead, because the modern map follows emacs / macOS
 readline movement and deletion (`Ctrl+F/B/N/P/A/E/D/H/K/U`, `Alt+F/B/D`),
 which the primary user asked for out of the box. The palette is
-`Ctrl+Shift+P` (VS Code muscle memory), `Cmd+Shift+P`, and `Alt+=`; the
-classic map keeps `Ctrl+K`. A Cmd/Super layer rides on top of the modern map
-for terminals that deliver it via the kitty keyboard protocol; every Cmd
-binding has a Ctrl or F-key twin, so nothing depends on it.
+`Ctrl+Shift+P` (VS Code muscle memory), `Cmd+P`, `Cmd+Shift+P`, and `Alt+=`;
+the classic map keeps `Ctrl+K`. `Cmd+P` earns its place because Ghostty 1.2
+took `Cmd+Shift+P` for its own palette, and `wp` has no Print to collide
+with. On macOS the *advertised* label never picks an `Alt+` binding when the
+command has another: Option is not Alt unless the terminal is configured to
+send it, so `Alt+=` was being shown for a key most Mac users cannot press.
+A Cmd/Super layer rides on top of the modern map for terminals that deliver
+it via the kitty keyboard protocol; every Cmd binding has a Ctrl or F-key
+twin, so nothing depends on it.
 
 ## 11. Status (2026-08-28)
 

@@ -359,6 +359,9 @@ const MAC: &[(&str, &str)] = &[
     ("cmd+]", "indent"),
     ("cmd+[", "outdent"),
     ("cmd+shift+p", "palette"),
+    // Cmd+P too: newer Ghostty keeps Cmd+Shift+P for its own palette, and
+    // there is no Print command to collide with.
+    ("cmd+p", "palette"),
     ("cmd+left", "line-start"),
     ("cmd+right", "line-end"),
     ("cmd+up", "doc-start"),
@@ -429,7 +432,11 @@ impl Keymap {
             let last = l.rsplit('+').next().unwrap_or("");
             last.len() >= 2 && last.starts_with('F') && last[1..].chars().all(|c| c.is_ascii_digit())
         };
-        labels.sort_by_key(|l| (l.starts_with("Cmd+") as u8, matches!(l.as_str(), "F1" | "Esc") as u8, is_fkey(l) as u8, l.len()));
+        // On macOS, Option is not Alt unless the terminal is told to send it
+        // (Ghostty's `macos-option-as-alt`), so an Alt label is the one we are
+        // least sure the user can press. Rank it last where a twin exists.
+        let alt_last = |l: &str| cfg!(target_os = "macos") && l.starts_with("Alt+");
+        labels.sort_by_key(|l| (alt_last(l) as u8, l.starts_with("Cmd+") as u8, matches!(l.as_str(), "F1" | "Esc") as u8, is_fkey(l) as u8, l.len()));
         Some(labels.remove(0))
     }
 

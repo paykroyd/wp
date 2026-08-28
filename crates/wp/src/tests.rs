@@ -247,6 +247,14 @@ fn emacs_and_cmd_keys() {
     assert_eq!(h.app.ed.doc.text(), "");
     assert_eq!(crate::keymap::Key::parse("cmd+shift+z").map(|k| k.label()), Some("Cmd+Ctrl+Shift+Z".replace("Ctrl+", "")));
     assert_eq!(crate::keymap::Key::parse("ctrl++").map(|k| k.label()), Some("Ctrl++".into()));
+    // Cmd+P opens the palette: Ghostty claims Cmd+Shift+P for its own.
+    h.key(KeyCode::Char('p'), KeyModifiers::SUPER);
+    assert!(matches!(h.app.overlay, Overlay::Palette { .. }));
+    h.key(KeyCode::Esc, NONE);
+    // The advertised palette key is one the terminal certainly delivers —
+    // never Alt+= on macOS, where Option is not Alt by default.
+    let label = h.app.keymap.label_for(crate::commands::Cmd::Palette).unwrap();
+    assert_eq!(label, if cfg!(target_os = "macos") { "Ctrl+Shift+P" } else { "Alt+=" });
 }
 
 #[test]

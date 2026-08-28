@@ -204,6 +204,7 @@ Part of the modern map. Delivered only by terminals that report the Cmd key thro
 | `Cmd+]` | Increase Indent | Format ▸ Paragraph |
 | `Cmd+[` | Decrease Indent | Format ▸ Paragraph |
 | `Cmd+Shift+P` | Command Palette | Navigate |
+| `Cmd+P` | Command Palette | Navigate |
 | `Cmd+←` | Start of Line | Navigate |
 | `Cmd+→` | End of Line | Navigate |
 | `Cmd+↑` | Top of Document | Navigate |
