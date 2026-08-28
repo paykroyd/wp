@@ -46,15 +46,20 @@ wp/
 │   ├── wp-core/               document model, codes, styles, editing, undo,
 │   │                          layout & pagination, font metrics, plain text
 │   ├── wp-docx/               .docx read/write with opaque preservation
+│   ├── wp-md/                 Markdown import/export (pulldown-cmark)
 │   └── wp/                    the binary: terminal UI, keymaps, commands,
 │                              palette, views, config, autosave
 └── tools/
-    └── fontgen.py             generates embedded font-metric tables
+    ├── fontgen.py             generates embedded font-metric tables
+    ├── make_corpus.py         generates the round-trip corpus
+    └── gen_keybindings.py     regenerates KEYBINDINGS.md from the keymaps
 ```
 
 `wp-core` has no terminal dependency and no knowledge of `.docx`. Everything in
-it is testable with plain `cargo test` and no TTY. `wp-docx` depends on
-`wp-core` only. The binary depends on both.
+it is testable with plain `cargo test` and no TTY (this includes lists,
+numbering, and search). `wp-docx` depends on `wp-core` only; `wp-md` depends on
+both (it emits table blocks and footnotes in WordprocessingML). The binary
+depends on all three.
 
 ---
 
@@ -233,9 +238,15 @@ handled in the pagination pass by pulling lines back to the next page.
 
 `wp-docx` opens the zip, reads `[Content_Types].xml` and the package
 relationships to find the main part (not assumed to be `word/document.xml`),
-then parses `styles.xml`, `numbering.xml`, `settings.xml`, and the main part
-with a streaming pull parser. Everything it recognises becomes model; every
-element it does not is captured as `Opaque` with its exact bytes. All other zip
+then parses `styles.xml`, `numbering.xml`, `footnotes.xml` (bodies, for
+Markdown export), and the main part with a streaming pull parser. Everything it
+recognises becomes model; every element it does not is captured as `Opaque`
+with its exact bytes and the level it sat at (run, paragraph, or body), so it
+goes back to the same place. Start-tag attributes of `w:p`, `w:r`, and
+`w:sectPr` (revision ids, paragraph ids) are kept as text and re-emitted;
+`w:proofErr` and `w:lastRenderedPageBreak` are kept as hidden hint opaques;
+bookmarks keep their original ids, and any bookmark that is not the plain kind
+(duplicate name, table-column attributes) is kept verbatim. All other zip
 entries are stored untouched as `(name, bytes)` on the `DocxPackage` that
 accompanies the `Document` in memory.
 
@@ -250,11 +261,20 @@ prompt.
 ### 6.3 The round-trip gate
 
 `cargo test -p wp-docx` runs every file in `corpus/` through read → write and
-asserts that the resulting main part is *semantically identical* (canonicalised
-XML, ignoring attribute order and insignificant whitespace) and every other
-entry is *byte-identical*. This test is the release gate named in spec §10.2. It
-is present from the first commit, with an empty corpus, so it is never
-"something we'll add".
+asserts that the resulting main part is *semantically identical* and every
+other entry is *byte-identical*. This test is the release gate named in spec
+§10.2. "Semantically identical" tolerates only what the format itself cannot
+distinguish: attribute order, `xml:space="preserve"`, empty `w:t`, adjacent
+runs with identical properties at the same nesting depth, `w:cr` versus a plain
+`w:br`, the hyphen elements versus their characters, and CDATA. Revision ids,
+paragraph ids, proofing marks, and rendered page-break hints must all survive.
+Bookmarks are compared as a set because a body-level bookmark and one at the
+start of the next paragraph mean the same place.
+
+The corpus (62 files, `tools/make_corpus.py`) spans python-docx output,
+hand-built files that mimic Word 365, Google Docs, and LibreOffice export, and
+deliberately pathological cases. Growing it to that size is what found every
+0.2 fidelity bug.
 
 ---
 
@@ -312,7 +332,7 @@ clean save or exit.
 | Spec release | What this design delivers |
 |---|---|
 | **0.1 Preview** | Model, editing, undo, character/paragraph formatting, styles, draft view with true page boundaries, `.docx` write, basic `.docx` read, plain text, both keymaps, palette, Reveal Codes (the model makes it nearly free, so it comes early) |
-| 0.2 Round-trip | Opaque preservation exhaustively tested against the corpus, lists, find/replace, autosave, Markdown |
+| **0.2 Round-trip** | Corpus of 62 files with a stricter gate and the fixes it forced; lists from `numbering.xml` with real labels and list commands; regex / format / code search with replace preview; Markdown in and out; mouse; OSC 52 clipboard |
 | 0.3 Documents | Tables, sections, headers/footers, page view |
 | 1.0 | Footnotes, TOC, cross-refs, captions, index, images, spelling, macros, tutor |
 
@@ -358,7 +378,35 @@ binding has a Ctrl or F-key twin, so nothing depends on it.
 
 ## 11. Status (2026-08-28)
 
-**0.1 Preview is implemented** against this design. What exists:
+**0.2 Round-trip is implemented.** On top of 0.1:
+
+- `wp-docx`: the fidelity work in §6.1/§6.3 (element levels, start-tag
+  attributes, hints, bookmark ids, verbatim fallbacks), `numbering.xml` read
+  and regenerated only when a list is added, `footnotes.xml` read for export
+  and generated for Markdown imports, relationships and content types added
+  for parts and hyperlinks the document creates, no styles part or `sectPr`
+  invented for files that had none.
+- `wp-core`: `numbering` (definitions, every `numFmt`, per-abstract counters
+  with overrides, level indents merged between style and direct formatting,
+  labels placed in print and draft layout), `search` (regex with captures,
+  smart case / match case / whole word, formatting and style filters, code
+  search, context lines), `Editor::replace_range` as one undo unit.
+- `wp-md`: CommonMark + GFM tables, strikethrough, task lists, footnotes,
+  both directions, with a one-line loss report on export.
+- `wp`: list commands (toggle bullets / numbering, format picker, Tab /
+  Shift+Tab levels, restart, continue, remove; Enter on an empty item ends the
+  list), find prompt option toggles (Alt+R/C/W), palette find commands,
+  replace preview with one-at-a-time mode, `.md` open/save, `--md`, mouse
+  (click, drag, double-click, wheel), bracketed paste, OSC 52 copy.
+
+Known gaps carried into 0.3: a document that declares WordprocessingML as the
+*default* namespace (no `w:` prefix) opens as preserved blocks only; Markdown
+tables import as preserved table blocks until tables are editable; Markdown
+images become links; right-aligned list labels (`lvlJc="right"`) are placed
+left-aligned; `[List:…]` in Reveal Codes shows the instance id rather than
+the format.
+
+**0.1 Preview** provided:
 
 - `wp-core`: model, paired-code attribute rewriting, invertible ops with
   word-grouped undo, 16-entry cut ring, print layout with embedded metrics for
@@ -386,18 +434,12 @@ Measured on a 330-page, 142 k-word `.docx`: cold open with full pagination
 
 **Not yet (by milestone):**
 
-- 0.2: exhaustive corpus (currently 3 files, target ~60), list rendering from
-  `numbering.xml` (lists round-trip but draft view shows a generic bullet),
-  regex / format / code search, replace preview, Markdown, OSC 52 system
-  clipboard, mouse.
 - 0.3: page view (the command exists and toggles a status indicator only),
   tables as editable objects, headers/footers, multiple sections.
 - 1.0: footnotes, TOC, cross-references, captions, index, images, spelling,
   macros, tutorial.
 
-**Known fidelity gaps** to fix before 0.2 ships: `w:p` and `w:sectPr` element
-attributes (`w:rsid*`, `w14:paraId`) are dropped on write — Word regenerates
-them, and the canonical comparison ignores them, but a byte-diff will show
-them; `w:lastRenderedPageBreak` and `w:proofErr` are dropped for the same
-reason; bookmarks that sat between paragraphs at body level are re-emitted at
-the start of the following paragraph.
+The 0.1 fidelity gaps (dropped rsids and paragraph ids, dropped
+`lastRenderedPageBreak` / `proofErr`, body-level bookmarks moved into the next
+paragraph) are closed in 0.2; see §6.1.
+

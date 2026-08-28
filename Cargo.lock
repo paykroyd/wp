@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "wp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "wp-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "regex",
  "serde",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "wp-docx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "quick-xml",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "wp-md"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pulldown-cmark",
  "wp-core",

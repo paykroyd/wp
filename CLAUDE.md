@@ -26,7 +26,10 @@ built and why; §11 is the current status and gap list), `KEYBINDINGS.md`.
 - `crates/wp-docx` — `.docx` reader/writer. `tests/roundtrip.rs` is the
   **release gate**: every file in `corpus/` must round-trip with the main part
   semantically identical and every other part byte-identical.
+- `crates/wp-md` — Markdown import/export on top of `pulldown-cmark`; emits
+  table blocks and footnotes as WordprocessingML, so it depends on `wp-docx`.
 - `crates/wp` — the binary: `app.rs` (state + command execution), `ui.rs`
+
   (rendering), `commands.rs` (registry — every capability is a command),
   `keymap.rs` (classic / modern / Cmd tables), `tests.rs` (headless UI tests).
 
