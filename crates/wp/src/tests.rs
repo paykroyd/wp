@@ -484,3 +484,77 @@ fn mouse_click_drag_and_wheel() {
     h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), 1, 0));
     assert_eq!(h.app.ed.cursor, wp_core::Pos::new(1, 11));
 }
+
+#[test]
+fn open_dialog_browses_filters_and_opens() {
+    let dir = corpus("");
+    if !corpus("gen-report.docx").exists() {
+        return;
+    }
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.browse(&dir, false);
+    let s = h.screen();
+    assert!(s.contains("Open —"), "{}", s);
+    assert!(s.contains("parent directory"), "{}", s);
+    // Sorted, one screenful at a time — the first rows are the earliest names.
+    assert!(s.contains("gen-breaks.docx"), "{}", s);
+
+    // Typing narrows the list; Tab completes to the shared prefix.
+    h.type_str("gen-r");
+    h.key(KeyCode::Tab, NONE);
+    match &h.app.overlay {
+        Overlay::Browse { filter, .. } => assert!(filter.starts_with("gen-report"), "filter = {}", filter),
+        o => panic!("{:?}", o),
+    }
+    let s = h.screen();
+    assert!(s.contains("gen-report.docx"), "{}", s);
+    assert!(!s.contains("attr-bold"), "filtered out: {}", s);
+
+    // Enter on the highlighted row opens it.
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(h.app.overlay, Overlay::None));
+    assert_eq!(h.app.path, std::fs::canonicalize(corpus("gen-report.docx")).ok());
+    assert!(h.screen().contains("Quarterly Report"));
+}
+
+#[test]
+fn open_dialog_navigates_by_arrows_and_typed_paths() {
+    let dir = corpus("");
+    if !dir.exists() {
+        return;
+    }
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.browse(&dir, false);
+    // Left goes to the parent, which lists the corpus directory again.
+    h.key(KeyCode::Left, NONE);
+    let parent = match &h.app.overlay {
+        Overlay::Browse { dir, .. } => dir.clone(),
+        o => panic!("{:?}", o),
+    };
+    assert!(parent.ends_with("wp"), "{}", parent.display());
+    assert!(h.screen().contains("corpus/"), "{}", h.screen());
+
+    // Typing a path with a slash hops to that directory and keeps the tail.
+    h.type_str("corpus/gen");
+    match &h.app.overlay {
+        Overlay::Browse { dir, filter, .. } => {
+            assert!(dir.ends_with("corpus"), "{}", dir.display());
+            assert_eq!(filter, "gen");
+        }
+        o => panic!("{:?}", o),
+    }
+
+    // Non-documents are hidden until Alt+A, and dot-files until asked for.
+    h.key(KeyCode::Char('u'), CTRL);
+    let docs = h.screen();
+    assert!(!docs.contains("make_corpus"), "{}", docs);
+    h.key(KeyCode::Left, NONE);
+    h.key(KeyCode::Char('a'), ALT);
+    assert!(h.screen().contains("Cargo.toml"), "{}", h.screen());
+
+    // Esc closes without touching the document.
+    h.key(KeyCode::Esc, NONE);
+    assert!(matches!(h.app.overlay, Overlay::None));
+    assert!(h.app.path.is_none());
+}
+

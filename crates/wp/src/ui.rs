@@ -602,6 +602,22 @@ fn truncate(s: &str, w: usize) -> String {
     out
 }
 
+/// Like `truncate`, but keeps the end — a path's own name matters more than the
+/// root it hangs off.
+fn tail(s: &str, w: usize) -> String {
+    if s.width() <= w {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for c in s.chars().rev() {
+        if out.width() + 2 > w {
+            break;
+        }
+        out.insert(0, c);
+    }
+    format!("…{}", out)
+}
+
 fn draw_legend(f: &mut Frame, app: &mut App, area: Rect, caps: Caps) {
     let mods = ["Ctrl", "Alt", "Shift", ""];
     let colw = (area.width as usize / 12).max(6);
@@ -857,6 +873,51 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             }
             f.render_widget(RParagraph::new(lines), Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2)));
         }
+        Overlay::Browse { dir, entries, selected, filter, all } => {
+            let rows = crate::app::browse_rows(&entries, &filter, all);
+            let w = area.width.saturating_sub(4).min(96).max(34);
+            let n = rows.len().clamp(1, crate::app::BROWSE_ROWS) as u16;
+            let h = n + 4;
+            let x = (area.width.saturating_sub(w)) / 2;
+            let r = Rect::new(x, 1.min(area.height.saturating_sub(h)), w, h.min(area.height));
+            f.render_widget(Clear, r);
+            let title = format!("Open — {}", dir.display());
+            f.render_widget(boxed(&tail(&title, w.saturating_sub(4) as usize)), r);
+            let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
+            let prompt = Line::from(vec![Span::styled("name: ", Style::default().fg(Color::DarkGray)), Span::raw(filter.clone())]);
+            f.render_widget(RParagraph::new(prompt), Rect::new(inner.x, inner.y, inner.width, 1));
+            f.set_cursor_position((inner.x + 6 + filter.width() as u16, inner.y));
+            let hint = if all { "Enter open · ←→ up/into · Tab complete · Alt+A documents only" } else { "Enter open · ←→ up/into · Tab complete · Alt+A all files" };
+            f.render_widget(RParagraph::new(Line::from(Span::styled(truncate(hint, inner.width as usize), Style::default().fg(Color::DarkGray)))), Rect::new(inner.x, inner.y + 1, inner.width, 1));
+            let sel_i = selected.min(rows.len().saturating_sub(1));
+            let first = sel_i.saturating_sub(crate::app::BROWSE_ROWS - 1);
+            let mut lines = Vec::new();
+            for (i, e) in rows.iter().enumerate().skip(first).take(crate::app::BROWSE_ROWS) {
+                let mut style = Style::default();
+                if i == sel_i {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                let name = if e.is_dir { format!("{}/", e.name) } else { e.name.clone() };
+                let name = truncate(&name, (inner.width as usize).saturating_sub(e.detail.width() + 6));
+                let pad = (inner.width as usize).saturating_sub(2 + name.width() + e.detail.width() + 2);
+                let name_style = if e.is_dir && caps.colors {
+                    style.fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else if !e.is_doc && !e.is_dir {
+                    style.fg(Color::DarkGray)
+                } else {
+                    style
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {}", name), name_style),
+                    Span::styled(" ".repeat(pad), style),
+                    Span::styled(format!("{}  ", e.detail), style.fg(Color::DarkGray)),
+                ]));
+            }
+            if rows.is_empty() {
+                lines.push(Line::from(Span::styled("  Nothing here matches", Style::default().fg(Color::DarkGray))));
+            }
+            f.render_widget(RParagraph::new(lines), Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2)));
+        }
         Overlay::Confirm { question, .. } => {
             let y = area.height.saturating_sub(2);
             let r = Rect::new(0, y, area.width, 1);
@@ -947,6 +1008,8 @@ fn help_lines(app: &App) -> Vec<String> {
         format!("  {:<14} Styles    {:<14} Page break  {:<14} Word count", k(ApplyStyle), k(PageBreak), k(WordCount)),
         String::new(),
         "  Palette prefixes:  @ heading   # page   / find   ? help".into(),
+        "  Open dialog: type to filter, Tab completes, ←/→ leave/enter a folder,".into(),
+        "  type a path with / to jump, Alt+A lists every file, not just documents.".into(),
         "  Reveal Codes: ←/→ step over codes; Del/Backspace removes a code and its pair;".into(),
         "  paragraph codes ([Style:], [Just:], [L Ind:]) sit at the paragraph start.".into(),
         format!("  Config: {}", crate::config::config_path().display()),

@@ -287,7 +287,8 @@ App
 ├── Editor            document + cursor + selection + undo + layout caches
 ├── Commands          registry: id, title, category, handler
 ├── Keymap            two tables (classic, modern); modern includes classic F-keys
-├── Views             draft, page, reveal-codes pane, palette, help, prompts
+├── Views             draft, page, reveal-codes pane, palette, open dialog,
+│                     help, prompts
 └── Status            filename, dirty flag, Doc/Pg/Ln/Pos, transient indicators
 ```
 
@@ -422,8 +423,10 @@ the format.
   with `w:ins`/`w:del`, comments, fields, hyperlinks, SDTs, and a table).
 - `wp`: draft view with true page rules and paragraph-spacing gaps, status
   block, Reveal Codes pane with editable codes and paragraph pseudo-codes,
-  command palette with `> @ # / ?` modes and key labels, both keymaps with the
-  classic F-key layer, rebinding from config, incremental find, replace-all,
+  command palette with `> @ # / ?` modes and key labels, an Open dialog that
+  browses directories (type to filter, Tab to complete, `/` to jump to a typed
+  path), both keymaps with the classic F-key layer, rebinding from config,
+  incremental find, replace-all,
   go-to page/heading/bookmark, style browser with inheritance and overrides at
   the cursor, character and paragraph formatting commands, page setup, autosave
   and crash recovery, first-run keyboard prompt, F-key legend, help,

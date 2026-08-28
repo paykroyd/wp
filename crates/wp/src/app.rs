@@ -28,7 +28,6 @@ pub enum View {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PromptKind {
-    Open,
     SaveAs(Format),
     Find { backward: bool },
     FindStyle,
@@ -72,12 +71,27 @@ pub struct ListItem {
     pub value: String,
 }
 
+/// One row in the Open dialog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileEntry {
+    pub name: String,
+    pub is_dir: bool,
+    /// A format wp opens as a document; anything else is read as plain text.
+    pub is_doc: bool,
+    /// Size and modified date, shown greyed to the right.
+    pub detail: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Overlay {
     None,
     Palette { input: String, selected: usize },
     Prompt { kind: PromptKind, label: String, input: String },
     List { title: String, items: Vec<ListItem>, selected: usize, action: ListAction, filter: String },
+    /// The Open dialog: a browsable listing of `dir`. `filter` narrows the rows
+    /// as you type; typing a `/` navigates instead. `all` shows every file, not
+    /// just the ones wp opens as documents.
+    Browse { dir: PathBuf, entries: Vec<FileEntry>, selected: usize, filter: String, all: bool },
     Confirm { question: String, action: ConfirmAction },
     Help,
     Message { title: String, lines: Vec<String> },
@@ -294,8 +308,10 @@ impl App {
             Overlay::Prompt { input, .. } => input.push_str(s.lines().next().unwrap_or("")),
             Overlay::Palette { input, .. } => input.push_str(s.lines().next().unwrap_or("")),
             Overlay::List { filter, .. } => filter.push_str(s.lines().next().unwrap_or("")),
+            Overlay::Browse { filter, .. } => filter.push_str(s.lines().next().unwrap_or("")),
             _ => {}
         }
+        self.browse_retarget();
     }
 
     pub fn title(&self) -> String {
@@ -356,6 +372,51 @@ impl App {
         self.needs_redraw = true;
         self.ed.set_cols(self.doc_cols());
         Ok(())
+    }
+
+    /// Show the Open dialog listing `dir`. Keeps the current overlay (with a
+    /// message) if the directory can't be read.
+    pub fn browse(&mut self, dir: &Path, all: bool) {
+        let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        match read_entries(&dir) {
+            Ok(entries) => self.overlay = Overlay::Browse { dir, entries, selected: 0, filter: String::new(), all },
+            Err(e) => self.message(format!("Could not read {}: {}", dir.display(), e)),
+        }
+        self.needs_redraw = true;
+    }
+
+    /// If the Open dialog's filter names a directory in everything up to its
+    /// last `/`, move there and keep the rest as the filter. False when no such
+    /// directory exists, leaving the overlay untouched.
+    fn browse_retarget(&mut self) -> bool {
+        let Overlay::Browse { dir, filter, all, .. } = &self.overlay else { return false };
+        let Some(i) = filter.rfind('/') else { return false };
+        let (head, tail) = (filter[..i + 1].to_string(), filter[i + 1..].to_string());
+        let target = if head.starts_with('/') || head.starts_with('~') { expand_path(&head) } else { dir.join(&head) };
+        if !target.is_dir() {
+            return false;
+        }
+        let all = *all;
+        self.browse(&target, all);
+        if let Overlay::Browse { filter, .. } = &mut self.overlay {
+            *filter = tail;
+        }
+        true
+    }
+
+    /// Open `path`, confirming first if the current document has unsaved edits.
+    /// On failure the Open dialog stays up so another file can be picked.
+    fn open_file(&mut self, path: &Path, fallback: Option<(&Path, bool)>) {
+        if self.ed.dirty {
+            self.overlay = Overlay::Confirm { question: "Discard unsaved changes and open another file? (y/n)".into(), action: ConfirmAction::OpenDiscard(path.to_path_buf()) };
+        } else if let Err(e) = self.open_path(path) {
+            self.message(format!("Could not open {}: {}", path.display(), e));
+            if let Some((dir, all)) = fallback {
+                self.browse(dir, all);
+            }
+        } else {
+            self.check_recovery();
+        }
     }
 
     pub fn save_to(&mut self, path: &Path, format: Format) -> anyhow::Result<()> {
@@ -591,8 +652,8 @@ impl App {
                 }
             }
             Cmd::Open => {
-                let dir = self.path.as_ref().and_then(|p| p.parent()).map(|d| format!("{}/", d.display())).unwrap_or_default();
-                self.prompt(PromptKind::Open, "Open: ", &dir);
+                let dir = self.path.as_ref().and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()).map(|d| d.to_path_buf()).unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+                self.browse(&dir, false);
             }
             Cmd::Save => self.save(),
             Cmd::SaveAs => {
@@ -1786,8 +1847,12 @@ impl App {
                     self.overlay = Overlay::Prompt { kind, label, input };
                 }
                 KeyCode::Tab => {
-                    if matches!(kind, PromptKind::Open | PromptKind::SaveAs(_)) {
-                        input = complete_path(&input);
+                    if matches!(kind, PromptKind::SaveAs(_)) {
+                        let (completed, rest) = complete_path(&input);
+                        input = completed;
+                        if let Some(names) = rest {
+                            self.message(format!("{} matches: {}", names.len(), names.join("  ")));
+                        }
                     }
                     self.overlay = Overlay::Prompt { kind, label, input };
                 }
@@ -1823,6 +1888,80 @@ impl App {
                         self.overlay = Overlay::List { title, items, selected: 0, action, filter };
                     }
                     _ => self.overlay = Overlay::List { title, items, selected, action, filter },
+                }
+            }
+            Overlay::Browse { dir, entries, mut selected, mut filter, mut all } => {
+                let rows = browse_rows(&entries, &filter, all);
+                let n = rows.len();
+                let chosen = rows.get(selected.min(n.saturating_sub(1))).map(|e| (*e).clone());
+                // Completion is prefix-based even though the filter is fuzzy:
+                // a shared prefix is the only thing Tab can meaningfully extend.
+                let lower = filter.to_lowercase();
+                let pfx: Vec<&FileEntry> = rows.iter().copied().filter(|e| e.name.to_lowercase().starts_with(&lower)).collect();
+                let cand = if pfx.is_empty() { &rows } else { &pfx };
+                let tab_dir = (cand.len() == 1 && cand[0].is_dir).then(|| cand[0].name.clone());
+                let tab_lcp = common_prefix(cand.iter().map(|e| e.name.as_str())).filter(|l| l.len() > filter.len() && l.to_lowercase().starts_with(&lower));
+                match ev.code {
+                    KeyCode::Esc => {}
+                    KeyCode::Enter | KeyCode::Right => match chosen {
+                        Some(e) if e.is_dir => self.browse(&dir.join(&e.name), all),
+                        Some(e) if ev.code == KeyCode::Enter => self.open_file(&dir.join(&e.name), Some((&dir, all))),
+                        // Right on a file, or Enter with nothing listed, keeps the dialog.
+                        _ => self.overlay = Overlay::Browse { dir, entries, selected, filter, all },
+                    },
+                    KeyCode::Left => self.browse(&dir.join(".."), all),
+                    KeyCode::Backspace if filter.is_empty() => self.browse(&dir.join(".."), all),
+                    KeyCode::Tab => match tab_dir {
+                        // One candidate left: Tab walks into it, as a shell would.
+                        Some(name) => self.browse(&dir.join(name), all),
+                        None => {
+                            if let Some(lcp) = tab_lcp {
+                                filter = lcp;
+                                selected = 0;
+                            }
+                            self.overlay = Overlay::Browse { dir, entries, selected, filter, all };
+                        }
+                    },
+                    KeyCode::Up => {
+                        selected = selected.saturating_sub(1);
+                        self.overlay = Overlay::Browse { dir, entries, selected, filter, all };
+                    }
+                    KeyCode::Down => {
+                        selected = (selected + 1).min(n.saturating_sub(1));
+                        self.overlay = Overlay::Browse { dir, entries, selected, filter, all };
+                    }
+                    KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+                        selected = match ev.code {
+                            KeyCode::PageUp => selected.saturating_sub(BROWSE_ROWS),
+                            KeyCode::PageDown => (selected + BROWSE_ROWS).min(n.saturating_sub(1)),
+                            KeyCode::Home => 0,
+                            _ => n.saturating_sub(1),
+                        };
+                        self.overlay = Overlay::Browse { dir, entries, selected, filter, all };
+                    }
+                    KeyCode::Backspace => {
+                        filter.pop();
+                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all };
+                    }
+                    KeyCode::Char('u') if key.ctrl => {
+                        filter.clear();
+                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all };
+                    }
+                    KeyCode::Char('a') if key.alt => {
+                        all = !all;
+                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all };
+                    }
+                    KeyCode::Char(c) if !key.ctrl && !key.alt && !key.sup => {
+                        filter.push(c);
+                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all };
+                        // A slash means the typed text is a path, not a filter.
+                        if c == '/' && !self.browse_retarget() {
+                            if let Overlay::Browse { filter, .. } = &mut self.overlay {
+                                filter.pop(); // nowhere to go; drop the slash
+                            }
+                        }
+                    }
+                    _ => self.overlay = Overlay::Browse { dir, entries, selected, filter, all },
                 }
             }
             Overlay::Confirm { question, action } => match ev.code {
@@ -2022,19 +2161,6 @@ impl App {
     fn finish_prompt(&mut self, kind: PromptKind, input: String) {
         let v = input.trim().to_string();
         match kind {
-            PromptKind::Open => {
-                if v.is_empty() {
-                    return;
-                }
-                let p = expand_path(&v);
-                if self.ed.dirty {
-                    self.overlay = Overlay::Confirm { question: "Discard unsaved changes and open another file? (y/n)".into(), action: ConfirmAction::OpenDiscard(p) };
-                } else if let Err(e) = self.open_path(&p) {
-                    self.message(format!("Could not open {}: {}", p.display(), e));
-                } else {
-                    self.check_recovery();
-                }
-            }
             PromptKind::SaveAs(fmt) => {
                 if v.is_empty() {
                     return;
@@ -2250,7 +2376,89 @@ pub fn expand_path(s: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn complete_path(input: &str) -> String {
+/// How many rows the Open dialog shows at once (also the PgUp/PgDn step).
+pub const BROWSE_ROWS: usize = 16;
+
+/// Documents wp opens with full fidelity; everything else is read as text.
+fn is_doc(name: &str) -> bool {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    matches!(ext.as_str(), "docx" | "md" | "markdown" | "txt" | "text")
+}
+
+/// Directories first, then files, each sorted case-insensitively.
+fn read_entries(dir: &Path) -> std::io::Result<Vec<FileEntry>> {
+    let (mut dirs, mut files) = (Vec::new(), Vec::new());
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        // Follow symlinks, so a linked directory browses as one.
+        let md = std::fs::metadata(e.path()).or_else(|_| e.metadata())?;
+        if md.is_dir() {
+            dirs.push(FileEntry { name, is_dir: true, is_doc: false, detail: String::new() });
+        } else {
+            let when = md.modified().ok().map(stamp).unwrap_or_default();
+            files.push(FileEntry { is_doc: is_doc(&name), name, is_dir: false, detail: format!("{}  {}", size(md.len()), when) });
+        }
+    }
+    let key = |e: &FileEntry| e.name.to_lowercase();
+    dirs.sort_by_key(key);
+    files.sort_by_key(key);
+    let mut out = Vec::with_capacity(dirs.len() + files.len() + 1);
+    if dir.parent().is_some() {
+        out.push(FileEntry { name: "..".into(), is_dir: true, is_doc: false, detail: "parent directory".into() });
+    }
+    out.append(&mut dirs);
+    out.append(&mut files);
+    Ok(out)
+}
+
+/// The rows the Open dialog shows: dot-files only when asked for by name or by
+/// `all`, non-document files only when `all`.
+pub fn browse_rows<'a>(entries: &'a [FileEntry], filter: &str, all: bool) -> Vec<&'a FileEntry> {
+    let hidden_ok = all || filter.starts_with('.');
+    entries
+        .iter()
+        .filter(|e| {
+            let hidden = e.name.starts_with('.') && e.name != "..";
+            (hidden_ok || !hidden) && (all || e.is_dir || e.is_doc) && subsequence(filter, &e.name)
+        })
+        .collect()
+}
+
+/// Case-insensitive subsequence: the filter's letters in order. Deliberately
+/// not `palette::score`, whose one-typo tolerance would let `gen-l` match every
+/// `gen-` file — in a file list a near-miss should narrow, not widen.
+fn subsequence(filter: &str, name: &str) -> bool {
+    let mut n = name.chars().flat_map(|c| c.to_lowercase());
+    filter.chars().flat_map(|c| c.to_lowercase()).all(|c| n.any(|x| x == c))
+}
+
+fn common_prefix<'a>(mut names: impl Iterator<Item = &'a str>) -> Option<String> {
+    let mut lcp: String = names.next()?.to_string();
+    for n in names {
+        while !n.to_lowercase().starts_with(&lcp.to_lowercase()) {
+            lcp.pop();
+        }
+    }
+    Some(lcp)
+}
+
+fn size(n: u64) -> String {
+    match n {
+        0..=1023 => format!("{} B", n),
+        1024..=1048575 => format!("{:.0} KB", n as f64 / 1024.0),
+        _ => format!("{:.1} MB", n as f64 / 1048576.0),
+    }
+}
+
+fn stamp(t: std::time::SystemTime) -> String {
+    let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let (y, m, d) = civil(secs.div_euclid(86400));
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// Returns `(input, Some(candidates))` when the completion is ambiguous, so the
+/// caller can show what a bare Tab could not decide between.
+fn complete_path(input: &str) -> (String, Option<Vec<String>>) {
     let p = expand_path(input);
     let (dir, prefix) = if input.ends_with('/') {
         (p.clone(), String::new())
@@ -2258,7 +2466,7 @@ fn complete_path(input: &str) -> String {
         (p.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")), p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())
     };
     let dir_read = if dir.as_os_str().is_empty() { PathBuf::from(".") } else { dir.clone() };
-    let Ok(rd) = std::fs::read_dir(&dir_read) else { return input.to_string() };
+    let Ok(rd) = std::fs::read_dir(&dir_read) else { return (input.to_string(), None) };
     let mut matches: Vec<String> = rd
         .flatten()
         .filter_map(|e| {
@@ -2273,7 +2481,7 @@ fn complete_path(input: &str) -> String {
         .collect();
     matches.sort();
     if matches.is_empty() {
-        return input.to_string();
+        return (input.to_string(), None);
     }
     // Longest common prefix.
     let mut lcp = matches[0].clone();
@@ -2283,13 +2491,19 @@ fn complete_path(input: &str) -> String {
         }
     }
     let base = if input.ends_with('/') { input.to_string() } else { input[..input.len() - prefix.len()].to_string() };
-    format!("{}{}", base, lcp)
+    let ambiguous = (matches.len() > 1 && lcp.len() == prefix.len()).then(|| matches.into_iter().take(12).collect());
+    (format!("{}{}", base, lcp), ambiguous)
 }
 
 fn today() -> String {
-    // Civil date from the system clock without a date crate.
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
-    let days = secs.div_euclid(86400);
+    let (y, m, d) = civil(secs.div_euclid(86400));
+    let months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    format!("{} {}, {}", months[(m - 1) as usize], d, y)
+}
+
+/// Civil (y, m, d) from a Unix day number, without a date crate.
+fn civil(days: i64) -> (i64, i64, i64) {
     let z = days + 719468;
     let era = z.div_euclid(146097);
     let doe = z - era * 146097;
@@ -2300,8 +2514,7 @@ fn today() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    let months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-    format!("{} {}, {}", months[(m - 1) as usize], d, y)
+    (y, m, d)
 }
 
 pub fn inches(t: Twips) -> String {
