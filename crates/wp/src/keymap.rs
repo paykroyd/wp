@@ -198,6 +198,7 @@ const COMMON: &[(&str, &str)] = &[
     ("delete", "delete"),
     ("enter", "enter"),
     ("tab", "tab"),
+    ("shift+tab", "list-outdent"),
     ("insert", "typeover"),
     ("alt+f3", "reveal-codes"),
     ("f11", "reveal-codes"),
@@ -313,6 +314,9 @@ const MODERN: &[(&str, &str)] = &[
     ("alt+]", "indent"),
     ("alt+[", "outdent"),
     ("ctrl+t", "hanging-indent"),
+    ("ctrl+shift+l", "list-bullet"),
+    ("ctrl+shift+o", "list-number"),
+
     ("ctrl+1", "spacing-single"),
     ("ctrl+5", "spacing-1.5"),
     ("ctrl+2", "spacing-double"),

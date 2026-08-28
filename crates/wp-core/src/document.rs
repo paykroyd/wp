@@ -2,6 +2,7 @@
 //! operations that resolve formatting from the item stream.
 
 use crate::model::*;
+use crate::numbering::Numbering;
 use crate::style::StyleSheet;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -11,6 +12,7 @@ pub struct Document {
     pub paragraphs: Vec<Paragraph>,
     pub styles: StyleSheet,
     pub section: SectionProps,
+    pub numbering: Numbering,
 }
 
 impl Default for Document {
@@ -48,6 +50,7 @@ impl Document {
             paragraphs: vec![Paragraph::new()],
             styles: StyleSheet::builtin(),
             section: SectionProps::default(),
+            numbering: Numbering::default(),
         }
     }
 
@@ -112,11 +115,24 @@ impl Document {
         Pos::new(para, p.idx.min(self.paragraphs[para].items.len()))
     }
 
-    /// Effective paragraph properties: defaults ← style chain ← direct.
+    /// Effective paragraph properties: defaults ← style chain ← list level ← direct.
     pub fn para_props(&self, para: usize) -> ParaProps {
         let p = &self.paragraphs[para].props;
-        self.styles.resolve_para_style(p.style.as_deref()).merge(p)
+        let from_style = self.styles.resolve_para_style(p.style.as_deref());
+        let list = p.list.or(from_style.list).filter(|l| l.num_id > 0);
+        match list.and_then(|l| self.numbering.level(l.num_id, l.level)) {
+            Some(level) if !p.raw_block => {
+                // Only the level's indent and tabs apply to the paragraph; the
+                // rest of its pPr is for the label.
+                let lvl = ParaProps { indent_left: level.para.indent_left, first_line: level.para.first_line, hanging: level.para.hanging, tabs: level.para.tabs.clone(), ..Default::default() };
+                let mut merged = from_style.merge(&lvl).merge(p);
+                merged.raw_ppr = p.raw_ppr.clone();
+                merged
+            }
+            _ => from_style.merge(p),
+        }
     }
+
 
     /// The run properties a character with no direct attributes would have
     /// in this paragraph.

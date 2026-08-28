@@ -383,6 +383,8 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
                 let pp = app.ed.doc.para_props(pi);
                 let sl = app.ed.screen_lines(pi)[*line].clone();
                 let nlines = app.ed.layout_screen_len(pi);
+                let label = if *line == 0 { app.ed.list_label(pi) } else { None };
+                let cols = app.ed.cols();
                 let runs = app.ed.doc.runs(pi);
                 let p = &app.ed.doc.paragraphs[pi];
                 // Alignment offset.
@@ -394,22 +396,24 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
                     _ => 0,
                 };
                 let mut spans: Vec<Span> = Vec::new();
-                let mut x: u16 = left_margin + sl.indent + align_off;
-                let mut prefix = String::new();
-                if *line == 0 {
-                    if let Some(l) = pp.list {
-                        prefix = if l.level % 2 == 0 { "• ".into() } else { "◦ ".into() };
+                let x: u16 = left_margin + sl.indent + align_off;
+                match label {
+                    Some(l) if !l.text.is_empty() => {
+                        let first = layout::screen_first_indent(&pp, cols);
+
+                        let lx = left_margin + first + align_off;
+                        let mut text = l.text.clone();
                         if caps.ascii {
-                            prefix = "* ".into();
+                            text = text.chars().map(|c| if c.is_ascii() { c } else { '*' }).collect();
                         }
+                        let props = app.ed.doc.base_run_props(pi).merge(&l.run);
+                        spans.push(Span::raw(" ".repeat(lx.min(x) as usize)));
+                        spans.push(Span::styled(text.clone(), style_for(&props, caps)));
+                        spans.push(Span::raw(" ".repeat((x as usize).saturating_sub(lx as usize + text.width()))));
                     }
+                    _ => spans.push(Span::raw(" ".repeat(x as usize))),
                 }
-                let base_x = x;
-                spans.push(Span::raw(" ".repeat(base_x as usize)));
-                if !prefix.is_empty() {
-                    spans.push(Span::styled(prefix.clone(), Style::default().fg(Color::DarkGray)));
-                    x += prefix.width() as u16;
-                }
+
                 let mut ri = 0;
                 let mut cur_style: Option<Style> = None;
                 let mut buf = String::new();

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use wp_core::model::*;
 use wp_core::reveal::{self, ParaCode};
-use wp_core::{Document, Editor, Fragment};
+use wp_core::{Document, Editor, Fragment, ListKind};
 use wp_docx::{DocxPackage, Warning};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +58,7 @@ pub enum ListAction {
     GoToBookmark,
     FontColor,
     HighlightColor,
+    ListFormat,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -758,9 +759,58 @@ impl App {
             }
             Cmd::InsertTab => {
                 if self.guard_edit() {
-                    self.ed.insert_code(Code::Tab);
+                    // Tab at the start of a list item demotes it, as in Word.
+                    let c = self.ed.cursor;
+                    let at_start = self.ed.doc.paragraphs[c.para].items[..c.idx].iter().all(|i| i.is_code());
+                    if at_start && !self.ed.has_selection() && self.ed.doc.list_ref(c.para).is_some() {
+                        self.list_level(1);
+                    } else {
+                        self.ed.insert_code(Code::Tab);
+                    }
                 }
             }
+            Cmd::ListBullet => self.toggle_list(ListKind::Bullet),
+            Cmd::ListNumber => self.toggle_list(ListKind::Decimal),
+            Cmd::ListFormat => {
+                let items: Vec<ListItem> = ListKind::all()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, k)| ListItem { label: k.title().to_string(), detail: String::new(), value: i.to_string() })
+                    .collect();
+                self.list("List numbering format", items, ListAction::ListFormat);
+            }
+            Cmd::ListIndent => self.list_level(1),
+            Cmd::ListOutdent => {
+                if self.ed.doc.list_ref(self.ed.cursor.para).is_some() {
+                    self.list_level(-1);
+                } else {
+                    self.exec(Cmd::Outdent);
+                }
+            }
+            Cmd::ListRestart => {
+                let para = self.ed.cursor.para;
+                match self.ed.doc.list_ref(para) {
+                    Some(r) => {
+                        if let Some(id) = self.ed.doc.numbering.restart(r.num_id, 1) {
+                            self.ed.dirty = true;
+                            self.para(move |p| p.list = Some(ListRef { num_id: id, level: r.level }));
+                        }
+                    }
+                    None => self.message("Not in a list"),
+                }
+            }
+            Cmd::ListContinue => {
+                let para = self.ed.cursor.para;
+                let prev = (0..para).rev().find_map(|i| self.ed.doc.list_ref(i));
+                match prev {
+                    Some(r) => {
+                        let level = self.ed.doc.list_ref(para).map(|l| l.level).unwrap_or(r.level);
+                        self.apply_list(r.num_id, Some(level));
+                    }
+                    None => self.message("No list above this paragraph to continue"),
+                }
+            }
+            Cmd::ListRemove => self.remove_list(),
             Cmd::Bookmark => self.prompt(PromptKind::Bookmark, "Bookmark name: ", ""),
             Cmd::Date => {
                 if self.guard_edit() {
@@ -942,6 +992,12 @@ impl App {
                     }
                 }
                 if self.guard_edit() {
+                    // Backspace at the start of a list item removes its number first.
+                    let c = self.ed.cursor;
+                    if c.idx == 0 && !self.ed.has_selection() && !self.reveal && self.ed.doc.list_ref(c.para).is_some() {
+                        self.remove_list();
+                        return;
+                    }
                     self.ed.backspace(codes);
                     self.block_mode = false;
                 }
@@ -969,6 +1025,12 @@ impl App {
             }
             Cmd::Enter => {
                 if self.guard_edit() {
+                    // Enter on an empty list item ends the list.
+                    let c = self.ed.cursor;
+                    if self.ed.doc.paragraphs[c.para].char_count() == 0 && !self.ed.has_selection() && self.ed.doc.list_ref(c.para).is_some() {
+                        self.remove_list();
+                        return;
+                    }
                     self.ed.newline();
                     self.block_mode = false;
                     self.reveal_para_code = None;
@@ -1049,6 +1111,77 @@ impl App {
         if self.guard_edit() {
             self.ed.toggle_attr(attr);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Lists
+    // ------------------------------------------------------------------
+
+    /// Make the selected paragraphs items of `kind`, continuing the list
+    /// directly above when it is the same kind; toggles off when they
+    /// already are that kind.
+    fn toggle_list(&mut self, kind: ListKind) {
+        let para = *self.ed.selected_paras().start();
+        let doc = &self.ed.doc;
+        let current = doc.list_ref(para);
+        if let Some(r) = current {
+            if doc.numbering.is_bullet(r.num_id, r.level) == kind.is_bullet() {
+                self.remove_list();
+                return;
+            }
+        }
+        let above = para.checked_sub(1).and_then(|i| doc.list_ref(i)).filter(|r| doc.numbering.is_bullet(r.num_id, 0) == kind.is_bullet());
+        let num_id = match above {
+            Some(r) => r.num_id,
+            None => {
+                let existing = doc.numbering.find_kind(kind);
+                match existing {
+                    Some(id) if kind.is_bullet() => id,
+                    Some(id) => self.ed.doc.numbering.restart(id, 1).unwrap_or(id),
+                    None => self.ed.doc.numbering.add_list(kind),
+                }
+            }
+        };
+        self.ed.dirty = true;
+        self.apply_list(num_id, None);
+    }
+
+    fn apply_list(&mut self, num_id: i32, level: Option<u8>) {
+        let has_lp = self.ed.doc.styles.get("ListParagraph").is_some();
+        self.para(move |p| {
+            let lvl = level.or_else(|| p.list.map(|l| l.level)).unwrap_or(0);
+            p.list = Some(ListRef { num_id, level: lvl });
+            if has_lp && p.style.is_none() {
+                p.style = Some("ListParagraph".into());
+            }
+        });
+    }
+
+    fn remove_list(&mut self) {
+        let styles = self.ed.doc.styles.clone();
+        self.para(move |p| {
+            let from_style = styles.resolve_para_style(p.style.as_deref()).list.map_or(false, |l| l.num_id > 0);
+            p.list = if from_style { Some(ListRef { num_id: 0, level: 0 }) } else { None };
+            if p.style.as_deref() == Some("ListParagraph") {
+                p.style = None;
+            }
+        });
+    }
+
+    fn list_level(&mut self, delta: i8) {
+        let para = self.ed.cursor.para;
+        if self.ed.doc.list_ref(para).is_none() {
+            self.message("Not in a list — Ctrl+Shift+L for bullets, Ctrl+Shift+O for numbering");
+            return;
+        }
+        let doc_list = |p: &ParaProps, styles: &wp_core::StyleSheet| p.list.or(styles.resolve_para_style(p.style.as_deref()).list);
+        let styles = self.ed.doc.styles.clone();
+        self.para(move |p| {
+            if let Some(r) = doc_list(p, &styles).filter(|r| r.num_id > 0) {
+                let level = (r.level as i8 + delta).clamp(0, 8) as u8;
+                p.list = Some(ListRef { num_id: r.num_id, level });
+            }
+        });
     }
 
     fn para(&mut self, f: impl Fn(&mut ParaProps)) {
@@ -1534,6 +1667,14 @@ impl App {
                     self.ed.set_attr(AttrKind::Highlight, Some(Attr::Highlight(h)));
                 }
             }
+            ListAction::ListFormat => {
+                if let Some(kind) = item.value.parse::<usize>().ok().and_then(|i| ListKind::all().get(i).copied()) {
+                    let num_id = self.ed.doc.numbering.add_list(kind);
+                    self.ed.dirty = true;
+                    self.apply_list(num_id, None);
+                }
+            }
+
         }
     }
 

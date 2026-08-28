@@ -4,6 +4,7 @@ use crate::document::{rewrite_attrs, AttrMap, Document};
 use crate::edit::Op;
 use crate::layout::{self, Pagination, ParaLayout, ScreenLine};
 use crate::model::*;
+use crate::numbering::ListLabel;
 use crate::reveal::{self, ParaCode};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -80,6 +81,10 @@ pub struct LayoutCache {
     cols: u16,
     pub pagination: Pagination,
     pagination_dirty: bool,
+    /// List labels, recomputed for the whole document whenever paragraph
+    /// structure or properties change (one cheap pass).
+    labels: Vec<Option<ListLabel>>,
+    labels_dirty: bool,
 }
 
 pub struct Editor {
@@ -115,6 +120,8 @@ impl Editor {
                 cols: 80,
                 pagination: Pagination::default(),
                 pagination_dirty: true,
+                labels: vec![None; n],
+                labels_dirty: true,
             },
             cut_ring: VecDeque::new(),
             typeover: false,
@@ -154,15 +161,43 @@ impl Editor {
             self.layout.screen[i] = None;
         }
         self.layout.pagination_dirty = true;
+        self.layout.labels_dirty = true;
+    }
+
+    /// Recompute list labels if paragraph structure changed; any paragraph
+    /// whose label changed is laid out again.
+    fn refresh_labels(&mut self) {
+        if !self.layout.labels_dirty {
+            return;
+        }
+        let new = self.doc.list_labels();
+        for (i, l) in new.iter().enumerate() {
+            if self.layout.labels.get(i) != Some(l) {
+                if i < self.layout.print.len() {
+                    self.layout.print[i] = None;
+                    self.layout.screen[i] = None;
+                }
+                self.layout.pagination_dirty = true;
+            }
+        }
+        self.layout.labels = new;
+        self.layout.labels_dirty = false;
+    }
+
+    /// The list label of a paragraph, if it is a list item.
+    pub fn list_label(&mut self, para: usize) -> Option<ListLabel> {
+        self.refresh_labels();
+        self.layout.labels.get(para).cloned().flatten()
     }
 
     /// Bring every cached layout and the pagination up to date.
     pub fn ensure_layout(&mut self) {
+        self.refresh_labels();
         let n = self.doc.paragraphs.len();
         debug_assert_eq!(self.layout.print.len(), n);
         for i in 0..n {
             if self.layout.print[i].is_none() {
-                self.layout.print[i] = Some(layout::layout_paragraph(&self.doc, i));
+                self.layout.print[i] = Some(layout::layout_paragraph(&self.doc, i, self.layout.labels[i].as_ref()));
                 self.layout.pagination_dirty = true;
             }
         }
@@ -174,17 +209,25 @@ impl Editor {
     }
 
     pub fn print_layout(&mut self, para: usize) -> &ParaLayout {
+        self.refresh_labels();
         if self.layout.print[para].is_none() {
-            self.layout.print[para] = Some(layout::layout_paragraph(&self.doc, para));
+            self.layout.print[para] = Some(layout::layout_paragraph(&self.doc, para, self.layout.labels[para].as_ref()));
             self.layout.pagination_dirty = true;
         }
         self.layout.print[para].as_ref().unwrap()
     }
 
+    /// Cells a paragraph's list label occupies in draft view (0 if none).
+    pub fn label_cells(&mut self, para: usize) -> u16 {
+        self.list_label(para).map(|l| unicode_width::UnicodeWidthStr::width(l.text.as_str()) as u16).unwrap_or(0)
+    }
+
     pub fn screen_lines(&mut self, para: usize) -> &Vec<ScreenLine> {
+        self.refresh_labels();
         if self.layout.screen[para].is_none() {
             let pp = self.doc.para_props(para);
-            let lines = layout::wrap_screen(&self.doc.paragraphs[para], &pp, self.layout.cols);
+            let cells = self.label_cells(para);
+            let lines = layout::wrap_screen(&self.doc.paragraphs[para], &pp, self.layout.cols, cells);
             self.layout.screen[para] = Some(lines);
         }
         self.layout.screen[para].as_ref().unwrap()
@@ -258,15 +301,25 @@ impl Editor {
                 let p = at.para;
                 self.layout.print.insert(p + 1, None);
                 self.layout.screen.insert(p + 1, None);
+                self.layout.labels.insert((p + 1).min(self.layout.labels.len()), None);
+                self.layout.labels_dirty = true;
                 self.invalidate(p);
             }
             Op::Join { para } => {
                 let p = *para;
                 self.layout.print.remove(p + 1);
                 self.layout.screen.remove(p + 1);
+                if p + 1 < self.layout.labels.len() {
+                    self.layout.labels.remove(p + 1);
+                }
+                self.layout.labels_dirty = true;
                 self.invalidate(p);
             }
-            Op::SetParaProps { para, .. } | Op::ReplaceItems { para, .. } => self.invalidate(*para),
+            Op::SetParaProps { para, .. } => {
+                self.layout.labels_dirty = true;
+                self.invalidate(*para);
+            }
+            Op::ReplaceItems { para, .. } => self.invalidate(*para),
             Op::SetSection(_) => self.invalidate_all(),
         }
         let inv = self.doc.apply(op);
@@ -337,14 +390,24 @@ impl Editor {
             Op::Split { at, .. } => {
                 self.layout.print.insert(at.para + 1, None);
                 self.layout.screen.insert(at.para + 1, None);
+                self.layout.labels.insert((at.para + 1).min(self.layout.labels.len()), None);
+                self.layout.labels_dirty = true;
                 self.invalidate(at.para);
             }
             Op::Join { para } => {
                 self.layout.print.remove(para + 1);
                 self.layout.screen.remove(para + 1);
+                if para + 1 < self.layout.labels.len() {
+                    self.layout.labels.remove(para + 1);
+                }
+                self.layout.labels_dirty = true;
                 self.invalidate(*para);
             }
-            Op::SetParaProps { para, .. } | Op::ReplaceItems { para, .. } => self.invalidate(*para),
+            Op::SetParaProps { para, .. } => {
+                self.layout.labels_dirty = true;
+                self.invalidate(*para);
+            }
+            Op::ReplaceItems { para, .. } => self.invalidate(*para),
             Op::SetSection(_) => self.invalidate_all(),
         }
     }
@@ -1312,9 +1375,12 @@ impl Editor {
         self.history = History::default();
         self.layout.print = vec![None; n];
         self.layout.screen = vec![None; n];
+        self.layout.labels = vec![None; n];
+        self.layout.labels_dirty = true;
         self.layout.pagination_dirty = true;
         self.dirty = false;
     }
+
 }
 
 #[cfg(test)]

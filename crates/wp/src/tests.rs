@@ -301,3 +301,61 @@ fn perf_typing_latency_big_doc() {
     }
     eprintln!("110 keystrokes+renders near top: {:?} ({:?}/key)", t2.elapsed(), t2.elapsed() / 110);
 }
+
+#[test]
+fn lists_toggle_continue_demote_and_save() {
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("first");
+    h.key(KeyCode::Char('o'), CTRL | KeyModifiers::SHIFT); // numbered list
+    h.key(KeyCode::Enter, NONE);
+    h.type_str("second");
+    h.key(KeyCode::Enter, NONE);
+    h.key(KeyCode::Tab, NONE); // demote at start of item
+    h.type_str("nested");
+    h.key(KeyCode::Enter, NONE);
+    h.key(KeyCode::Enter, NONE); // empty item: ends the list
+    h.type_str("plain");
+    let s = h.screen();
+    assert!(s.contains("1. first"), "{}", s);
+    assert!(s.contains("2. second"), "{}", s);
+    assert!(s.contains("a. nested"), "{}", s);
+    assert!(h.app.ed.doc.list_ref(3).is_none());
+    assert!(h.app.ed.doc.list_ref(2).map(|r| r.level) == Some(1));
+    // Bullets: toggling on a numbered item switches kind; toggling again removes.
+    h.app.ed.cursor = wp_core::Pos::new(0, 0);
+    h.key(KeyCode::Char('l'), CTRL | KeyModifiers::SHIFT);
+    assert!(h.app.ed.doc.numbering.is_bullet(h.app.ed.doc.list_ref(0).unwrap().num_id, 0));
+    assert!(h.screen().contains("• first"));
+    h.key(KeyCode::Char('l'), CTRL | KeyModifiers::SHIFT);
+    assert!(h.app.ed.doc.list_ref(0).is_none());
+    // Reveal Codes shows the list code; the file round-trips with numbering.xml.
+    h.app.ed.cursor = wp_core::Pos::new(1, 0);
+    h.key(KeyCode::F(3), ALT);
+    assert!(h.screen().contains("[List:"), "{}", h.screen());
+    let dir = std::env::temp_dir().join(format!("wp-list-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("list.docx");
+    h.app.save_to(&path, crate::app::Format::Docx).unwrap();
+    let l = wp_docx::read(&path).unwrap();
+    let labels: Vec<String> = l.doc.list_labels().into_iter().map(|l| l.map(|l| l.text).unwrap_or_default()).collect();
+    assert_eq!(labels, ["", "1.", "a.", ""]);
+    assert!(l.package.has("word/numbering.xml"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn word_lists_render_labels() {
+    let p = corpus("word-lists.docx");
+    if !p.exists() {
+        return;
+    }
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.open_path(&p).unwrap();
+    let text = wp_core::text::to_text(&h.app.ed.doc, None);
+    for expect in ["• First bullet", "  ◦ Nested bullet", "    ▪ Deeper bullet", "1. One", "  a) Two a", "    i. Two b i", "      2.b.i.1 Level four", "3. Three", "1. Restarted at one", "I. Roman I", "  A. Roman I.A", "    01 Zero-padded", "      5th Ordinal", "        One Cardinal", "7. Override start", "  (A) Override level"] {
+        assert!(text.contains(expect), "missing {:?} in:\n{}", expect, text);
+    }
+    assert!(!text.contains("numId 0 removes") || !text.contains("• numId 0"));
+    let s = h.screen();
+    assert!(s.contains("• First bullet"), "{}", s);
+}

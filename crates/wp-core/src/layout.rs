@@ -4,6 +4,7 @@
 use crate::document::{Document, Run};
 use crate::metrics;
 use crate::model::*;
+use crate::numbering::{ListLabel, Suffix};
 
 /// Default tab interval when no tab stop applies (Word: 0.5").
 pub const DEFAULT_TAB: Twips = 720;
@@ -25,9 +26,20 @@ pub struct Line {
     pub page_break_after: bool,
 }
 
+/// A list label placed on the first line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabelPlacement {
+    pub text: String,
+    /// Left edge relative to the text area.
+    pub x: Twips,
+    pub width: Twips,
+    pub props: RunProps,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParaLayout {
     pub lines: Vec<Line>,
+    pub label: Option<LabelPlacement>,
     pub space_before: Twips,
     pub space_after: Twips,
     pub keep_next: bool,
@@ -94,14 +106,43 @@ fn item_advance(item: &Item, props: &RunProps, x: Twips, pp: &ParaProps, avail: 
     }
 }
 
+/// Where a list label sits and where the first line's text starts after it.
+fn place_label(doc: &Document, para: usize, pp: &ParaProps, label: &ListLabel) -> (LabelPlacement, Twips) {
+    let props = doc.base_run_props(para).merge(&label.run);
+    let width: Twips = label.text.chars().map(|c| metrics::advance(&props, c)).sum();
+    let base_x = pp.indent_left();
+    let x = (base_x + pp.first_line_offset()).max(0);
+    let end = x + width;
+    let text_x = match label.suffix {
+        Suffix::Tab => {
+            if end < base_x {
+                base_x
+            } else {
+                // Past the hanging position: the tab goes to the next stop.
+                let mut stops: Vec<Twips> = pp.tabs.iter().filter(|t| !t.clear && t.pos > end).map(|t| t.pos).collect();
+                stops.sort();
+                stops.first().copied().unwrap_or((end / DEFAULT_TAB + 1) * DEFAULT_TAB)
+            }
+        }
+        Suffix::Space => end + metrics::advance(&props, ' '),
+        Suffix::Nothing => end,
+    };
+    (LabelPlacement { text: label.text.clone(), x, width, props }, text_x)
+}
+
 /// Lay out one paragraph against the section's text width.
-pub fn layout_paragraph(doc: &Document, para: usize) -> ParaLayout {
+pub fn layout_paragraph(doc: &Document, para: usize, label: Option<&ListLabel>) -> ParaLayout {
     let p = &doc.paragraphs[para];
     let pp = doc.para_props(para);
     let runs: Vec<Run> = doc.runs(para);
     let text_width = doc.section.text_width();
     let base_x = pp.indent_left();
-    let first_off = pp.first_line_offset();
+    let mut first_off = pp.first_line_offset();
+    let label = label.filter(|l| !l.text.is_empty()).map(|l| place_label(doc, para, &pp, l));
+    if let Some((_, text_x)) = &label {
+        first_off = text_x - base_x;
+    }
+    let label = label.map(|(l, _)| l);
     let avail_rest = (text_width - pp.indent_right() - base_x).max(360);
     let avail_first = (text_width - pp.indent_right() - base_x - first_off).max(360);
 
@@ -252,6 +293,7 @@ pub fn layout_paragraph(doc: &Document, para: usize) -> ParaLayout {
 
     ParaLayout {
         lines,
+        label,
         space_before: pp.space_before(),
         space_after: pp.space_after(),
         keep_next: pp.keep_next(),
@@ -478,13 +520,25 @@ pub fn screen_advance(item: &Item, x: u16, pp: &ParaProps) -> u16 {
     }
 }
 
-/// Wrap a paragraph to `cols` columns for draft view.
-pub fn wrap_screen(p: &Paragraph, pp: &ParaProps, cols: u16) -> Vec<ScreenLine> {
+/// Cell offset of a paragraph's first line before any list label.
+pub fn screen_first_indent(pp: &ParaProps, cols: u16) -> u16 {
+    let cols = cols.max(10);
+    let left = twips_to_cells(pp.indent_left()).clamp(0, cols as i32 / 2) as u16;
+    let first_off = twips_to_cells(pp.first_line_offset());
+    (left as i32 + first_off).clamp(0, cols as i32 / 2) as u16
+}
+
+/// Wrap a paragraph to `cols` columns for draft view. `label_cells` is the
+/// width of a list label drawn at the first-line position; the text starts
+/// after it (at the left indent when the label fits in the hanging space).
+pub fn wrap_screen(p: &Paragraph, pp: &ParaProps, cols: u16, label_cells: u16) -> Vec<ScreenLine> {
     let cols = cols.max(10);
     let left = twips_to_cells(pp.indent_left()).clamp(0, cols as i32 / 2) as u16;
     let right = twips_to_cells(pp.indent_right()).clamp(0, cols as i32 / 4) as u16;
-    let first_off = twips_to_cells(pp.first_line_offset());
-    let first_indent = (left as i32 + first_off).clamp(0, cols as i32 / 2) as u16;
+    let mut first_indent = screen_first_indent(pp, cols);
+    if label_cells > 0 {
+        first_indent = (first_indent + label_cells + 1).max(left).min(cols / 2 + label_cells + 1);
+    }
 
     let mut lines: Vec<ScreenLine> = Vec::new();
     let mut start = 0usize;
@@ -591,7 +645,7 @@ mod tests {
         let text = "word ".repeat(2000);
         let mut doc = Document::new();
         doc.paragraphs[0] = Paragraph::from_text(text.trim());
-        let l = layout_paragraph(&doc, 0);
+        let l = layout_paragraph(&doc, 0, None);
         assert!(l.lines.len() > 50, "lines: {}", l.lines.len());
         for w in l.lines.windows(2) {
             assert!(w[0].end == w[1].start);
@@ -604,7 +658,7 @@ mod tests {
     fn screen_wrap_basic() {
         let p = Paragraph::from_text("The quick brown fox jumps over the lazy dog");
         let pp = ParaProps::default();
-        let lines = wrap_screen(&p, &pp, 20);
+        let lines = wrap_screen(&p, &pp, 20, 0);
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].width, 19);
         assert_eq!(p.text()[lines[1].start..lines[1].end], *"jumps over the lazy ");
@@ -615,7 +669,8 @@ mod tests {
         let mut doc = Document::new();
         doc.paragraphs = vec![Paragraph::from_text("a"), Paragraph::from_text("b")];
         doc.paragraphs[0].items.push(Item::Code(Code::PageBreak));
-        let layouts: Vec<ParaLayout> = (0..2).map(|i| layout_paragraph(&doc, i)).collect();
+        let layouts: Vec<ParaLayout> = (0..2).map(|i| layout_paragraph(&doc, i, None)).collect();
+
         let pg = paginate(&doc.section, &layouts);
         assert_eq!(pg.page_count(), 2);
         assert_eq!(pg.page_of(1, 0), 1);

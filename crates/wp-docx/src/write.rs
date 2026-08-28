@@ -57,7 +57,17 @@ pub fn write_bytes(doc: &Document, pkg: Option<&DocxPackage>) -> Result<Vec<u8>>
         register_part(&mut pkg, &styles_part, "styles", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml");
         pkg.styles_part = Some(styles_part);
     }
+    if doc.numbering.dirty {
+        let part = pkg.numbering_part.clone().unwrap_or_else(|| {
+            let dir = pkg.main_part.rsplit_once('/').map(|(d, _)| format!("{}/", d)).unwrap_or_default();
+            format!("{}numbering.xml", dir)
+        });
+        pkg.put(&part, render_numbering(&doc.numbering).into_bytes());
+        register_part(&mut pkg, &part, "numbering", "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml");
+        pkg.numbering_part = Some(part);
+    }
     pkg.to_bytes()
+
 }
 
 /// Make sure a part is reachable: a content-type override and a relationship
@@ -890,4 +900,91 @@ pub fn render_styles(sheet: &StyleSheet, _ctx: &Ctx) -> String {
     }
     out.push_str("</w:styles>");
     out
+}
+
+// ---------------------------------------------------------------------------
+// numbering.xml
+// ---------------------------------------------------------------------------
+
+pub fn render_numbering(n: &wp_core::Numbering) -> String {
+    let mut out = String::from(XML_DECL);
+
+    match &n.root_tag {
+        Some(r) => out.push_str(r),
+        None => {
+            let _ = write!(out, "<w:numbering xmlns:w=\"{}\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" mc:Ignorable=\"w14\">", W_NS);
+        }
+    }
+    // Schema order: numPicBullet*, abstractNum*, num*, numIdMacAtCleanup?
+    let (pics, rest): (Vec<&String>, Vec<&String>) = n.opaque.iter().partition(|s| s.starts_with("<w:numPicBullet"));
+    for s in pics {
+        out.push_str(s);
+    }
+    for a in &n.abstract_nums {
+        if let Some(raw) = &a.raw {
+            out.push_str(raw);
+            continue;
+        }
+        let _ = write!(out, "<w:abstractNum w:abstractNumId=\"{}\"><w:multiLevelType w:val=\"{}\"/>", a.id, if a.levels.iter().any(|l| l.text.matches('%').count() > 1) { "multilevel" } else { "hybridMultilevel" });
+        for (i, l) in a.levels.iter().enumerate() {
+            render_level(&mut out, i as u8, l);
+        }
+        out.push_str("</w:abstractNum>");
+    }
+    for num in &n.nums {
+        if let Some(raw) = &num.raw {
+            out.push_str(raw);
+            continue;
+        }
+        let _ = write!(out, "<w:num w:numId=\"{}\"><w:abstractNumId w:val=\"{}\"/>", num.id, num.abstract_id);
+        for o in &num.overrides {
+            if let Some(raw) = &o.raw {
+                out.push_str(raw);
+                continue;
+            }
+            let _ = write!(out, "<w:lvlOverride w:ilvl=\"{}\">", o.ilvl);
+            if let Some(s) = o.start {
+                let _ = write!(out, "<w:startOverride w:val=\"{}\"/>", s);
+            }
+            if let Some(l) = &o.level {
+                render_level(&mut out, o.ilvl, l);
+            }
+            out.push_str("</w:lvlOverride>");
+        }
+        out.push_str("</w:num>");
+    }
+    for s in rest {
+        out.push_str(s);
+    }
+    out.push_str("</w:numbering>");
+    out
+}
+
+fn render_level(out: &mut String, ilvl: u8, l: &wp_core::numbering::Level) {
+    use wp_core::numbering::*;
+    if let Some(raw) = &l.raw {
+        out.push_str(raw);
+        return;
+    }
+    let _ = write!(out, "<w:lvl w:ilvl=\"{}\"><w:start w:val=\"{}\"/><w:numFmt w:val=\"{}\"/>", ilvl, l.start, l.fmt.docx_name());
+    match l.suffix {
+        Suffix::Tab => {}
+        Suffix::Space => out.push_str("<w:suff w:val=\"space\"/>"),
+        Suffix::Nothing => out.push_str("<w:suff w:val=\"nothing\"/>"),
+    }
+    let _ = write!(out, "<w:lvlText w:val=\"{}\"/><w:lvlJc w:val=\"{}\"/>", escape_attr(&l.text), l.align.docx_name());
+    let body = render_ppr_body(&l.para);
+    if !body.is_empty() {
+        let _ = write!(out, "<w:pPr>{}</w:pPr>", body);
+    }
+    let mut run = l.run.clone();
+    if l.fmt.is_bullet() && run.font.is_none() {
+        // Unicode bullets need a font that has them; Word's default for its own bullets is Symbol.
+        run.font = Some("Segoe UI Symbol".into());
+        if l.text == "•" || l.text == "◦" || l.text == "–" {
+            run.font = None;
+        }
+    }
+    out.push_str(&render_run_props(&run));
+    out.push_str("</w:lvl>");
 }

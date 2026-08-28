@@ -54,14 +54,22 @@ fn para_from_str(s: &str) -> Paragraph {
     p
 }
 
-/// Export as plain text. `wrap` wraps paragraphs at that many columns.
+/// Export as plain text. `wrap` wraps paragraphs at that many columns. List
+/// items keep their labels ("1. ", "• ").
 pub fn to_text(doc: &Document, wrap: Option<usize>) -> String {
     let mut out = String::new();
+    let labels = doc.list_labels();
     for (i, p) in doc.paragraphs.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
         let mut line = String::new();
+        if let Some(l) = labels.get(i).and_then(|l| l.as_ref()) {
+            line.push_str(&"  ".repeat(l.level as usize));
+            line.push_str(&l.text);
+            line.push(' ');
+        }
+
         for it in &p.items {
             match it {
                 Item::Char(c) => line.push(*c),

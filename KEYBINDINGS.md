@@ -42,6 +42,7 @@ Modified F-keys need a terminal that reports them (most do; the kitty keyboard p
 | `Del` | Delete | Edit |
 | `Enter` | New Paragraph | Edit |
 | `Tab` | Insert Tab | Insert |
+| `Shift+Tab` | Decrease List Level (Promote) | Format ▸ List |
 | `Ins` | Toggle Typeover (Insert/Overwrite) | Edit |
 | `Alt+F3` | Reveal Codes | View |
 | `F11` | Reveal Codes | View |
@@ -159,6 +160,8 @@ Selected with `keymap = "modern"` (the default). Movement and deletion follow em
 | `Alt+]` | Increase Indent | Format ▸ Paragraph |
 | `Alt+[` | Decrease Indent | Format ▸ Paragraph |
 | `Ctrl+T` | Hanging Indent | Format ▸ Paragraph |
+| `Ctrl+Shift+L` | Bulleted List | Format ▸ List |
+| `Ctrl+Shift+O` | Numbered List | Format ▸ List |
 | `Ctrl+1` | Line Spacing: Single | Format ▸ Paragraph |
 | `Ctrl+5` | Line Spacing: 1.5 | Format ▸ Paragraph |
 | `Ctrl+2` | Line Spacing: Double | Format ▸ Paragraph |
@@ -220,16 +223,19 @@ Part of the modern map. Delivered only by terminals that report the Cmd key thro
 
 Commands with no default key in either map:
 
+- Continue Previous List
 - F-Key Legend (keyboard template)
 - First Line Indent…
 - Font Size…
 - Go to Bookmark…
 - Go to Heading…
 - Highlight…
+- Increase List Level (Demote)
 - Keep Lines Together
 - Keep With Next Paragraph
 - Keyboard: Classic (WordPerfect 5.1 F-keys)
 - Keyboard: Modern (Ctrl+S, Ctrl+B…)
+- List Numbering Format…
 - Margins…
 - Orientation: Landscape
 - Orientation: Portrait
@@ -237,6 +243,8 @@ Commands with no default key in either map:
 - Paper Size: A4
 - Paper Size: US Letter
 - Paste from Cut History…
+- Remove from List
+- Restart Numbering at 1
 - Reveal Codes: Show Preserved Run Properties
 - Save As Word Document (.docx)…
 - Space After Paragraph…

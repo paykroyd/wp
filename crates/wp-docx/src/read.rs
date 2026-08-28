@@ -111,6 +111,10 @@ pub fn read_bytes(bytes: &[u8]) -> Result<Loaded> {
     let mut doc = Document::from_paragraphs(paragraphs);
     doc.styles = styles;
     doc.section = section;
+    if let Some(xml) = package.numbering_part.as_deref().and_then(|p| package.get_str(p)) {
+        doc.numbering = parse_numbering(&xml, &ctx);
+    }
+
 
     let mut warnings: Vec<Warning> = ctx.warnings.iter().map(|(k, v)| Warning { label: k.clone(), count: *v }).collect();
     warnings.sort_by(|a, b| b.count.cmp(&a.count).then(a.label.cmp(&b.label)));
@@ -1034,4 +1038,127 @@ fn parse_style(raw: &str, e: &BytesStart<'_>, ctx: &Ctx) -> Style {
     }
     st.raw_xml = Some(raw.to_string());
     st
+}
+
+// ---------------------------------------------------------------------------
+// numbering.xml
+// ---------------------------------------------------------------------------
+
+pub fn parse_numbering(xml: &str, ctx: &Ctx) -> wp_core::Numbering {
+    use wp_core::numbering::*;
+    let mut num = Numbering::default();
+    let mut reader = Reader::from_str(xml);
+    let mut depth = 0;
+    loop {
+        let before = reader.buffer_position() as usize;
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                let n = name.as_ref().to_vec();
+                if depth == 0 {
+                    num.root_tag = Some(xml[before..reader.buffer_position() as usize].to_string());
+                    depth = 1;
+                    continue;
+                }
+                let _ = reader.read_to_end(name);
+                let after = reader.buffer_position() as usize;
+                let raw = &xml[before..after];
+                match n.as_slice() {
+                    b"w:abstractNum" => {
+                        let id = attr_i32(&e, "w:abstractNumId").unwrap_or(-1);
+                        let mut levels: Vec<Level> = Vec::new();
+                        for c in children_of(raw) {
+                            if c.tag == "w:lvl" {
+                                let (ilvl, l) = parse_level(&c.xml, ctx);
+                                while levels.len() < ilvl as usize {
+                                    levels.push(Level::new(NumFmt::Decimal, "%1.", levels.len() as u8));
+                                }
+                                if (ilvl as usize) < levels.len() {
+                                    levels[ilvl as usize] = l;
+                                } else {
+                                    levels.push(l);
+                                }
+                            }
+                        }
+                        num.abstract_nums.push(AbstractNum { id, levels, raw: Some(raw.to_string()) });
+                    }
+                    b"w:num" => {
+                        let id = attr_i32(&e, "w:numId").unwrap_or(-1);
+                        let mut abstract_id = -1;
+                        let mut overrides = Vec::new();
+                        for c in children_of(raw) {
+                            let Some(ce) = start_tag(&c.xml) else { continue };
+                            match c.tag.as_str() {
+                                "w:abstractNumId" => abstract_id = attr_i32(&ce, "w:val").unwrap_or(-1),
+                                "w:lvlOverride" => {
+                                    let ilvl = attr_i32(&ce, "w:ilvl").unwrap_or(0).clamp(0, 8) as u8;
+                                    let mut o = LevelOverride { ilvl, start: None, level: None, raw: Some(c.xml.clone()) };
+                                    for oc in children_of(&c.xml) {
+                                        if let Some(oe) = start_tag(&oc.xml) {
+                                            match oc.tag.as_str() {
+                                                "w:startOverride" => o.start = attr_i32(&oe, "w:val"),
+                                                "w:lvl" => o.level = Some(parse_level(&oc.xml, ctx).1),
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    overrides.push(o);
+                                }
+                                _ => {}
+                            }
+                        }
+                        num.nums.push(NumInstance { id, abstract_id, overrides, raw: Some(raw.to_string()) });
+                    }
+                    _ => num.opaque.push(raw.to_string()),
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if depth == 0 {
+                    continue;
+                }
+                let after = reader.buffer_position() as usize;
+                if e.name().as_ref() == b"w:num" {
+                    let id = attr_i32(&e, "w:numId").unwrap_or(-1);
+                    num.nums.push(NumInstance { id, abstract_id: -1, overrides: Vec::new(), raw: Some(xml[before..after].to_string()) });
+                } else {
+                    num.opaque.push(xml[before..after].to_string());
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    num
+}
+
+fn parse_level(xml: &str, ctx: &Ctx) -> (u8, wp_core::numbering::Level) {
+    use wp_core::numbering::*;
+    let e = start_tag(xml);
+    let ilvl = e.as_ref().and_then(|e| attr_i32(e, "w:ilvl")).unwrap_or(0).clamp(0, 8) as u8;
+    let mut l = Level::new(NumFmt::Decimal, "%1.", ilvl);
+    l.para = ParaProps::default();
+    for c in children_of(xml) {
+        let Some(ce) = start_tag(&c.xml) else { continue };
+        match c.tag.as_str() {
+            "w:start" => l.start = attr_i32(&ce, "w:val").unwrap_or(1),
+            "w:numFmt" => l.fmt = NumFmt::from_docx(attr(&ce, "w:val").as_deref().unwrap_or("decimal")),
+            "w:lvlText" => l.text = attr(&ce, "w:val").unwrap_or_default(),
+            "w:lvlJc" => l.align = Align::from_docx(attr(&ce, "w:val").as_deref().unwrap_or("left")),
+            "w:suff" => {
+                l.suffix = match attr(&ce, "w:val").as_deref() {
+                    Some("space") => Suffix::Space,
+                    Some("nothing") => Suffix::Nothing,
+                    _ => Suffix::Tab,
+                }
+            }
+            "w:pPr" => {
+                l.para = parse_ppr(&c.xml, ctx);
+                l.para.raw_ppr = None;
+            }
+            "w:rPr" => l.run = run_props_from_rpr(&c.xml, ctx),
+            _ => {}
+        }
+    }
+    l.raw = Some(xml.to_string());
+    (ilvl, l)
 }
