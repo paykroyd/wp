@@ -20,6 +20,8 @@ toml = "0.8"
 unicode-width = "0.2"
 unicode-segmentation = "1"
 anyhow = "1"
+regex = "1"
+
 
 [profile.release]
 lto = true

@@ -931,6 +931,24 @@ impl Editor {
         }
     }
 
+    /// Replace a range with items, inside the current undo group (callers
+    /// `commit` around it). The cursor ends after the inserted items, which
+    /// take the formatting in force at the start of the range.
+    pub fn replace_range(&mut self, r: Range, items: Vec<Item>) {
+        self.delete_range(r);
+        if !items.is_empty() {
+            let at = self.cursor;
+            let n = items.len();
+            self.apply(Op::Insert { at, items });
+            self.cursor.idx += n;
+        }
+        let para = self.cursor.para;
+        self.normalize_para(para);
+        self.anchor = None;
+        self.goal_x = None;
+    }
+
+
     /// Remove redundant code pairs (e.g. `[bold][BOLD]` adjacent) after a
     /// join or delete, keeping any empty pair around the cursor.
     fn normalize_para(&mut self, para: usize) {

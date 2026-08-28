@@ -9,3 +9,5 @@ description = "Document model, editing, and layout engine for wp"
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 serde.workspace = true
+regex.workspace = true
+

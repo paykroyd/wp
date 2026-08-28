@@ -819,8 +819,47 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
             f.render_widget(RParagraph::new(lines.into_iter().map(|l| Line::from(l)).collect::<Vec<_>>()), inner);
         }
+        Overlay::ReplacePreview { find, with, matches, selected } => {
+            let w = area.width.saturating_sub(4).min(100).max(30);
+            let n = matches.len().min(14) as u16;
+            let h = n + 5;
+            let x = (area.width.saturating_sub(w)) / 2;
+            let r = Rect::new(x, 1.min(area.height.saturating_sub(h)), w, h.min(area.height));
+            f.render_widget(Clear, r);
+            let title = format!("Replace {} → “{}” — {} match{}", app.find.build(&find).describe(), with, matches.len(), if matches.len() == 1 { "" } else { "es" });
+            f.render_widget(boxed(&truncate(&title, w as usize - 4)), r);
+            let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
+            let hint = Line::from(Span::styled("Enter/A: replace all   O: one at a time   ↑↓: preview in place   Esc: cancel", Style::default().fg(Color::DarkGray)));
+            f.render_widget(RParagraph::new(hint), Rect::new(inner.x, inner.y, inner.width, 1));
+            let sel_i = selected.min(matches.len().saturating_sub(1));
+            let first = sel_i.saturating_sub(13);
+            let mut lines = Vec::new();
+            let regex = app.find.build(&find).regex;
+            for (i, m) in matches.iter().enumerate().skip(first).take(14) {
+                let mut style = Style::default();
+                if i == sel_i {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                let ctx = wp_core::search::context(&app.ed.doc, m, (inner.width as usize).saturating_sub(24));
+                let rep = wp_core::search::expand_replacement(&with, m, regex);
+                let row = format!(" ¶{:<4} {}  → {}", m.range.start.para + 1, ctx, rep);
+                let row = truncate(&row, inner.width as usize);
+                let pad = (inner.width as usize).saturating_sub(row.width());
+                lines.push(Line::from(vec![Span::styled(row, style), Span::styled(" ".repeat(pad), style)]));
+            }
+            f.render_widget(RParagraph::new(lines), Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(1)));
+        }
+        Overlay::ReplaceStep { with, done, total, .. } => {
+            let y = area.height.saturating_sub(2);
+            let r = Rect::new(0, y, area.width, 1);
+            f.render_widget(Clear, r);
+            let style = if caps.colors { Style::default().bg(Color::Blue).fg(Color::White) } else { Style::default().add_modifier(Modifier::REVERSED) };
+            let text = format!("Replace this one with “{}”?  y = yes  n = skip  a = all remaining  Esc = stop   ({} of {} replaced)", with, done, total);
+            f.render_widget(RParagraph::new(Line::from(truncate(&text, area.width as usize))).style(style), r);
+        }
         Overlay::Message { title, lines } => {
             let w = area.width.saturating_sub(4).min(80).max(30);
+
             let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
             let x = (area.width.saturating_sub(w)) / 2;
             let r = Rect::new(x, 1, w, h);

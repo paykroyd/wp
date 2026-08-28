@@ -11,6 +11,8 @@ pub mod metrics_tables;
 pub mod model;
 pub mod numbering;
 pub mod reveal;
+pub mod search;
+
 pub mod style;
 pub mod text;
 

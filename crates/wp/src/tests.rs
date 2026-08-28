@@ -359,3 +359,54 @@ fn word_lists_render_labels() {
     let s = h.screen();
     assert!(s.contains("• First bullet"), "{}", s);
 }
+
+#[test]
+fn find_regex_format_code_and_replace_preview() {
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("Order 12 and order 345 then ");
+    h.key(KeyCode::Char('b'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("bold");
+    h.key(KeyCode::Char('b'), CTRL | KeyModifiers::SHIFT);
+    h.type_str(" end");
+    h.key(KeyCode::Enter, CTRL); // page break
+    h.type_str("page two");
+    // Regex with capture groups, previewed then replaced in full.
+    h.key(KeyCode::Char('h'), CTRL | KeyModifiers::SHIFT); // replace
+    h.type_str("re:order (\\d+)");
+    h.key(KeyCode::Enter, NONE);
+    h.type_str("#$1");
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(h.app.overlay, Overlay::ReplacePreview { .. }));
+    let s = h.screen();
+    assert!(s.contains("2 matches"), "{}", s);
+    assert!(s.contains("→ #12"), "{}", s);
+    h.key(KeyCode::Enter, NONE);
+    assert!(h.app.ed.doc.paragraphs[0].text().starts_with("#12 and #345 then bold end"));
+    // Format search: only the bold run.
+    h.app.exec(crate::commands::Cmd::FindBold);
+    assert_eq!(h.app.ed.selection().map(|r| (r.start.idx, r.end.idx)), Some((19, 23)));
+    // Code search jumps to the page break.
+    h.app.exec(crate::commands::Cmd::FindPageBreak);
+    let c = h.app.ed.selection().unwrap().start;
+    assert!(matches!(h.app.ed.doc.paragraphs[c.para].items.get(c.idx), Some(wp_core::Item::Code(wp_core::Code::PageBreak))));
+
+    // Whole-word, case-sensitive one-at-a-time replacement: y, then n.
+    h.app.ed.cursor = wp_core::Pos::new(0, 0);
+    h.app.ed.anchor = None;
+    h.app.find.whole_word = true;
+    h.app.find.case_sensitive = true;
+    h.key(KeyCode::Char('h'), CTRL | KeyModifiers::SHIFT);
+    h.key(KeyCode::Char('u'), CTRL);
+    h.type_str("and");
+    h.key(KeyCode::Enter, NONE);
+    h.type_str("&");
+    h.key(KeyCode::Enter, NONE);
+    h.key(KeyCode::Char('o'), NONE); // one at a time
+    assert!(matches!(h.app.overlay, Overlay::ReplaceStep { .. }));
+    h.key(KeyCode::Char('y'), NONE);
+    assert!(h.app.ed.doc.paragraphs[0].text().starts_with("#12 & #345 then bold end"));
+    assert!(h.app.status_text().unwrap().contains("Replaced 1 of 1"));
+    // Undo restores the replacement as one step.
+    h.key(KeyCode::Char('z'), CTRL);
+    assert!(h.app.ed.doc.paragraphs[0].text().starts_with("#12 and #345 then bold end"));
+}

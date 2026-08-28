@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use wp_core::model::*;
 use wp_core::reveal::{self, ParaCode};
+use wp_core::search::{self, Match, Query};
 use wp_core::{Document, Editor, Fragment, ListKind};
 use wp_docx::{DocxPackage, Warning};
 
@@ -29,6 +30,8 @@ pub enum PromptKind {
     Open,
     SaveAs(Format),
     Find { backward: bool },
+    FindStyle,
+    FindCode,
     ReplaceFind,
     ReplaceWith { find: String },
     GoToPage,
@@ -77,6 +80,10 @@ pub enum Overlay {
     Confirm { question: String, action: ConfirmAction },
     Help,
     Message { title: String, lines: Vec<String> },
+    /// Every match listed before a replace-all; ↑↓ previews each in place.
+    ReplacePreview { find: String, with: String, matches: Vec<Match>, selected: usize },
+    /// One-at-a-time replacement: the current match is selected in the document.
+    ReplaceStep { find: String, with: String, done: usize, total: usize },
 }
 
 /// One palette result.
@@ -102,6 +109,40 @@ pub struct FindState {
     pub backward: bool,
     pub origin: Pos,
     pub origin_anchor: Option<Pos>,
+    /// Options toggled in the find prompt (Alt+R / Alt+C / Alt+W) or from the palette.
+    pub regex: bool,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+}
+
+impl FindState {
+    /// The query for a search-box string, with the toggled options applied.
+    pub fn build(&self, text: &str) -> Query {
+        let mut q = Query::parse(text);
+        q.regex |= self.regex;
+        q.whole_word |= self.whole_word;
+        if self.case_sensitive {
+            q.case_sensitive = Some(true);
+        }
+        q
+    }
+    pub fn flags(&self) -> String {
+        let mut f = Vec::new();
+        if self.regex {
+            f.push("re");
+        }
+        if self.case_sensitive {
+            f.push("Aa");
+        }
+        if self.whole_word {
+            f.push("W");
+        }
+        if f.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", f.join("·"))
+        }
+    }
 }
 
 pub struct App {
@@ -925,13 +966,43 @@ impl App {
                 self.find.origin_anchor = self.ed.anchor;
                 self.find.backward = cmd == Cmd::FindBackward;
                 let q = self.find.query.clone();
-                self.prompt(PromptKind::Find { backward: cmd == Cmd::FindBackward }, if cmd == Cmd::FindBackward { "Find backward: " } else { "Find: " }, &q);
+                let label = self.find_label(cmd == Cmd::FindBackward);
+                self.prompt(PromptKind::Find { backward: cmd == Cmd::FindBackward }, &label, &q);
             }
             Cmd::FindNext => self.find_step(false),
             Cmd::FindPrev => self.find_step(true),
+            Cmd::FindRegex => {
+                self.find.regex = true;
+                self.exec(Cmd::Find);
+            }
+            Cmd::FindToggleCase => {
+                self.find.case_sensitive = !self.find.case_sensitive;
+                self.message(if self.find.case_sensitive { "Find: match case" } else { "Find: ignore case (smart: capitals in the query match case)" });
+            }
+            Cmd::FindToggleWord => {
+                self.find.whole_word = !self.find.whole_word;
+                self.message(if self.find.whole_word { "Find: whole words only" } else { "Find: partial words too" });
+            }
+            Cmd::FindToggleRegex => {
+                self.find.regex = !self.find.regex;
+                self.message(if self.find.regex { "Find: regular expressions on ($1… in replacements)" } else { "Find: plain text" });
+            }
+            Cmd::FindBold => self.find_with("bold:"),
+            Cmd::FindItalic => self.find_with("italic:"),
+            Cmd::FindUnderlined => self.find_with("underline:"),
+            Cmd::FindHighlighted => self.find_with("highlight:"),
+            Cmd::FindPageBreak => self.find_with("[HPg]"),
+            Cmd::FindTab => self.find_with("[Tab]"),
+            Cmd::FindLineBreak => self.find_with("[Ln Brk]"),
+            Cmd::FindInStyle => {
+                let cur = self.ed.doc.paragraphs[self.ed.cursor.para].props.style.clone().unwrap_or_default();
+                self.prompt(PromptKind::FindStyle, "Find text in style (name or id, then optional text): ", &cur);
+            }
+            Cmd::FindCode => self.prompt(PromptKind::FindCode, "Find code (as shown in Reveal Codes, e.g. HPg, Tab, BOLD, Style:Heading1): ", ""),
             Cmd::Replace => {
                 let q = self.find.query.clone();
-                self.prompt(PromptKind::ReplaceFind, "Replace — find: ", &q);
+                let label = format!("Replace — find{}: ", self.find.flags());
+                self.prompt(PromptKind::ReplaceFind, &label, &q);
             }
             Cmd::MoveLeft => self.move_left(sel),
             Cmd::MoveRight => self.move_right(sel),
@@ -1260,54 +1331,33 @@ impl App {
     // Find
     // ------------------------------------------------------------------
 
-    /// Search from `from` for `q`. Returns the match range.
-    pub fn search(&self, q: &str, from: Pos, backward: bool, wrap: bool) -> Option<Range> {
-        if q.is_empty() {
-            return None;
-        }
-        let smart_case = q.chars().any(|c| c.is_uppercase());
-        let qn: Vec<char> = if smart_case { q.chars().collect() } else { q.to_lowercase().chars().collect() };
-        let doc = &self.ed.doc;
-        let n = doc.paragraphs.len();
-        let order: Vec<usize> = if backward {
-            (0..=from.para).rev().chain(if wrap { (from.para + 1..n).rev().collect::<Vec<_>>() } else { vec![] }).collect()
+    fn find_label(&self, backward: bool) -> String {
+        format!("{}{}: ", if backward { "Find backward" } else { "Find" }, self.find.flags())
+    }
+
+    /// Search from `from` for the search-box string `q`.
+    pub fn search(&self, q: &str, from: Pos, backward: bool, wrap: bool) -> Option<Match> {
+        let query = self.find.build(q);
+        search::find(&self.ed.doc, &query, from, backward, wrap)
+    }
+
+    /// Run a canned query (from a palette command) as the next find.
+    fn find_with(&mut self, q: &str) {
+        self.find.query = q.to_string();
+        self.find.backward = false;
+        self.sticky_status = None;
+        self.find_step(false);
+    }
+
+    fn select_match(&mut self, m: &Match) {
+        if m.range.is_empty() {
+            self.ed.anchor = None;
+            self.ed.cursor = m.range.start;
         } else {
-            (from.para..n).chain(if wrap { 0..from.para } else { 0..0 }).collect()
-        };
-        for (k, pi) in order.iter().enumerate() {
-            let p = &doc.paragraphs[*pi];
-            // chars with item indices
-            let mut chars: Vec<(char, usize)> = Vec::with_capacity(p.items.len());
-            for (i, it) in p.items.iter().enumerate() {
-                match it {
-                    Item::Char(c) => chars.push((if smart_case { *c } else { c.to_lowercase().next().unwrap_or(*c) }, i)),
-                    Item::Code(Code::Tab) => chars.push((' ', i)),
-                    _ => {}
-                }
-            }
-            if chars.len() < qn.len() {
-                continue;
-            }
-            let first_para = k == 0;
-            let positions: Vec<usize> = (0..=chars.len() - qn.len()).collect();
-            let iter: Box<dyn Iterator<Item = usize>> = if backward { Box::new(positions.into_iter().rev()) } else { Box::new(positions.into_iter()) };
-            for ci in iter {
-                let item_start = chars[ci].1;
-                if first_para && *pi == from.para {
-                    if !backward && item_start < from.idx {
-                        continue;
-                    }
-                    if backward && item_start >= from.idx {
-                        continue;
-                    }
-                }
-                if chars[ci..ci + qn.len()].iter().zip(qn.iter()).all(|((c, _), q)| c == q) {
-                    let end_item = chars[ci + qn.len() - 1].1 + 1;
-                    return Some(Range { start: Pos::new(*pi, item_start), end: Pos::new(*pi, end_item) });
-                }
-            }
+            self.ed.anchor = Some(m.range.start);
+            self.ed.cursor = m.range.end;
         }
-        None
+        self.block_mode = false;
     }
 
     fn find_step(&mut self, reverse: bool) {
@@ -1319,76 +1369,97 @@ impl App {
         let from = if backward {
             self.ed.selection().map(|r| r.start).unwrap_or(self.ed.cursor)
         } else {
-            self.ed.selection().map(|r| r.end).unwrap_or(self.ed.cursor)
+            match self.ed.selection() {
+                Some(r) => r.end,
+                // An empty match (a code) must not be found again in place.
+                None => Pos::new(self.ed.cursor.para, self.ed.cursor.idx + 1),
+            }
         };
         let q = self.find.query.clone();
         match self.search(&q, from, backward, true) {
-            Some(r) => {
-                self.ed.anchor = Some(r.start);
-                self.ed.cursor = r.end;
-                self.block_mode = false;
+            Some(m) => {
+                self.select_match(&m);
+                let desc = self.find.build(&q).describe();
+                self.sticky_status = Some(format!("Found {}", desc));
             }
-            None => self.message(format!("Not found: {}", q)),
+            None => self.message(format!("Not found: {}", self.find.build(&q).describe())),
         }
     }
 
     fn incremental_find(&mut self, q: &str, backward: bool) {
         let from = self.find.origin;
         match self.search(q, from, backward, true) {
-            Some(r) => {
-                self.ed.anchor = Some(r.start);
-                self.ed.cursor = r.end;
+            Some(m) => {
+                self.select_match(&m);
                 let count = self.count_matches(q);
                 self.sticky_status = Some(format!("{} match{}", count, if count == 1 { "" } else { "es" }));
             }
             None => {
                 self.ed.cursor = from;
                 self.ed.anchor = self.find.origin_anchor;
-                self.sticky_status = Some(if q.is_empty() { String::new() } else { "No matches".into() });
+                self.sticky_status = Some(if q.trim().is_empty() { String::new() } else { "No matches".into() });
             }
         }
     }
 
     fn count_matches(&self, q: &str) -> usize {
-        let mut n = 0;
-        let mut from = Pos::default();
-        while let Some(r) = self.search(q, from, false, false) {
-            n += 1;
-            from = r.end;
-            if n > 9999 {
-                break;
-            }
-        }
-        n
+        search::find_all(&self.ed.doc, &self.find.build(q), 10_000).len()
     }
 
-    fn replace_all(&mut self, find: &str, with: &str) {
+    /// Replace one match at its range with the expanded replacement; the
+    /// cursor ends after the inserted text. Returns false if it was protected.
+    fn replace_match(&mut self, m: &Match, with: &str, regex: bool) -> bool {
+        self.ed.cursor = m.range.start;
+        self.ed.anchor = Some(m.range.end);
+        if self.ed.selection_protected().is_some() {
+            self.ed.anchor = None;
+            return false;
+        }
+        let text = search::expand_replacement(with, m, regex);
+        let items: Vec<Item> = text.chars().map(|c| if c == '\t' { Item::Code(Code::Tab) } else { Item::Char(c) }).collect();
+        self.ed.replace_range(m.range, items);
+        true
+
+    }
+
+    /// Replace every match from `from` onward.
+    fn replace_all_from(&mut self, find: &str, with: &str, from: Pos) -> usize {
+        let query = self.find.build(find);
         let mut n = 0;
-        let mut from = Pos::default();
+        let mut from = from;
         self.ed.commit();
-        while let Some(r) = self.search(find, from, false, false) {
-            self.ed.cursor = r.start;
-            self.ed.anchor = Some(r.end);
-            if self.ed.selection_protected().is_some() {
-                from = r.end;
-                continue;
+        while let Some(m) = search::find(&self.ed.doc, &query, from, false, false) {
+            let end_para = m.range.start.para;
+            if self.replace_match(&m, with, query.regex) {
+                n += 1;
+                from = self.ed.cursor;
+            } else {
+                from = Pos::new(end_para, m.range.end.idx.max(m.range.start.idx + 1));
             }
-            self.ed.delete_range(r);
-            let start = self.ed.cursor;
-            let items: Vec<Item> = with.chars().map(Item::Char).collect();
-            let len = items.len();
-            if len > 0 {
-                self.ed.paste(&Fragment { paragraphs: vec![Paragraph { props: ParaProps::default(), items }] });
-            }
-            from = Pos::new(start.para, start.idx + len);
-            n += 1;
             if n > 100_000 {
                 break;
             }
         }
         self.ed.commit();
         self.ed.anchor = None;
-        self.message(format!("Replaced {} occurrence{}", n, if n == 1 { "" } else { "s" }));
+        n
+    }
+
+
+    /// Advance the one-at-a-time replacement to the next match after the cursor.
+    fn replace_step_next(&mut self, find: String, with: String, done: usize, total: usize) {
+        let query = self.find.build(&find);
+        let from = self.ed.selection().map(|r| r.end).unwrap_or(self.ed.cursor);
+        match search::find(&self.ed.doc, &query, from, false, false) {
+            Some(m) => {
+                self.select_match(&m);
+                self.overlay = Overlay::ReplaceStep { find, with, done, total };
+            }
+            None => {
+                self.ed.anchor = None;
+                self.message(format!("Replaced {} of {}", done, total));
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1430,7 +1501,7 @@ impl App {
             '/' => {
                 let count = if q.is_empty() { 0 } else { self.count_matches(q) };
                 vec![PaletteRow {
-                    label: if q.is_empty() { "Type to search".into() } else { format!("Find “{}” — {} match{}", q, count, if count == 1 { "" } else { "es" }) },
+                    label: if q.is_empty() { "Type to search (bold: italic: style:Name re: [HPg] …)".into() } else { format!("Find {} — {} match{}", self.find.build(q).describe(), count, if count == 1 { "" } else { "es" }) },
                     detail: "Enter jumps to the next match; F3 / Shift+F3 continue".into(),
                     key: String::new(),
                     action: PaletteAction::Cmd(Cmd::FindNext),
@@ -1545,6 +1616,21 @@ impl App {
                         self.sticky_status = None;
                     }
                 }
+                KeyCode::Char(c @ ('r' | 'c' | 'w')) if key.alt && matches!(kind, PromptKind::Find { .. } | PromptKind::ReplaceFind) => {
+                    match c {
+                        'r' => self.find.regex = !self.find.regex,
+                        'c' => self.find.case_sensitive = !self.find.case_sensitive,
+                        _ => self.find.whole_word = !self.find.whole_word,
+                    }
+                    let label = match kind {
+                        PromptKind::Find { backward } => {
+                            self.incremental_find(&input, backward);
+                            self.find_label(backward)
+                        }
+                        _ => format!("Replace — find{}: ", self.find.flags()),
+                    };
+                    self.overlay = Overlay::Prompt { kind, label, input };
+                }
                 KeyCode::Enter => self.finish_prompt(kind, input),
                 KeyCode::Backspace => {
                     input.pop();
@@ -1611,6 +1697,59 @@ impl App {
                 _ => self.overlay = Overlay::Confirm { question, action },
             },
             Overlay::Help | Overlay::Message { .. } => {}
+            Overlay::ReplacePreview { find, with, matches, mut selected } => match ev.code {
+                KeyCode::Esc => {
+                    self.ed.anchor = None;
+                    self.ed.cursor = self.find.origin;
+                }
+                KeyCode::Enter | KeyCode::Char('a') | KeyCode::Char('A') => {
+                    let n = self.replace_all_from(&find, &with, Pos::default());
+                    self.message(format!("Replaced {} occurrence{}", n, if n == 1 { "" } else { "s" }));
+                }
+                KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let total = matches.len();
+                    if let Some(m) = matches.get(selected) {
+                        self.select_match(m);
+                        self.overlay = Overlay::ReplaceStep { find, with, done: 0, total };
+                    }
+                }
+                KeyCode::Up | KeyCode::Down => {
+                    selected = if ev.code == KeyCode::Up { selected.saturating_sub(1) } else { (selected + 1).min(matches.len().saturating_sub(1)) };
+                    if let Some(m) = matches.get(selected) {
+                        self.select_match(m);
+                    }
+                    self.overlay = Overlay::ReplacePreview { find, with, matches, selected };
+                }
+                _ => self.overlay = Overlay::ReplacePreview { find, with, matches, selected },
+            },
+            Overlay::ReplaceStep { find, with, done, total } => match ev.code {
+                KeyCode::Esc => {
+                    self.ed.anchor = None;
+                    self.message(format!("Replaced {} of {}", done, total));
+                }
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter | KeyCode::Char(' ') => {
+
+                    let query = self.find.build(&find);
+                    let sel = self.ed.selection().unwrap_or(Range { start: self.ed.cursor, end: self.ed.cursor });
+                    let m = search::find(&self.ed.doc, &query, sel.start, false, false).filter(|m| m.range.start == sel.start);
+                    let mut done = done;
+                    if let Some(m) = m {
+                        self.ed.commit();
+                        if self.replace_match(&m, &with, query.regex) {
+                            done += 1;
+                        }
+                        self.ed.commit();
+                    }
+                    self.replace_step_next(find, with, done, total);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => self.replace_step_next(find, with, done, total),
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    let from = self.ed.selection().map(|r| r.start).unwrap_or(self.ed.cursor);
+                    let n = self.replace_all_from(&find, &with, from);
+                    self.message(format!("Replaced {} of {}", done + n, total));
+                }
+                _ => self.overlay = Overlay::ReplaceStep { find, with, done, total },
+            },
         }
     }
 
@@ -1802,13 +1941,36 @@ impl App {
                 self.prompt(PromptKind::ReplaceWith { find: v }, "Replace with: ", "");
             }
             PromptKind::ReplaceWith { find } => {
-                let n = self.count_matches(&find);
-                if n == 0 {
-                    self.message(format!("Not found: {}", find));
+                let query = self.find.build(&find);
+                let matches = search::find_all(&self.ed.doc, &query, 10_000);
+                if matches.is_empty() {
+                    self.message(format!("Not found: {}", query.describe()));
                 } else {
-                    self.replace_all(&find, &v);
+                    self.find.query = find.clone();
+                    self.find.origin = self.ed.cursor;
+                    self.select_match(&matches[0]);
+                    self.overlay = Overlay::ReplacePreview { find, with: v, matches, selected: 0 };
                 }
             }
+            PromptKind::FindStyle => {
+                if v.is_empty() {
+                    return;
+                }
+                let (style, text) = match v.split_once("  ") {
+                    Some((s, t)) => (s.trim(), t.trim()),
+                    None => (v.as_str(), ""),
+                };
+                let q = if style.contains(' ') { format!("style:\"{}\" {}", style, text) } else { format!("style:{} {}", style, text) };
+                self.find_with(q.trim());
+            }
+            PromptKind::FindCode => {
+                if v.is_empty() {
+                    return;
+                }
+                let q = format!("[{}]", v.trim_matches(|c| c == '[' || c == ']'));
+                self.find_with(&q);
+            }
+
             PromptKind::GoToPage => match v.parse::<usize>() {
                 Ok(n) => match self.ed.page_start_pos(n) {
                     Some(p) => self.ed.move_to(p, false),

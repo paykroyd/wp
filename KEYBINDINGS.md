@@ -63,7 +63,7 @@ Selected with `keymap = "classic"`. `Esc` followed by a number repeats the next 
 | `Shift+F1` | Page Setup (margins)… | Format ▸ Page |
 | `F2` | Find… | Navigate |
 | `Shift+F2` | Find Backward… | Navigate |
-| `Alt+F2` | Replace… | Navigate |
+| `Alt+F2` | Replace… (preview, then all or one at a time) | Navigate |
 | `F3` | Help | Help |
 | `Shift+F3` | Switch Draft / Page View | View |
 | `Ctrl+F3` | Redraw Screen | View |
@@ -151,7 +151,7 @@ Selected with `keymap = "modern"` (the default). Movement and deletion follow em
 | `Ctrl+Alt+A` | All Caps | Format ▸ Character |
 | `Ctrl+\\` | Remove Character Formatting | Format ▸ Character |
 | `Ctrl+Shift+F` | Find… | Navigate |
-| `Ctrl+Shift+H` | Replace… | Navigate |
+| `Ctrl+Shift+H` | Replace… (preview, then all or one at a time) | Navigate |
 | `Ctrl+G` | Go to Page… | Navigate |
 | `Ctrl+Shift+E` | Center | Format ▸ Paragraph |
 | `Ctrl+L` | Align Left | Format ▸ Paragraph |
@@ -196,7 +196,7 @@ Part of the modern map. Delivered only by terminals that report the Cmd key thro
 | `Cmd+F` | Find… | Navigate |
 | `Cmd+G` | Find Next | Navigate |
 | `Cmd+Shift+G` | Find Previous | Navigate |
-| `Cmd+Shift+H` | Replace… | Navigate |
+| `Cmd+Shift+H` | Replace… (preview, then all or one at a time) | Navigate |
 | `Cmd+E` | Center | Format ▸ Paragraph |
 | `Cmd+L` | Align Left | Format ▸ Paragraph |
 | `Cmd+R` | Align Right | Format ▸ Paragraph |
@@ -225,6 +225,19 @@ Commands with no default key in either map:
 
 - Continue Previous List
 - F-Key Legend (keyboard template)
+- Find Bold Text
+- Find Code…
+- Find Highlighted Text
+- Find Italic Text
+- Find Next Line Break
+- Find Next Page Break
+- Find Next Tab
+- Find Option: Match Case
+- Find Option: Regular Expressions
+- Find Option: Whole Words
+- Find Text in Style…
+- Find Underlined Text
+- Find with Regular Expression…
 - First Line Indent…
 - Font Size…
 - Go to Bookmark…
