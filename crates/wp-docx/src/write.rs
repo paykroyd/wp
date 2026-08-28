@@ -57,6 +57,18 @@ pub fn write_bytes(doc: &Document, pkg: Option<&DocxPackage>) -> Result<Vec<u8>>
         register_part(&mut pkg, &styles_part, "styles", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml");
         pkg.styles_part = Some(styles_part);
     }
+    for rel in &doc.extra_rels {
+        add_relationship(&mut pkg, &rel.id, &rel.kind, &rel.target, rel.external);
+    }
+    if !doc.footnotes.is_empty() && pkg.footnotes_part.is_none() {
+        let part = {
+            let dir = pkg.main_part.rsplit_once('/').map(|(d, _)| format!("{}/", d)).unwrap_or_default();
+            format!("{}footnotes.xml", dir)
+        };
+        pkg.put(&part, render_footnotes(doc, &ctx).into_bytes());
+        register_part(&mut pkg, &part, "footnotes", "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml");
+        pkg.footnotes_part = Some(part);
+    }
     if doc.numbering.dirty {
         let part = pkg.numbering_part.clone().unwrap_or_else(|| {
             let dir = pkg.main_part.rsplit_once('/').map(|(d, _)| format!("{}/", d)).unwrap_or_default();
@@ -70,9 +82,76 @@ pub fn write_bytes(doc: &Document, pkg: Option<&DocxPackage>) -> Result<Vec<u8>>
 
 }
 
+/// Add a relationship of the main part if no relationship with that id exists.
+pub fn add_relationship(pkg: &mut DocxPackage, id: &str, rel_type: &str, target: &str, external: bool) {
+    let rels_name = pkg.main_rels_name();
+    let rels = pkg.get_str(&rels_name).unwrap_or_else(|| format!("{}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"></Relationships>", XML_DECL));
+    if rels.contains(&format!("Id=\"{}\"", id)) {
+        return;
+    }
+    let ty = format!("http://schemas.openxmlformats.org/officeDocument/2006/relationships/{}", rel_type);
+    let rel = format!("<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"{}/>", escape_attr(id), ty, escape_attr(target), if external { " TargetMode=\"External\"" } else { "" });
+    let new = match rels.rfind("</Relationships>") {
+        Some(i) => format!("{}{}{}", &rels[..i], rel, &rels[i..]),
+        None => rels,
+    };
+    pkg.put(&rels_name, new.into_bytes());
+}
+
+/// One paragraph as WordprocessingML (for table cells and footnotes built
+/// outside the main body).
+pub fn render_paragraph_xml(doc: &Document, para: usize, ctx: &Ctx) -> String {
+    let mut out = String::new();
+    let mut ids = BookmarkIds::new(&HashMap::new());
+    render_paragraph(doc, para, &mut out, ctx, &mut ids);
+    out
+}
+
+fn render_footnotes(doc: &Document, ctx: &Ctx) -> String {
+    let mut out = String::from(XML_DECL);
+    let _ = write!(out, "<w:footnotes xmlns:w=\"{}\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">", W_NS);
+    out.push_str("<w:footnote w:type=\"separator\" w:id=\"-1\"><w:p><w:pPr><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/></w:pPr><w:r><w:separator/></w:r></w:p></w:footnote>");
+    out.push_str("<w:footnote w:type=\"continuationSeparator\" w:id=\"0\"><w:p><w:pPr><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>");
+    for fnote in &doc.footnotes {
+        let _ = write!(out, "<w:footnote w:id=\"{}\">", fnote.id);
+        let mut tmp = Document::new();
+        tmp.styles = doc.styles.clone();
+        tmp.paragraphs = fnote.paragraphs.clone();
+        for (i, p) in tmp.paragraphs.iter_mut().enumerate() {
+            let mut props = p.props.clone();
+            if props.space_after.is_none() {
+                props.space_after = Some(0);
+                props.line_spacing = Some(LineSpacing::Auto(240));
+            }
+            if props.mark.size.is_none() {
+                props.mark.size = Some(20);
+            }
+            props.touch();
+            p.props = props;
+            if i == 0 {
+                let mut lead = vec![
+                    Item::Code(Code::On(Attr::VertAlign(VertAlign::Superscript))),
+                    Item::Code(Code::Opaque(OpaqueXml::element("<w:footnoteRef/>", "Note Ref"))),
+                    Item::Code(Code::Off(AttrKind::VertAlign)),
+                    Item::Char(' '),
+                ];
+                lead.append(&mut p.items);
+                p.items = lead;
+            }
+        }
+        for i in 0..tmp.paragraphs.len() {
+            out.push_str(&render_paragraph_xml(&tmp, i, ctx));
+        }
+        out.push_str("</w:footnote>");
+    }
+    out.push_str("</w:footnotes>");
+    out
+}
+
 /// Make sure a part is reachable: a content-type override and a relationship
 /// from the main part. Both are inserted only when missing.
 pub fn register_part(pkg: &mut DocxPackage, part: &str, rel_type: &str, content_type: &str) {
+
     let ct_name = "[Content_Types].xml";
     let ct = pkg.get_str(ct_name).unwrap_or_else(|| format!("{}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"></Types>", XML_DECL));
     let part_name = format!("/{}", part);

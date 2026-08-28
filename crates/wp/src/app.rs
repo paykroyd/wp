@@ -17,6 +17,7 @@ use wp_docx::{DocxPackage, Warning};
 pub enum Format {
     Docx,
     Text,
+    Markdown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -247,6 +248,14 @@ impl App {
             if let Some(l) = line {
                 self.message(l);
             }
+        } else if ext == "md" || ext == "markdown" {
+            let bytes = std::fs::read(path)?;
+            let text = decode_text(&bytes);
+            self.ed.replace_document(wp_md::from_markdown(&text));
+            self.package = None;
+            self.format = Format::Markdown;
+            self.warnings.clear();
+            self.sticky_status = None;
         } else {
             let bytes = std::fs::read(path)?;
             let text = decode_text(&bytes);
@@ -277,6 +286,18 @@ impl App {
                 let wrap = if self.cfg.text_wrap > 0 { Some(self.cfg.text_wrap) } else { None };
                 std::fs::write(path, wp_core::text::to_text(&self.ed.doc, wrap))?;
             }
+            Format::Markdown => {
+                let export = self.markdown_export();
+                std::fs::write(path, &export.text)?;
+                if let Some(w) = export.warning() {
+                    self.path = Some(path.to_path_buf());
+                    self.format = format;
+                    self.ed.dirty = false;
+                    self.remove_recovery();
+                    self.message(w);
+                    return Ok(());
+                }
+            }
         }
         self.path = Some(path.to_path_buf());
         self.format = format;
@@ -284,6 +305,17 @@ impl App {
         self.remove_recovery();
         self.message(format!("Saved {}", path.display()));
         Ok(())
+    }
+
+    /// The document as Markdown, hyperlink targets resolved through the
+    /// package it came from (or the relationships a Markdown import created).
+    pub fn markdown_export(&self) -> wp_md::Export {
+        let doc = &self.ed.doc;
+        let pkg = self.package.as_ref();
+        let rels = |id: &str| -> Option<String> {
+            doc.extra_rels.iter().find(|r| r.id == id).map(|r| r.target.clone()).or_else(|| pkg.and_then(|p| p.rel_target(id)))
+        };
+        wp_md::to_markdown(doc, &rels)
     }
 
     pub fn save(&mut self) {
@@ -294,7 +326,8 @@ impl App {
                     self.message(format!("Save failed: {}", e));
                 }
             }
-            None => self.prompt(PromptKind::SaveAs(Format::Docx), "Save as (.docx or .txt): ", ""),
+            None => self.prompt(PromptKind::SaveAs(Format::Docx), "Save as (.docx, .md or .txt): ", ""),
+
         }
     }
 
@@ -305,7 +338,11 @@ impl App {
             h ^= b as u64;
             h = h.wrapping_mul(0x100000001b3);
         }
-        let ext = if self.format == Format::Docx { "docx" } else { "txt" };
+        let ext = match self.format {
+            Format::Docx => "docx",
+            Format::Text => "txt",
+            Format::Markdown => "md",
+        };
         state_dir().join("recovery").join(format!("{:016x}.{}", h, ext))
     }
 
@@ -322,6 +359,7 @@ impl App {
         let res = match self.format {
             Format::Docx => wp_docx::write(&self.ed.doc, self.package.as_ref(), &p).map_err(|e| e.to_string()),
             Format::Text => std::fs::write(&p, wp_core::text::to_text(&self.ed.doc, None)).map_err(|e| e.to_string()),
+            Format::Markdown => std::fs::write(&p, self.markdown_export().text).map_err(|e| e.to_string()),
         };
         if let Err(e) = res {
             self.message(format!("Autosave failed: {}", e));
@@ -478,6 +516,10 @@ impl App {
             Cmd::SaveAsDocx => {
                 let init = self.path.as_ref().map(|p| p.with_extension("docx").display().to_string()).unwrap_or_default();
                 self.prompt(PromptKind::SaveAs(Format::Docx), "Save as .docx: ", &init);
+            }
+            Cmd::SaveAsMarkdown => {
+                let init = self.path.as_ref().map(|p| p.with_extension("md").display().to_string()).unwrap_or_default();
+                self.prompt(PromptKind::SaveAs(Format::Markdown), "Save as .md: ", &init);
             }
             Cmd::SaveAsText => {
                 let init = self.path.as_ref().map(|p| p.with_extension("txt").display().to_string()).unwrap_or_default();
@@ -1863,6 +1905,8 @@ impl App {
                             self.ed.replace_document(l.doc);
                             self.package = Some(l.package);
                         })
+                    } else if ext == "md" {
+                        std::fs::read(&p).map(|b| self.ed.replace_document(wp_md::from_markdown(&decode_text(&b)))).map_err(|e| e.into())
                     } else {
                         std::fs::read(&p).map(|b| self.ed.replace_document(wp_core::text::from_text(&decode_text(&b), false))).map_err(|e| e.into())
                     } {
@@ -1905,10 +1949,15 @@ impl App {
                 let mut p = expand_path(&v);
                 let ext = p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
                 let fmt = match ext.as_deref() {
-                    Some("txt") | Some("text") | Some("md") => Format::Text,
+                    Some("txt") | Some("text") => Format::Text,
+                    Some("md") | Some("markdown") => Format::Markdown,
                     Some("docx") => Format::Docx,
                     _ => {
-                        p.set_extension(if fmt == Format::Text { "txt" } else { "docx" });
+                        p.set_extension(match fmt {
+                            Format::Text => "txt",
+                            Format::Markdown => "md",
+                            Format::Docx => "docx",
+                        });
                         fmt
                     }
                 };

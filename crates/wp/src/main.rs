@@ -21,9 +21,10 @@ use ui::ScreenLen as _;
 
 fn usage() {
     println!("wp {} — a word processor for the terminal\n", env!("CARGO_PKG_VERSION"));
-    println!("Usage: wp [FILE.docx | FILE.txt]");
+    println!("Usage: wp [FILE.docx | FILE.md | FILE.txt]");
     println!("       wp --classic | --modern    choose the keyboard for this run");
     println!("       wp --text FILE.docx        dump a .docx as plain text and exit");
+    println!("       wp --md FILE.docx          dump a .docx as Markdown and exit");
     println!("       wp --check FILE.docx       report unsupported content and page count, then exit");
     println!("       wp --probe-keys            show what your terminal sends for each key, then Esc Esc Esc");
     println!("       wp --version");
@@ -47,6 +48,7 @@ fn main() {
             "--classic" => keymap_override = Some(KeymapChoice::Classic),
             "--modern" => keymap_override = Some(KeymapChoice::Modern),
             "--text" => mode = "text",
+            "--md" => mode = "md",
             "--probe-keys" => mode = "probe",
             "--check" => mode = "check",
             _ => file = Some(PathBuf::from(a)),
@@ -68,7 +70,15 @@ fn main() {
             Ok(l) => {
                 if mode == "text" {
                     print!("{}", wp_core::text::to_text(&l.doc, None));
+                } else if mode == "md" {
+                    let rels = |id: &str| l.package.rel_target(id);
+                    let e = wp_md::to_markdown(&l.doc, &rels);
+                    print!("{}", e.text);
+                    if let Some(w) = e.warning() {
+                        eprintln!("{}", w);
+                    }
                 } else {
+
                     let warning = l.warning_line();
                     let mut ed = wp_core::Editor::new(l.doc);
                     println!("{}: {} paragraphs, {} words, {} pages", f.display(), ed.doc.paragraphs.len(), ed.doc.word_count(), ed.page_count());
@@ -109,7 +119,12 @@ fn main() {
         } else {
             app.path = Some(f.clone());
             let ext = f.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-            app.format = if ext == "docx" || ext.is_empty() { app::Format::Docx } else { app::Format::Text };
+            app.format = match ext.as_str() {
+                "docx" | "" => app::Format::Docx,
+                "md" | "markdown" => app::Format::Markdown,
+                _ => app::Format::Text,
+            };
+
             app.message(format!("New file: {}", f.display()));
         }
     }

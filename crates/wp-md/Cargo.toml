@@ -1,0 +1,11 @@
+[package]
+name = "wp-md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Markdown import and export for wp (CommonMark + GFM tables, footnotes)"
+
+[dependencies]
+wp-core.workspace = true
+wp-docx.workspace = true
+pulldown-cmark = { version = "0.13", default-features = false }

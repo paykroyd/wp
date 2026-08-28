@@ -11,6 +11,7 @@ pub enum Cmd {
     SaveAs,
     SaveAsText,
     SaveAsDocx,
+    SaveAsMarkdown,
     Exit,
     Warnings,
     // Edit
@@ -194,7 +195,9 @@ pub static COMMANDS: &[Command] = &[
     cmd!(Save, "save", "Save", "File"),
     cmd!(SaveAs, "save-as", "Save As…", "File"),
     cmd!(SaveAsDocx, "save-as-docx", "Save As Word Document (.docx)…", "File", "export"),
+    cmd!(SaveAsMarkdown, "save-as-markdown", "Save As Markdown (.md)…", "File", "export commonmark"),
     cmd!(SaveAsText, "save-as-text", "Save As Plain Text (.txt)…", "File", "export"),
+
     cmd!(Exit, "exit", "Exit", "File", "quit close"),
     cmd!(Warnings, "warnings", "Warnings — Unsupported Content in This Document", "File", "preserved comments tracked changes"),
     cmd!(Undo, "undo", "Undo", "Edit"),

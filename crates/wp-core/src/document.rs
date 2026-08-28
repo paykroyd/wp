@@ -13,6 +13,8 @@ pub struct Document {
     pub styles: StyleSheet,
     pub section: SectionProps,
     pub numbering: Numbering,
+    pub footnotes: Vec<Footnote>,
+    pub extra_rels: Vec<ExtraRel>,
 }
 
 impl Default for Document {
@@ -51,8 +53,11 @@ impl Document {
             styles: StyleSheet::builtin(),
             section: SectionProps::default(),
             numbering: Numbering::default(),
+            footnotes: Vec::new(),
+            extra_rels: Vec::new(),
         }
     }
+
 
     pub fn from_paragraphs(paragraphs: Vec<Paragraph>) -> Document {
         let mut d = Document::new();

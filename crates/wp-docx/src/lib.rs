@@ -12,8 +12,9 @@ pub mod write;
 pub mod xml;
 
 pub use package::{DocxPackage, PackageEntry};
-pub use read::{read, read_bytes, Loaded, Warning};
-pub use write::{write, write_bytes};
+pub use read::{read, read_bytes, table_cells, Ctx, Loaded, Warning};
+pub use write::{render_paragraph_xml, write, write_bytes};
+
 
 /// Round-trip helper for tests and the corpus gate: read then write, returning
 /// the resulting bytes.

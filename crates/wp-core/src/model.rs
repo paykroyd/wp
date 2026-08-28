@@ -729,6 +729,27 @@ pub struct Paragraph {
     pub items: Vec<Item>,
 }
 
+/// A footnote body. Read from `footnotes.xml` for export, or created by a
+/// Markdown import; the `.docx` writer only generates the part when the
+/// package has none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Footnote {
+    pub id: i32,
+    pub paragraphs: Vec<Paragraph>,
+}
+
+/// A relationship the document needs that the package does not have yet
+/// (a hyperlink target created by a Markdown import).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtraRel {
+    pub id: String,
+    /// Relationship type suffix, e.g. `hyperlink`.
+    pub kind: String,
+    pub target: String,
+    pub external: bool,
+}
+
+
 impl Paragraph {
     pub fn new() -> Self {
         Self::default()

@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 wp-core.workspace = true
 wp-docx.workspace = true
+wp-md.workspace = true
+
 crossterm.workspace = true
 ratatui.workspace = true
 serde.workspace = true

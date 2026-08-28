@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wp-core", "crates/wp-docx", "crates/wp"]
+members = ["crates/wp-core", "crates/wp-docx", "crates/wp-md", "crates/wp"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,8 @@ repository = "https://github.com/aykroyd/wp"
 [workspace.dependencies]
 wp-core = { path = "crates/wp-core" }
 wp-docx = { path = "crates/wp-docx" }
+wp-md = { path = "crates/wp-md" }
+
 crossterm = "0.28"
 ratatui = "0.29"
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -114,6 +114,10 @@ pub fn read_bytes(bytes: &[u8]) -> Result<Loaded> {
     if let Some(xml) = package.numbering_part.as_deref().and_then(|p| package.get_str(p)) {
         doc.numbering = parse_numbering(&xml, &ctx);
     }
+    if let Some(xml) = package.footnotes_part.as_deref().and_then(|p| package.get_str(p)) {
+        doc.footnotes = parse_footnotes(&xml, &mut ctx);
+    }
+
 
 
     let mut warnings: Vec<Warning> = ctx.warnings.iter().map(|(k, v)| Warning { label: k.clone(), count: *v }).collect();
@@ -1161,4 +1165,77 @@ fn parse_level(xml: &str, ctx: &Ctx) -> (u8, wp_core::numbering::Level) {
     }
     l.raw = Some(xml.to_string());
     (ilvl, l)
+}
+
+// ---------------------------------------------------------------------------
+// footnotes.xml (read for export; the part itself stays verbatim)
+// ---------------------------------------------------------------------------
+
+pub fn parse_footnotes(xml: &str, ctx: &mut Ctx) -> Vec<Footnote> {
+    let mut out = Vec::new();
+    let mut reader = Reader::from_str(xml);
+    loop {
+        let before = reader.buffer_position() as usize;
+        match reader.read_event() {
+            Ok(Event::Start(e)) if e.name().as_ref() == b"w:footnote" => {
+                let id = attr_i32(&e, "w:id").unwrap_or(0);
+                let is_body = attr(&e, "w:type").is_none();
+                let _ = reader.read_to_end(e.name());
+                let after = reader.buffer_position() as usize;
+                if !is_body {
+                    continue;
+                }
+                let mut paragraphs = Vec::new();
+                for c in children_of(&xml[before..after]) {
+                    if c.tag == "w:p" {
+                        if let Ok(mut p) = parse_paragraph(&c.xml, ctx) {
+                            // The leading footnote mark is implied.
+                            p.items.retain(|it| !matches!(it, Item::Code(Code::Opaque(o)) if o.label == "Note Ref"));
+                            paragraphs.push(p);
+                        }
+                    }
+                }
+                out.push(Footnote { id, paragraphs });
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Cell text of a body-level table, row by row (for Markdown export).
+/// Returns the rows and whether anything (merges, nested tables) was lost.
+pub fn table_cells(xml: &str) -> (Vec<Vec<String>>, bool) {
+    let mut rows = Vec::new();
+    let mut lossy = false;
+    for r in children_of(xml).into_iter().filter(|c| c.tag == "w:tr") {
+        let mut cells = Vec::new();
+        for c in children_of(&r.xml).into_iter().filter(|c| c.tag == "w:tc") {
+            let mut text = String::new();
+            for child in children_of(&c.xml) {
+                match child.tag.as_str() {
+                    "w:tcPr" => {
+                        if child.xml.contains("<w:gridSpan") || child.xml.contains("<w:vMerge") {
+                            lossy = true;
+                        }
+                    }
+                    "w:p" => {
+                        let mut ctx = Ctx::new(None, None);
+                        if let Ok(p) = parse_paragraph(&child.xml, &mut ctx) {
+                            if !text.is_empty() {
+                                text.push(' ');
+                            }
+                            text.push_str(&p.text());
+                        }
+                    }
+                    "w:tbl" => lossy = true,
+                    _ => {}
+                }
+            }
+            cells.push(text);
+        }
+        rows.push(cells);
+    }
+    (rows, lossy)
 }

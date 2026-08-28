@@ -410,3 +410,46 @@ fn find_regex_format_code_and_replace_preview() {
     h.key(KeyCode::Char('z'), CTRL);
     assert!(h.app.ed.doc.paragraphs[0].text().starts_with("#12 and #345 then bold end"));
 }
+
+#[test]
+fn markdown_open_save_docx_and_back() {
+    let dir = std::env::temp_dir().join(format!("wp-md-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let md = dir.join("notes.md");
+    std::fs::write(&md, "# Notes\n\nA [link](https://example.org/) with a footnote.[^a]\n\n- item one\n- item two\n\n1. first\n2. second\n\n| h1 | h2 |\n| --- | --- |\n| x | y |\n\n[^a]: Footnote body.\n").unwrap();
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.open_path(&md).unwrap();
+    assert_eq!(h.app.format, crate::app::Format::Markdown);
+    let s = h.screen();
+    assert!(s.contains("Notes") && s.contains("• item one") && s.contains("2. second"), "{}", s);
+    assert!(s.contains("Table 2×2") || s.contains("Table"), "{}", s);
+    // To .docx: numbering, footnotes and the hyperlink relationship are all created.
+    let docx = dir.join("notes.docx");
+    h.app.save_to(&docx, crate::app::Format::Docx).unwrap();
+    let l = wp_docx::read(&docx).unwrap();
+    assert!(l.package.has("word/numbering.xml") && l.package.has("word/footnotes.xml"));
+    assert_eq!(l.package.rel_target("rIdwp1").as_deref(), Some("https://example.org/"));
+    assert_eq!(l.doc.footnotes.len(), 1);
+    assert_eq!(l.doc.paragraphs[0].props.style.as_deref(), Some("Heading1"));
+    assert!(l.package.get_str("word/document.xml").unwrap().contains("<w:footnoteReference w:id=\"1\"/>"));
+    // And back to Markdown from the .docx, links resolved through the package.
+    let mut h2 = Harness::new(KeymapChoice::Modern);
+    h2.app.open_path(&docx).unwrap();
+    let e = h2.app.markdown_export();
+    assert!(e.text.contains("# Notes"), "{}", e.text);
+    assert!(e.text.contains("[link](https://example.org/)"), "{}", e.text);
+    assert!(e.text.contains("footnote.[^1]") && e.text.contains("[^1]: Footnote body."), "{}", e.text);
+    assert!(e.text.contains("| h1 | h2 |"), "{}", e.text);
+    assert!(e.text.contains("- item one\n- item two\n\n1. first\n2. second"), "{}", e.text);
+    // Saving a formatted .docx as .md warns once about what was dropped.
+    let rep = corpus("gen-report.docx");
+    if rep.exists() {
+        let mut h3 = Harness::new(KeymapChoice::Modern);
+        h3.app.open_path(&rep).unwrap();
+        h3.app.save_to(&dir.join("report.md"), crate::app::Format::Markdown).unwrap();
+        let msg = h3.app.status_text().unwrap();
+        assert!(msg.starts_with("Saved as Markdown — not carried over:"), "{}", msg);
+        assert!(msg.contains("colours") || msg.contains("font sizes"), "{}", msg);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

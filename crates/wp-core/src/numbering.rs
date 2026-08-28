@@ -150,6 +150,8 @@ pub struct Numbering {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListLabel {
     pub text: String,
+    /// The counter value at this level (1 for bullets).
+    pub number: i32,
     pub level: u8,
     pub fmt: NumFmt,
     pub suffix: Suffix,
@@ -537,7 +539,8 @@ impl Document {
             }
             s
         };
-        Some(ListLabel { text, level: lvl as u8, fmt: level.fmt.clone(), suffix: level.suffix, align: level.align, run: level.run.clone() })
+        Some(ListLabel { text, number: counters[lvl].unwrap_or(1), level: lvl as u8, fmt: level.fmt.clone(), suffix: level.suffix, align: level.align, run: level.run.clone() })
+
     }
 }
 

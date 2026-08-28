@@ -20,6 +20,7 @@ pub struct DocxPackage {
     /// Path of the styles part, if any.
     pub styles_part: Option<String>,
     pub numbering_part: Option<String>,
+    pub footnotes_part: Option<String>,
     /// Text before the root element of the main part (XML declaration).
     pub prolog: String,
     /// The `w:document` start tag verbatim (namespace declarations).
@@ -99,9 +100,50 @@ impl DocxPackage {
         let doc_rels = self.get_str(&rels_name).unwrap_or_default();
         self.styles_part = find_rel_target(&doc_rels, "/styles", &dir).filter(|t| self.has(t));
         self.numbering_part = find_rel_target(&doc_rels, "/numbering", &dir).filter(|t| self.has(t));
+        self.footnotes_part = find_rel_target(&doc_rels, "/footnotes", &dir).filter(|t| self.has(t));
         self.main_part = main;
         Ok(())
     }
+
+    /// The main part's relationships file name.
+    pub fn main_rels_name(&self) -> String {
+        let (dir, file) = self.main_part.rsplit_once('/').map(|(d, f)| (d.to_string(), f.to_string())).unwrap_or((String::new(), self.main_part.clone()));
+        if dir.is_empty() {
+            format!("_rels/{}.rels", file)
+        } else {
+            format!("{}/_rels/{}.rels", dir, file)
+        }
+    }
+
+    /// Target of a relationship of the main part by id (for hyperlinks).
+    pub fn rel_target(&self, id: &str) -> Option<String> {
+        let rels = self.get_str(&self.main_rels_name())?;
+        let mut reader = quick_xml::Reader::from_str(&rels);
+        loop {
+            match reader.read_event() {
+                Ok(quick_xml::events::Event::Empty(e)) | Ok(quick_xml::events::Event::Start(e)) => {
+                    if e.local_name().as_ref() == b"Relationship" {
+                        let mut rid = String::new();
+                        let mut target = String::new();
+                        for a in e.attributes().flatten() {
+                            let v = a.unescape_value().ok()?.into_owned();
+                            match a.key.as_ref() {
+                                b"Id" => rid = v,
+                                b"Target" => target = v,
+                                _ => {}
+                            }
+                        }
+                        if rid == id {
+                            return Some(target);
+                        }
+                    }
+                }
+                Ok(quick_xml::events::Event::Eof) | Err(_) => return None,
+                _ => {}
+            }
+        }
+    }
+
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut buf = Cursor::new(Vec::new());
