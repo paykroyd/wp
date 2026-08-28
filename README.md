@@ -57,7 +57,8 @@ On first run you pick a keyboard. Both are complete and you can switch later.
 
 | | Modern | Classic (WordPerfect 5.1) |
 |---|---|---|
-| Command palette | `Ctrl+Shift+P` (`Cmd+Shift+P`, `Alt+=`) | `Ctrl+K` / `Alt+F10` |
+| Command palette | `Ctrl+Shift+P` (`Cmd+Shift+P`, `Cmd+P`) | `Ctrl+K` / `Alt+F10` |
+| Pull-down menus | `Alt+=` / `F10` | `Alt+=` |
 | Reveal Codes | `Alt+F3` | `Alt+F3` / `F11` |
 | Save / Open / Exit | `Ctrl+S` / `Ctrl+O` / `Ctrl+Q` (or `Cmd+…`) | `F10` / `F5` / `F7` |
 | Bold / Italic / Underline | `Cmd+B/I/U` or `Ctrl+Shift+B` / `Ctrl+I` / `Ctrl+Shift+U` | `F6` / `Ctrl+F10` / `F8` |
@@ -83,6 +84,13 @@ a page, `/` incremental find, `?` help.
 The mouse works too — click, drag, double-click a word, wheel to scroll — but
 nothing needs it. Copy and cut also reach the system clipboard through the
 terminal (OSC 52), including over SSH where the terminal allows it.
+
+The menu bar across the top lists every command by group with its key: `F10`
+(or `Alt+=`, as in WordPerfect 5.1) opens it, `←`/`→` change menu, a letter
+picks an item, `Esc` closes. *View ▸ Menu Bar* hides it the 5.1 way, where it
+appears only while a menu is open. Also under View: *Theme: Classic
+WordPerfect* — the 5.1 blue screen with its exact CGA colours, status text
+bottom right — or `theme = "classic"` in the config.
 
 Everything is rebindable in `~/.config/wp/config.toml`.
 

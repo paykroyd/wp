@@ -34,7 +34,10 @@ built and why; §11 is the current status and gap list), `KEYBINDINGS.md`.
 - `crates/wp` — the binary: `app.rs` (state + command execution), `ui.rs`
 
   (rendering), `commands.rs` (registry — every capability is a command),
-  `keymap.rs` (classic / modern / Cmd tables), `tests.rs` (headless UI tests).
+  `keymap.rs` (classic / modern / Cmd tables), `menu.rs` (pull-down menu
+  tree — items are `Cmd`s, so add to `commands.rs` first), `tests.rs`
+  (headless UI tests). Colours come from `ui::theme()`; never hard-code a
+  `Color` in a widget.
 
 ## Rules that keep the product promises
 

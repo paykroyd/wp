@@ -34,8 +34,15 @@ impl Harness {
         }
     }
 
+    /// The style of one rendered cell.
+    fn cell(&mut self, x: u16, y: u16) -> ratatui::style::Style {
+        let caps = ui::Caps { ascii: false, colors: true, truecolor: true };
+        self.term.draw(|f| ui::draw(f, &mut self.app, caps)).unwrap();
+        self.term.backend().buffer()[(x, y)].style()
+    }
+
     fn screen(&mut self) -> String {
-        let caps = ui::Caps { ascii: false, colors: true };
+        let caps = ui::Caps { ascii: false, colors: true, truecolor: true };
         self.term.draw(|f| ui::draw(f, &mut self.app, caps)).unwrap();
         let buf = self.term.backend().buffer().clone();
         let mut out = String::new();
@@ -466,6 +473,8 @@ fn markdown_open_save_docx_and_back() {
 fn mouse_click_drag_and_wheel() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.cfg.menu_bar = false; // rows below are document rows
+    h.app.resize(80, 24);
     h.type_str("first line of text");
     h.key(KeyCode::Enter, NONE);
     h.type_str("second line");
@@ -695,4 +704,147 @@ fn table_corpus_spans_and_merges_render() {
     }
     // Delete the whole document's text and undo: structure survives.
     h.key(KeyCode::Char('a'), CTRL | KeyModifiers::SHIFT);
+}
+
+#[test]
+fn menu_opens_navigates_and_runs_commands() {
+    use crate::menu::{Item, MENUS};
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.cfg.menu_bar = false; // the 5.1 way: the bar shows only while a menu is open
+    h.app.resize(80, 24);
+    h.type_str("centre me");
+    let s = h.screen();
+    assert!(s.lines().next().unwrap().contains("centre me"), "{}", s);
+    // Alt+= pops the bar and the File menu.
+    h.key(KeyCode::Char('='), ALT);
+    assert!(matches!(h.app.overlay, Overlay::Menu { menu: 0, item: 0 }));
+    let s = h.screen();
+    let bar = s.lines().next().unwrap();
+    assert!(bar.contains("File") && bar.contains("Edit") && bar.contains("Layout") && bar.contains("Help"), "{}", bar);
+    assert!(s.contains("New Document"), "{}", s);
+    assert!(s.contains("Ctrl+O"), "menu shows keys: {}", s);
+    // → moves along the bar, ↓ skips separators, letters jump.
+    h.key(KeyCode::Right, NONE);
+    assert!(matches!(h.app.overlay, Overlay::Menu { menu: 1, .. }));
+    let s = h.screen();
+    assert!(s.contains("Undo") && s.contains("Paste from Cut History"), "{}", s);
+    h.key(KeyCode::Down, NONE);
+    h.key(KeyCode::Down, NONE);
+    assert!(matches!(h.app.overlay, Overlay::Menu { menu: 1, item: 3 }), "{:?}", h.app.overlay); // Undo, Redo, ─, Cut
+    h.key(KeyCode::Char('o'), NONE); // Font's mnemonic
+    let s = h.screen();
+    assert!(s.contains("Bold") && s.contains("Small Caps"), "{}", s);
+    h.key(KeyCode::Char('l'), NONE); // Layout
+    h.key(KeyCode::Char('c'), NONE); // Center — runs it and closes the menu
+    assert!(matches!(h.app.overlay, Overlay::None));
+    assert_eq!(h.app.ed.doc.paragraphs[0].props.align, Some(wp_core::Align::Center));
+    let s = h.screen();
+    assert!(!s.lines().next().unwrap().contains("File"), "bar hides again: {}", s);
+    // Esc closes without running anything; F10 is the modern key.
+    h.key(KeyCode::F(10), NONE);
+    assert!(matches!(h.app.overlay, Overlay::Menu { .. }));
+    h.key(KeyCode::Esc, NONE);
+    assert!(matches!(h.app.overlay, Overlay::None));
+    // Classic keeps F10 = Save and uses Alt+=.
+    let mut c = Harness::new(KeymapChoice::Classic);
+    c.key(KeyCode::Char('='), ALT);
+    assert!(matches!(c.app.overlay, Overlay::Menu { .. }));
+    // Nothing is menu-only: every item is a listed palette command, once per
+    // menu, and the mnemonics are distinct.
+    let mut mn = std::collections::HashSet::new();
+    for m in MENUS {
+        assert!(mn.insert(m.mnemonic), "duplicate mnemonic {}", m.mnemonic);
+        assert!(m.title.to_ascii_uppercase().contains(m.mnemonic), "{} lacks its mnemonic {}", m.title, m.mnemonic);
+        let mut seen = std::collections::HashSet::new();
+        for it in m.items {
+            if let Item::Cmd(c) = it {
+                assert!(crate::commands::info(*c).listed, "{:?} is not a palette command", c);
+                assert!(seen.insert(*c), "{:?} twice in {}", c, m.title);
+            }
+        }
+    }
+    let (_, end) = crate::menu::title_span(MENUS.len() - 1);
+    assert!(end <= 80, "bar must fit an 80-column screen: {}", end);
+}
+
+#[test]
+fn menu_bar_pinned_and_mouse() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut h = Harness::new(KeymapChoice::Modern);
+    assert!(h.app.cfg.menu_bar, "the bar is on by default");
+    h.type_str("hello there");
+    let s = h.screen();
+    assert!(s.lines().next().unwrap().contains("File"), "{}", s);
+    assert!(s.lines().next().unwrap().contains("F1=Help"), "{}", s);
+    assert!(s.lines().nth(1).unwrap().contains("hello there"), "document moves down a row: {}", s);
+    let m = |kind, col, row| MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE };
+    // Clicking text under the bar still lands on the right character.
+    h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), 3, 1));
+    h.app.handle_mouse(m(MouseEventKind::Up(MouseButton::Left), 3, 1));
+    assert_eq!(h.app.ed.cursor, wp_core::Pos::new(0, 2));
+    // Clicking "Edit" on the bar opens it; clicking "Select All" runs it.
+    let (x, _) = crate::menu::title_span(1);
+    h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), x + 1, 0));
+    assert!(matches!(h.app.overlay, Overlay::Menu { menu: 1, .. }), "{:?}", h.app.overlay);
+    let _ = h.screen();
+    let row = crate::menu::MENUS[1].items.iter().position(|i| matches!(i, crate::menu::Item::Cmd(crate::commands::Cmd::SelectAll))).unwrap();
+    h.app.handle_mouse(m(MouseEventKind::Moved, x + 2, 2 + row as u16));
+    assert!(matches!(h.app.overlay, Overlay::Menu { menu: 1, item } if item == row));
+    h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), x + 2, 2 + row as u16));
+    assert!(matches!(h.app.overlay, Overlay::None));
+    assert_eq!(h.app.ed.selection().map(|r| h.app.ed.fragment(r).text()), Some("hello there".into()));
+    // A click elsewhere closes an open menu.
+    h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), x + 1, 0));
+    h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), 70, 20));
+    assert!(matches!(h.app.overlay, Overlay::None));
+}
+
+#[test]
+fn classic_theme_paints_the_blue_screen() {
+    use ratatui::style::{Color, Modifier};
+    const BLUE: Option<Color> = Some(Color::Rgb(0x00, 0x00, 0xAA));
+    const GREY: Option<Color> = Some(Color::Rgb(0xAA, 0xAA, 0xAA));
+    const WHITE: Option<Color> = Some(Color::Rgb(0xFF, 0xFF, 0xFF));
+    const RED: Option<Color> = Some(Color::Rgb(0xAA, 0x00, 0x00));
+    let mut h = Harness::new(KeymapChoice::Classic);
+    h.type_str("grey ");
+    h.key(KeyCode::F(6), NONE);
+    h.type_str("bold");
+    // Default: no background of our own, status line reversed.
+    assert_eq!(h.cell(0, 5).bg, Some(Color::Reset));
+    assert!(h.cell(0, 23).add_modifier.contains(Modifier::REVERSED));
+    h.app.cfg.theme = crate::config::ThemeChoice::Classic;
+    let s = h.screen();
+    assert!(s.contains("Doc 1  Pg 1/1"), "{}", s);
+    // One blue ground under everything — screen, text, menu bar, status.
+    assert_eq!(h.cell(0, 5).bg, BLUE, "empty screen");
+    assert_eq!((h.cell(1, 1).fg, h.cell(1, 1).bg), (GREY, BLUE), "body text is CGA light grey on blue");
+    let b = h.cell(7, 1); // the 'o' of bold
+    assert_eq!(b.fg, WHITE, "bold is bright white");
+    assert!(b.add_modifier.contains(Modifier::BOLD));
+    assert_eq!((h.cell(2, 0).fg, h.cell(2, 0).bg), (RED, BLUE), "menu mnemonic is CGA red");
+    assert_eq!((h.cell(3, 0).fg, h.cell(3, 0).bg), (WHITE, BLUE), "menu titles are bright white on the same blue");
+    let st = h.cell(1, 23);
+    assert_eq!((st.fg, st.bg), (WHITE, BLUE), "status text sits on the same blue, no bar");
+    assert!(!st.add_modifier.contains(Modifier::REVERSED));
+    // An open menu: its title and the current item in reverse video.
+    h.key(KeyCode::Char('='), ALT);
+    let _ = h.screen();
+    assert_eq!((h.cell(3, 0).fg, h.cell(3, 0).bg), (BLUE, GREY), "the open title is reversed");
+    assert_eq!((h.cell(3, 2).fg, h.cell(3, 2).bg), (BLUE, GREY), "the selected item is reversed");
+    assert_eq!((h.cell(3, 3).fg, h.cell(3, 3).bg), (GREY, BLUE), "other items are grey on blue");
+    // Document colours never reach the classic screen: a Word heading in the
+    // template's dark blue reads as bold white, not blue-on-blue.
+    h.key(KeyCode::Esc, NONE);
+    h.app.open_path(&corpus("gen-report.docx")).unwrap();
+    let s = h.screen();
+    let row = s.lines().position(|l| l.contains("Quarterly")).expect(&s) as u16;
+    let col = s.lines().nth(row as usize).unwrap().find("Quarterly").unwrap() as u16;
+    let c = h.cell(col, row);
+    assert!(c.fg == WHITE || c.fg == GREY, "heading colour on the classic screen: {:?}", c.fg);
+    assert_eq!(c.bg, BLUE);
+    // Without truecolor the nearest ANSI colours stand in.
+    let caps = ui::Caps { ascii: false, colors: true, truecolor: false };
+    h.term.draw(|f| ui::draw(f, &mut h.app, caps)).unwrap();
+    assert_eq!(h.term.backend().buffer()[(0, 5)].style().bg, Some(Color::Blue));
 }

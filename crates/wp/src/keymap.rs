@@ -202,6 +202,7 @@ const COMMON: &[(&str, &str)] = &[
     ("insert", "typeover"),
     ("alt+f3", "reveal-codes"),
     ("f11", "reveal-codes"),
+    ("alt+=", "menu"),
     ("ctrl+pagedown", "next-page"),
     ("ctrl+pageup", "prev-page"),
     ("ctrl+enter", "page-break"),
@@ -281,7 +282,7 @@ const MODERN: &[(&str, &str)] = &[
     ("ctrl+y", "paste"),
     // everything else
     ("ctrl+shift+p", "palette"),
-    ("alt+=", "palette"),
+    ("f10", "menu"),
     ("ctrl+s", "save"),
     ("ctrl+shift+s", "save-as"),
     ("ctrl+o", "open"),

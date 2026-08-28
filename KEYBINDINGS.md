@@ -46,6 +46,7 @@ Modified F-keys need a terminal that reports them (most do; the kitty keyboard p
 | `Ins` | Toggle Typeover (Insert/Overwrite) | Edit |
 | `Alt+F3` | Reveal Codes | View |
 | `F11` | Reveal Codes | View |
+| `Alt+=` | Menu (pull-down menus) | Navigate |
 | `Ctrl+PgDn` | Next Page | Navigate |
 | `Ctrl+PgUp` | Previous Page | Navigate |
 | `Ctrl+Enter` | Insert Page Break | Insert |
@@ -127,7 +128,7 @@ Selected with `keymap = "modern"` (the default). Movement and deletion follow em
 | `Alt+W` | Copy | Edit |
 | `Ctrl+Y` | Paste | Edit |
 | `Ctrl+Shift+P` | Command Palette | Navigate |
-| `Alt+=` | Command Palette | Navigate |
+| `F10` | Menu (pull-down menus) | Navigate |
 | `Ctrl+S` | Save | File |
 | `Ctrl+Shift+S` | Save As… | File |
 | `Ctrl+O` | Open… | File |
@@ -252,6 +253,7 @@ Commands with no default key in either map:
 - Keyboard: Modern (Ctrl+S, Ctrl+B…)
 - List Numbering Format…
 - Margins…
+- Menu Bar (always shown)
 - Orientation: Landscape
 - Orientation: Portrait
 - Page Break Before Paragraph
@@ -281,5 +283,7 @@ Commands with no default key in either map:
 - Table: Previous Cell
 - Table: Repeat Row as Header on Each Page
 - Text Color…
+- Theme: Classic WordPerfect (blue screen)
+- Theme: Terminal Default
 - Warnings — Unsupported Content in This Document
 - Widow/Orphan Control

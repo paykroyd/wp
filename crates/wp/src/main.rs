@@ -4,6 +4,7 @@ mod app;
 mod commands;
 mod config;
 mod keymap;
+mod menu;
 mod palette;
 mod ui;
 #[cfg(test)]

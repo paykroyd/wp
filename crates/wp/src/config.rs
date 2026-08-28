@@ -12,12 +12,26 @@ pub enum KeymapChoice {
     Classic,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+    /// The terminal's own colours.
+    #[default]
+    Default,
+    /// WordPerfect 5.1: light text on a blue screen, status text bottom right.
+    Classic,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub keymap: KeymapChoice,
     /// Show the F-key template legend at the bottom of the screen.
     pub fkey_legend: bool,
+    /// Keep the pull-down menu bar on screen (WordPerfect 6.0's default).
+    /// Off, it appears only while a menu is open (F10 / Alt+=), as in 5.1.
+    pub menu_bar: bool,
+    pub theme: ThemeChoice,
     pub autosave_seconds: u64,
     /// Wrap column when saving plain text (0 = no wrapping).
     pub text_wrap: usize,
@@ -40,6 +54,8 @@ impl Default for Config {
         Config {
             keymap: KeymapChoice::Modern,
             fkey_legend: false,
+            menu_bar: true,
+            theme: ThemeChoice::Default,
             autosave_seconds: 30,
             text_wrap: 0,
             show_hint: true,
@@ -94,7 +110,7 @@ impl Config {
             std::fs::create_dir_all(d)?;
         }
         let s = toml::to_string_pretty(self).unwrap_or_default();
-        let header = "# wp configuration. keymap = \"modern\" | \"classic\".\n# Rebind keys under [bindings], e.g. \"ctrl+shift+b\" = \"bold\".\n# Command ids: Ctrl+K in wp lists them.\n\n";
+        let header = "# wp configuration. keymap = \"modern\" | \"classic\"; theme = \"default\" | \"classic\".\n# Rebind keys under [bindings], e.g. \"ctrl+shift+b\" = \"bold\".\n# Command ids: Ctrl+K in wp lists them.\n\n";
         std::fs::write(p, format!("{}{}", header, s))
     }
 }

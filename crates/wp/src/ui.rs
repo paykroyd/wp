@@ -1,7 +1,8 @@
 //! Rendering: draft view, Reveal Codes pane, status line, overlays.
 
 use crate::app::{App, Overlay, View};
-use crate::config::KeymapChoice;
+use crate::config::{KeymapChoice, ThemeChoice};
+use crate::menu::{self, Item as MenuItem, MENUS};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -17,6 +18,9 @@ use wp_core::reveal;
 pub struct Caps {
     pub ascii: bool,
     pub colors: bool,
+    /// 24-bit colour: the classic theme uses the exact CGA values; without
+    /// it, the nearest of the 16 ANSI colours.
+    pub truecolor: bool,
 }
 
 pub fn detect_caps() -> Caps {
@@ -24,8 +28,41 @@ pub fn detect_caps() -> Caps {
     let lang = std::env::var("LANG").unwrap_or_default().to_lowercase() + &std::env::var("LC_ALL").unwrap_or_default().to_lowercase();
     let ascii = term == "linux" || term == "dumb" || term == "vt100" || (!lang.contains("utf") && !lang.is_empty());
     let colors = term != "dumb";
-    Caps { ascii, colors }
+    let colorterm = std::env::var("COLORTERM").unwrap_or_default().to_lowercase();
+    let program = std::env::var("TERM_PROGRAM").unwrap_or_default().to_lowercase();
+    let truecolor = colors
+        && (colorterm == "truecolor"
+            || colorterm == "24bit"
+            || ["kitty", "ghostty", "wezterm", "alacritty", "foot", "direct"].iter().any(|t| term.contains(t))
+            || ["ghostty", "iterm", "wezterm", "vscode"].iter().any(|t| program.contains(t)));
+    Caps { ascii, colors, truecolor }
 }
+
+/// The CGA/VGA text-mode palette WordPerfect 5.1 drew with, by attribute
+/// index, with the ANSI colour a 16-colour terminal shows instead.
+fn cga(caps: Caps, idx: u8) -> Color {
+    const RGB: [(u8, u8, u8); 16] = [
+        (0x00, 0x00, 0x00), (0x00, 0x00, 0xAA), (0x00, 0xAA, 0x00), (0x00, 0xAA, 0xAA),
+        (0xAA, 0x00, 0x00), (0xAA, 0x00, 0xAA), (0xAA, 0x55, 0x00), (0xAA, 0xAA, 0xAA),
+        (0x55, 0x55, 0x55), (0x55, 0x55, 0xFF), (0x55, 0xFF, 0x55), (0x55, 0xFF, 0xFF),
+        (0xFF, 0x55, 0x55), (0xFF, 0x55, 0xFF), (0xFF, 0xFF, 0x55), (0xFF, 0xFF, 0xFF),
+    ];
+    const ANSI: [Color; 16] = [
+        Color::Black, Color::Blue, Color::Green, Color::Cyan, Color::Red, Color::Magenta, Color::Yellow, Color::Gray,
+        Color::DarkGray, Color::LightBlue, Color::LightGreen, Color::LightCyan, Color::LightRed, Color::LightMagenta, Color::LightYellow, Color::White,
+    ];
+    if caps.truecolor {
+        let (r, g, b) = RGB[idx as usize & 15];
+        Color::Rgb(r, g, b)
+    } else {
+        ANSI[idx as usize & 15]
+    }
+}
+const CGA_BLUE: u8 = 1;
+const CGA_CYAN: u8 = 3;
+const CGA_RED: u8 = 4;
+const CGA_GRAY: u8 = 7;
+const CGA_WHITE: u8 = 15;
 
 pub struct Chrome {
     pub h: &'static str,
@@ -58,6 +95,119 @@ pub fn chrome(c: Caps) -> Chrome {
         j[0b1111] = '┼';
         Chrome { h: "─", v: '│', junction: j }
     }
+}
+
+/// Screen colours. `Default` leaves the terminal's own colours alone.
+/// `Classic` is the WordPerfect 5.1 screen, taken from the real thing: one
+/// blue ground (CGA 1, #0000AA) under everything — text, menu bar, status
+/// line, pop-ups; body text CGA light grey (#AAAAAA); bold, the file name,
+/// the menu titles and `Doc 1 Pg 1 Ln 1" Pos 1"` bright white; menu
+/// mnemonics CGA red; block and the current menu item in reverse video.
+#[derive(Clone, Copy)]
+pub struct Theme {
+    pub classic: bool,
+    /// Painted over the whole screen first (classic only).
+    pub base: Style,
+    /// Rules, hints, secondary text.
+    pub dim: Color,
+    /// Bold runs (classic brightens them; default leaves the modifier alone).
+    pub bold_fg: Option<Color>,
+    pub status: Style,
+    /// The transient message / indicators in the middle of the status line.
+    pub status_mid: Style,
+    pub bar: Style,
+    pub bar_open: Style,
+    /// The mnemonic letter in a menu title.
+    pub mnemonic: Style,
+    pub menu: Style,
+    pub menu_sel: Style,
+    pub border: Style,
+    pub key: Color,
+    pub prompt: Style,
+    pub confirm: Style,
+    /// Ground of pop-up boxes.
+    pub popup: Style,
+    /// A code in Reveal Codes.
+    pub code: Style,
+}
+
+pub fn theme(app: &App, caps: Caps) -> Theme {
+    if !caps.colors {
+        let rev = Style::default().add_modifier(Modifier::REVERSED);
+        return Theme {
+            classic: false,
+            base: Style::default(),
+            dim: Color::Reset,
+            bold_fg: None,
+            status: rev,
+            status_mid: Style::default(),
+            bar: rev,
+            bar_open: Style::default(),
+            mnemonic: Style::default().add_modifier(Modifier::UNDERLINED | Modifier::BOLD),
+            menu: Style::default(),
+            menu_sel: rev,
+            border: Style::default(),
+            key: Color::Reset,
+            prompt: rev,
+            confirm: rev,
+            popup: Style::default(),
+            code: rev,
+        };
+    }
+    match app.theme() {
+        ThemeChoice::Default => Theme {
+            classic: false,
+            base: Style::default(),
+            dim: Color::DarkGray,
+            bold_fg: None,
+            status: Style::default().add_modifier(Modifier::REVERSED),
+            status_mid: Style::default().fg(Color::Yellow),
+            bar: Style::default().add_modifier(Modifier::REVERSED),
+            bar_open: Style::default(),
+            mnemonic: Style::default().add_modifier(Modifier::UNDERLINED | Modifier::BOLD),
+            menu: Style::default(),
+            menu_sel: Style::default().add_modifier(Modifier::REVERSED),
+            border: Style::default().fg(Color::Cyan),
+            key: Color::Yellow,
+            prompt: Style::default().bg(Color::Blue).fg(Color::White),
+            confirm: Style::default().bg(Color::Red).fg(Color::White),
+            popup: Style::default(),
+            code: Style::default().fg(Color::Black).bg(Color::Cyan),
+        },
+        ThemeChoice::Classic => {
+            let blue = cga(caps, CGA_BLUE);
+            let grey = cga(caps, CGA_GRAY);
+            let white = cga(caps, CGA_WHITE);
+            let ground = Style::default().bg(blue).fg(grey);
+            let bright = Style::default().bg(blue).fg(white);
+            let reverse = Style::default().bg(grey).fg(blue);
+            Theme {
+                classic: true,
+                base: ground,
+                dim: cga(caps, CGA_CYAN),
+                bold_fg: Some(white),
+                status: bright,
+                status_mid: bright,
+                bar: bright,
+                bar_open: reverse,
+                mnemonic: Style::default().fg(cga(caps, CGA_RED)),
+                menu: ground,
+                menu_sel: reverse,
+                border: ground,
+                key: grey,
+                prompt: bright,
+                confirm: bright,
+                popup: ground,
+                code: reverse,
+            }
+        }
+    }
+}
+
+/// Blank a region, painting the theme's pop-up ground under it.
+fn clear(f: &mut Frame, r: Rect, th: &Theme) {
+    f.render_widget(Clear, r);
+    f.render_widget(Block::default().style(th.popup), r);
 }
 
 /// One rendered row of the draft view.
@@ -145,10 +295,13 @@ fn highlight_color(h: Highlight) -> Color {
     }
 }
 
-fn style_for(props: &RunProps, caps: Caps) -> Style {
+fn style_for(props: &RunProps, caps: Caps, th: &Theme) -> Style {
     let mut s = Style::default();
     if props.is_bold() {
         s = s.add_modifier(Modifier::BOLD);
+        if let Some(c) = th.bold_fg {
+            s = s.fg(c);
+        }
     }
     if props.is_italic() {
         s = s.add_modifier(Modifier::ITALIC);
@@ -159,7 +312,10 @@ fn style_for(props: &RunProps, caps: Caps) -> Style {
     if props.is_strike() {
         s = s.add_modifier(Modifier::CROSSED_OUT);
     }
-    if caps.colors {
+    // WordPerfect 5.1 showed attributes, never the document's colours: on
+    // the classic screen a dark-blue heading would vanish into the ground.
+    // Colour and highlight stay visible in Reveal Codes.
+    if caps.colors && !th.classic {
         if let Some(c) = props.color {
             s = s.fg(rgb(c));
         }
@@ -411,7 +567,21 @@ pub fn draw(f: &mut Frame, app: &mut App, caps: Caps) {
     let area = f.area();
     app.size = (area.width, area.height);
     let ch = chrome(caps);
+    let th = theme(app, caps);
+    if th.classic {
+        f.render_widget(Block::default().style(th.base), area);
+    }
     let mut y_bottom = area.height;
+
+    // Menu bar (top), pinned or while a menu is open.
+    let y_top = app.doc_top();
+    if y_top > 0 {
+        let open = match &app.overlay {
+            Overlay::Menu { menu, .. } => Some(*menu),
+            _ => None,
+        };
+        draw_menu_bar(f, app, Rect::new(0, 0, area.width, 1), &th, open);
+    }
 
     // Status line (bottom).
     y_bottom -= 1;
@@ -428,16 +598,17 @@ pub fn draw(f: &mut Frame, app: &mut App, caps: Caps) {
         y_bottom -= 1;
         let pal = app.keymap.label_for(crate::commands::Cmd::Palette).unwrap_or_else(|| "Ctrl+K".into());
         let help = app.keymap.label_for(crate::commands::Cmd::Help).unwrap_or_else(|| "F1".into());
-        let hint = Line::from(vec![Span::styled(format!(" {} for commands · {} for help · Alt+F3 for Reveal Codes · any key dismisses this line", pal, help), Style::default().fg(Color::DarkGray))]);
+        let menu = app.keymap.label_for(crate::commands::Cmd::Menu).unwrap_or_else(|| "Alt+=".into());
+        let hint = Line::from(vec![Span::styled(format!(" {} for commands · {} for menus · {} for help · Alt+F3 for Reveal Codes · any key dismisses this line", pal, menu, help), Style::default().fg(th.dim))]);
         f.render_widget(RParagraph::new(hint), Rect::new(0, y_bottom, area.width, 1));
     }
 
     // Reveal Codes pane.
-    let mut doc_area = Rect::new(0, 0, area.width, y_bottom);
-    if app.reveal && y_bottom >= 6 {
-        let pane_h = y_bottom * 2 / 5 + 1;
-        doc_area.height = y_bottom - pane_h;
-        draw_reveal(f, app, Rect::new(0, doc_area.height, area.width, pane_h), caps, &ch);
+    let mut doc_area = Rect::new(0, y_top, area.width, y_bottom.saturating_sub(y_top));
+    if app.reveal && doc_area.height >= 6 {
+        let pane_h = doc_area.height * 2 / 5 + 1;
+        doc_area.height -= pane_h;
+        draw_reveal(f, app, Rect::new(0, y_top + doc_area.height, area.width, pane_h), caps, &ch);
     }
 
     // Document.
@@ -457,6 +628,7 @@ pub fn draw(f: &mut Frame, app: &mut App, caps: Caps) {
 /// The document position under a screen cell, if it is in the document area.
 pub fn pos_at(app: &mut App, x: u16, y: u16) -> Option<Pos> {
     let rows = app.doc_rows() as usize;
+    let y = y.checked_sub(app.doc_top())?;
     if y as usize >= rows {
         return None;
     }
@@ -562,6 +734,7 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
     if rows == 0 {
         return None;
     }
+    let th = theme(app, caps);
     ensure_cursor_visible(app, rows);
     let left_margin: u16 = 1;
     let width = area.width.saturating_sub(left_margin + 1);
@@ -592,7 +765,7 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
                 let left = (total.saturating_sub(lw)) / 2;
                 let right = total.saturating_sub(lw + left);
                 let s = format!("{}{}{}", ch.h.repeat(left), label, ch.h.repeat(right));
-                lines_out.push(Line::from(Span::styled(s, Style::default().fg(Color::DarkGray))));
+                lines_out.push(Line::from(Span::styled(s, Style::default().fg(th.dim))));
             }
             Row::Block { para } => {
                 let p = &app.ed.doc.paragraphs[*para];
@@ -601,7 +774,7 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
                     _ => "Block".into(),
                 };
                 let text = format!("[{} — preserved, not editable in this version]", label);
-                let mut style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+                let mut style = Style::default().fg(th.dim).add_modifier(Modifier::ITALIC);
                 let selected = sel.map_or(false, |r| r.contains(Pos::new(*para, 0)));
                 if selected {
                     style = style.add_modifier(Modifier::REVERSED);
@@ -621,10 +794,10 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
             }
             Row::TableRule { table, row } => {
                 let s = table_rule(app, *table, *row, width, ch);
-                lines_out.push(Line::from(vec![Span::raw(" ".repeat(left_margin as usize)), Span::styled(s, Style::default().fg(Color::DarkGray))]));
+                lines_out.push(Line::from(vec![Span::raw(" ".repeat(left_margin as usize)), Span::styled(s, Style::default().fg(th.dim))]));
             }
             Row::TableLine { table, row, para, line } => {
-                let border = Style::default().fg(Color::DarkGray);
+                let border = Style::default().fg(th.dim);
                 let mut spans: Vec<Span> = vec![Span::raw(" ".repeat(left_margin as usize))];
                 let Some(t) = app.ed.doc.tables.get(table).cloned() else { continue };
                 let grid = app.ed.doc.table_screen_grid(&t, width);
@@ -660,7 +833,7 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
                             };
                             let text: String = format!("[{}]", label).chars().take(inner as usize).collect();
                             used = text.width() as u16;
-                            spans.push(Span::styled(text, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
+                            spans.push(Span::styled(text, Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
                             if cursor.para == p {
                                 cursor_xy = Some((area.x + x + 1, y));
                             }
@@ -703,6 +876,7 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
 /// `width`, with the list label, alignment and selection applied. Returns
 /// the cursor's x offset within the line when the cursor is on it.
 fn render_screen_line(app: &mut App, pi: usize, line: usize, width: u16, caps: Caps, sel: Option<Range>, cursor: Pos) -> (Vec<Span<'static>>, Option<u16>) {
+    let th = theme(app, caps);
     let pp = app.ed.doc.para_props(pi);
     let sl = app.ed.screen_lines(pi)[line].clone();
     let nlines = app.ed.layout_screen_len(pi);
@@ -731,7 +905,7 @@ fn render_screen_line(app: &mut App, pi: usize, line: usize, width: u16, caps: C
             }
             let props = app.ed.doc.base_run_props(pi).merge(&l.run);
             spans.push(Span::raw(" ".repeat(lx.min(x) as usize)));
-            spans.push(Span::styled(text.clone(), style_for(&props, caps)));
+            spans.push(Span::styled(text.clone(), style_for(&props, caps, &th)));
             spans.push(Span::raw(" ".repeat((x as usize).saturating_sub(lx as usize + text.width()))));
         }
         _ => spans.push(Span::raw(" ".repeat(x as usize))),
@@ -755,7 +929,7 @@ fn render_screen_line(app: &mut App, pi: usize, line: usize, width: u16, caps: C
         if pos == cursor && cursor_x.is_none() {
             cursor_x = Some(x + rel_x);
         }
-        let mut st = style_for(&runs[ri].props, caps);
+        let mut st = style_for(&runs[ri].props, caps, &th);
         if sel.map_or(false, |r| r.contains(pos)) {
             st = st.add_modifier(Modifier::REVERSED);
         }
@@ -789,7 +963,7 @@ fn render_screen_line(app: &mut App, pi: usize, line: usize, width: u16, caps: C
     for i in sl.start..sl.end {
         if let Item::Code(Code::Opaque(o)) = &p.items[i] {
             if matches!(o.label.as_str(), "Drawing" | "Picture" | "Object") {
-                spans.push(Span::styled(format!(" [{}] ", o.label), Style::default().fg(Color::DarkGray).add_modifier(Modifier::REVERSED)));
+                spans.push(Span::styled(format!(" [{}] ", o.label), Style::default().fg(th.dim).add_modifier(Modifier::REVERSED)));
             }
         }
     }
@@ -911,16 +1085,16 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect, caps: Caps) {
     let mid_w = w.saturating_sub(lw + rw + 2);
     let mid_trunc: String = truncate(&mid, mid_w);
     let pad = w.saturating_sub(lw + 2 + mid_trunc.width() + rw);
+    let th = theme(app, caps);
     let line = Line::from(vec![
         Span::styled(left, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  "),
-        Span::styled(mid_trunc, if caps.colors { Style::default().fg(Color::Yellow) } else { Style::default() }),
+        Span::styled(mid_trunc, th.status_mid),
         Span::raw(" ".repeat(pad)),
         Span::raw(right),
         Span::raw(" "),
     ]);
-    let style = if caps.colors { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default().add_modifier(Modifier::REVERSED) };
-    f.render_widget(RParagraph::new(line).style(style), area);
+    f.render_widget(RParagraph::new(line).style(th.status), area);
 }
 
 fn truncate(s: &str, w: usize) -> String {
@@ -1008,7 +1182,8 @@ fn draw_reveal(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome
     let title = " Reveal Codes ";
     let w = area.width as usize;
     let head = format!("{}{}{}", ch.h.repeat(w.saturating_sub(title.width() + 4)), title, ch.h.repeat(4));
-    f.render_widget(RParagraph::new(Line::from(Span::styled(head, Style::default().fg(Color::DarkGray)))), Rect::new(area.x, area.y, area.width, 1));
+    let th = theme(app, caps);
+    f.render_widget(RParagraph::new(Line::from(Span::styled(head, Style::default().fg(th.dim)))), Rect::new(area.x, area.y, area.width, 1));
     let body = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
     let rows = body.height as usize;
     if rows == 0 {
@@ -1016,8 +1191,8 @@ fn draw_reveal(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome
     }
     let cursor = app.ed.cursor;
     let sel = app.ed.selection();
-    let code_style = if caps.colors { Style::default().fg(Color::Black).bg(Color::Cyan) } else { Style::default().add_modifier(Modifier::REVERSED) };
-    let soft_style = if caps.colors { Style::default().fg(Color::DarkGray).add_modifier(Modifier::REVERSED) } else { Style::default().add_modifier(Modifier::DIM) };
+    let code_style = th.code;
+    let soft_style = if caps.colors { Style::default().fg(th.dim).add_modifier(Modifier::REVERSED) } else { Style::default().add_modifier(Modifier::DIM) };
 
     // Build tokens for a window of paragraphs around the cursor.
     let first = cursor.para.saturating_sub(1);
@@ -1118,11 +1293,11 @@ fn draw_reveal(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome
 
 fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome) {
     let overlay = app.overlay.clone();
-    let border_style = if caps.colors { Style::default().fg(Color::Cyan) } else { Style::default() };
-    let boxed = |title: &str| Block::default().borders(Borders::ALL).title(format!(" {} ", title)).border_style(border_style);
-    let _ = ch;
+    let th = theme(app, caps);
+    let boxed = |title: &str| Block::default().borders(Borders::ALL).title(format!(" {} ", title)).border_style(th.border).style(th.popup);
     match overlay {
         Overlay::None => {}
+        Overlay::Menu { menu, item } => draw_menu(f, app, area, &th, ch, menu, item),
         Overlay::Palette { input, selected } => {
             let rows = app.palette_rows(&input);
             let w = area.width.saturating_sub(4).min(78).max(30);
@@ -1130,7 +1305,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             let h = n + 4;
             let x = (area.width.saturating_sub(w)) / 2;
             let r = Rect::new(x, 1.min(area.height.saturating_sub(h)), w, h.min(area.height));
-            f.render_widget(Clear, r);
+            clear(f, r, &th);
             let mode = match input.chars().next() {
                 Some('@') => "Heading",
                 Some('#') => "Page",
@@ -1143,7 +1318,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             let prompt = Line::from(vec![Span::styled("> ", Style::default().add_modifier(Modifier::BOLD)), Span::raw(input.clone())]);
             f.render_widget(RParagraph::new(prompt), Rect::new(inner.x, inner.y, inner.width, 1));
             f.set_cursor_position((inner.x + 2 + input.width() as u16, inner.y));
-            let sep = Line::from(Span::styled(ch.h.repeat(inner.width as usize), Style::default().fg(Color::DarkGray)));
+            let sep = Line::from(Span::styled(ch.h.repeat(inner.width as usize), Style::default().fg(th.dim)));
             f.render_widget(RParagraph::new(sep), Rect::new(inner.x, inner.y + 1, inner.width, 1));
             let sel_i = selected.min(rows.len().saturating_sub(1));
             let first = sel_i.saturating_sub(11);
@@ -1161,21 +1336,21 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
                 }
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {}", label), style),
-                    Span::styled(detail, style.fg(Color::DarkGray)),
+                    Span::styled(detail, style.fg(th.dim)),
                     Span::styled(" ".repeat(pad), style),
-                    Span::styled(format!("{} ", row.key), style.fg(if caps.colors { Color::Yellow } else { Color::Reset })),
+                    Span::styled(format!("{} ", row.key), style.fg(th.key)),
                 ]));
             }
             if rows.is_empty() {
-                lines.push(Line::from(Span::styled("  No matching command", Style::default().fg(Color::DarkGray))));
+                lines.push(Line::from(Span::styled("  No matching command", Style::default().fg(th.dim))));
             }
             f.render_widget(RParagraph::new(lines), Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2)));
         }
         Overlay::Prompt { label, input, .. } => {
             let y = area.height.saturating_sub(2);
             let r = Rect::new(0, y, area.width, 1);
-            f.render_widget(Clear, r);
-            let style = if caps.colors { Style::default().bg(Color::Blue).fg(Color::White) } else { Style::default().add_modifier(Modifier::REVERSED) };
+            clear(f, r, &th);
+            let style = th.prompt;
             let text = format!("{}{}", label, input);
             let shown = if text.width() > area.width as usize { truncate(&text, area.width as usize) } else { text.clone() };
             f.render_widget(RParagraph::new(Line::from(shown)).style(style), r);
@@ -1188,10 +1363,10 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             let h = n + 4;
             let x = (area.width.saturating_sub(w)) / 2;
             let r = Rect::new(x, 1.min(area.height.saturating_sub(h)), w, h.min(area.height));
-            f.render_widget(Clear, r);
+            clear(f, r, &th);
             f.render_widget(boxed(&title), r);
             let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
-            let prompt = Line::from(vec![Span::styled("filter: ", Style::default().fg(Color::DarkGray)), Span::raw(filter.clone())]);
+            let prompt = Line::from(vec![Span::styled("filter: ", Style::default().fg(th.dim)), Span::raw(filter.clone())]);
             f.render_widget(RParagraph::new(prompt), Rect::new(inner.x, inner.y, inner.width, 1));
             f.set_cursor_position((inner.x + 8 + filter.width() as u16, inner.y));
             let sel_i = selected.min(visible.len().saturating_sub(1));
@@ -1205,7 +1380,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
                 let label = truncate(&it.label, (inner.width as usize / 2).max(10));
                 let detail = truncate(&it.detail, (inner.width as usize).saturating_sub(label.width() + 4));
                 let pad = (inner.width as usize).saturating_sub(2 + label.width() + 2 + detail.width());
-                lines.push(Line::from(vec![Span::styled(format!("  {}  ", label), style), Span::styled(detail, style.fg(Color::DarkGray)), Span::styled(" ".repeat(pad), style)]));
+                lines.push(Line::from(vec![Span::styled(format!("  {}  ", label), style), Span::styled(detail, style.fg(th.dim)), Span::styled(" ".repeat(pad), style)]));
             }
             f.render_widget(RParagraph::new(lines), Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2)));
         }
@@ -1216,15 +1391,15 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             let h = n + 4;
             let x = (area.width.saturating_sub(w)) / 2;
             let r = Rect::new(x, 1.min(area.height.saturating_sub(h)), w, h.min(area.height));
-            f.render_widget(Clear, r);
+            clear(f, r, &th);
             let title = format!("Open — {}", dir.display());
             f.render_widget(boxed(&tail(&title, w.saturating_sub(4) as usize)), r);
             let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
-            let prompt = Line::from(vec![Span::styled("name: ", Style::default().fg(Color::DarkGray)), Span::raw(filter.clone())]);
+            let prompt = Line::from(vec![Span::styled("name: ", Style::default().fg(th.dim)), Span::raw(filter.clone())]);
             f.render_widget(RParagraph::new(prompt), Rect::new(inner.x, inner.y, inner.width, 1));
             f.set_cursor_position((inner.x + 6 + filter.width() as u16, inner.y));
             let hint = if all { "Enter open · ←→ up/into · Tab complete · Alt+A documents only" } else { "Enter open · ←→ up/into · Tab complete · Alt+A all files" };
-            f.render_widget(RParagraph::new(Line::from(Span::styled(truncate(hint, inner.width as usize), Style::default().fg(Color::DarkGray)))), Rect::new(inner.x, inner.y + 1, inner.width, 1));
+            f.render_widget(RParagraph::new(Line::from(Span::styled(truncate(hint, inner.width as usize), Style::default().fg(th.dim)))), Rect::new(inner.x, inner.y + 1, inner.width, 1));
             let sel_i = selected.min(rows.len().saturating_sub(1));
             let first = sel_i.saturating_sub(crate::app::BROWSE_ROWS - 1);
             let mut lines = Vec::new();
@@ -1239,27 +1414,26 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
                 let name_style = if e.is_dir && caps.colors {
                     style.fg(Color::Cyan).add_modifier(Modifier::BOLD)
                 } else if !e.is_doc && !e.is_dir {
-                    style.fg(Color::DarkGray)
+                    style.fg(th.dim)
                 } else {
                     style
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {}", name), name_style),
                     Span::styled(" ".repeat(pad), style),
-                    Span::styled(format!("{}  ", e.detail), style.fg(Color::DarkGray)),
+                    Span::styled(format!("{}  ", e.detail), style.fg(th.dim)),
                 ]));
             }
             if rows.is_empty() {
-                lines.push(Line::from(Span::styled("  Nothing here matches", Style::default().fg(Color::DarkGray))));
+                lines.push(Line::from(Span::styled("  Nothing here matches", Style::default().fg(th.dim))));
             }
             f.render_widget(RParagraph::new(lines), Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2)));
         }
         Overlay::Confirm { question, .. } => {
             let y = area.height.saturating_sub(2);
             let r = Rect::new(0, y, area.width, 1);
-            f.render_widget(Clear, r);
-            let style = if caps.colors { Style::default().bg(Color::Red).fg(Color::White) } else { Style::default().add_modifier(Modifier::REVERSED) };
-            f.render_widget(RParagraph::new(Line::from(truncate(&question, area.width as usize))).style(style), r);
+            clear(f, r, &th);
+            f.render_widget(RParagraph::new(Line::from(truncate(&question, area.width as usize))).style(th.confirm), r);
         }
         Overlay::Help => {
             let lines = help_lines(app);
@@ -1267,7 +1441,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
             let x = (area.width.saturating_sub(w)) / 2;
             let r = Rect::new(x, 1, w, h);
-            f.render_widget(Clear, r);
+            clear(f, r, &th);
             f.render_widget(boxed("Help — any key closes"), r);
             let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
             f.render_widget(RParagraph::new(lines.into_iter().map(|l| Line::from(l)).collect::<Vec<_>>()), inner);
@@ -1278,11 +1452,11 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             let h = n + 5;
             let x = (area.width.saturating_sub(w)) / 2;
             let r = Rect::new(x, 1.min(area.height.saturating_sub(h)), w, h.min(area.height));
-            f.render_widget(Clear, r);
+            clear(f, r, &th);
             let title = format!("Replace {} → “{}” — {} match{}", app.find.build(&find).describe(), with, matches.len(), if matches.len() == 1 { "" } else { "es" });
             f.render_widget(boxed(&truncate(&title, w as usize - 4)), r);
             let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
-            let hint = Line::from(Span::styled("Enter/A: replace all   O: one at a time   ↑↓: preview in place   Esc: cancel", Style::default().fg(Color::DarkGray)));
+            let hint = Line::from(Span::styled("Enter/A: replace all   O: one at a time   ↑↓: preview in place   Esc: cancel", Style::default().fg(th.dim)));
             f.render_widget(RParagraph::new(hint), Rect::new(inner.x, inner.y, inner.width, 1));
             let sel_i = selected.min(matches.len().saturating_sub(1));
             let first = sel_i.saturating_sub(13);
@@ -1305,8 +1479,8 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
         Overlay::ReplaceStep { with, done, total, .. } => {
             let y = area.height.saturating_sub(2);
             let r = Rect::new(0, y, area.width, 1);
-            f.render_widget(Clear, r);
-            let style = if caps.colors { Style::default().bg(Color::Blue).fg(Color::White) } else { Style::default().add_modifier(Modifier::REVERSED) };
+            clear(f, r, &th);
+            let style = th.prompt;
             let text = format!("Replace this one with “{}”?  y = yes  n = skip  a = all remaining  Esc = stop   ({} of {} replaced)", with, done, total);
             f.render_widget(RParagraph::new(Line::from(truncate(&text, area.width as usize))).style(style), r);
         }
@@ -1316,11 +1490,126 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
             let x = (area.width.saturating_sub(w)) / 2;
             let r = Rect::new(x, 1, w, h);
-            f.render_widget(Clear, r);
+            clear(f, r, &th);
             f.render_widget(boxed(&format!("{} — any key closes", title)), r);
             let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
             f.render_widget(RParagraph::new(lines.into_iter().map(Line::from).collect::<Vec<_>>()), inner);
         }
+    }
+}
+
+/// A command's title as it reads inside its menu: the menu name is already
+/// the context, so "Table: Insert…" becomes "Insert…".
+fn menu_label(cmd: crate::commands::Cmd) -> String {
+    let t = crate::commands::info(cmd).title;
+    let t = t.strip_prefix("Table: ").or_else(|| t.strip_prefix("Style: ")).or_else(|| t.strip_prefix("Find Option: ")).unwrap_or(t);
+    let t = t.split(" — ").next().unwrap_or(t);
+    let t = t.split(" (").next().unwrap_or(t);
+    t.to_string()
+}
+
+/// Width of a menu's drop-down, borders included.
+pub fn menu_width(app: &App, menu: usize) -> u16 {
+    let mut w = menu::title_width(&MENUS[menu]) as usize + 4;
+    for it in MENUS[menu].items {
+        if let MenuItem::Cmd(c) = it {
+            let key = app.keymap.label_for(*c).unwrap_or_default();
+            w = w.max(2 + menu_label(*c).width() + 3 + key.width() + 1);
+        }
+    }
+    (w + 2).min(app.size.0 as usize).max(8) as u16
+}
+
+/// The drop-down's frame: (x, width, first visible item, visible item count).
+/// A menu taller than the screen scrolls so the selected item stays visible.
+pub fn menu_frame(app: &App, menu: usize, item: usize) -> (u16, u16, usize, usize) {
+    let items = MENUS[menu].items;
+    let w = menu_width(app, menu);
+    let (mut x0, _) = menu::title_span(menu);
+    if x0 + w > app.size.0 {
+        x0 = app.size.0.saturating_sub(w);
+    }
+    let avail = (app.size.1.saturating_sub(1 + 2) as usize).min(items.len());
+    let first = if item >= avail { item + 1 - avail } else { 0 };
+    (x0, w, first, avail)
+}
+
+fn draw_menu_bar(f: &mut Frame, _app: &App, area: Rect, th: &Theme, open: Option<usize>) {
+    let mut spans: Vec<Span> = vec![Span::styled(" ", th.bar)];
+    for (i, m) in MENUS.iter().enumerate() {
+        let st = if open == Some(i) { th.bar_open } else { th.bar };
+        spans.push(Span::styled(" ", st));
+        let mut marked = false;
+        for c in m.title.chars() {
+            if !marked && c.to_ascii_uppercase() == m.mnemonic {
+                let ms = if open == Some(i) { st.add_modifier(Modifier::BOLD) } else { st.patch(th.mnemonic) };
+                spans.push(Span::styled(c.to_string(), ms));
+                marked = true;
+            } else {
+                spans.push(Span::styled(c.to_string(), st));
+            }
+        }
+        spans.push(Span::styled(" ", st));
+    }
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    let help = format!("{}=Help ", _app.keymap.label_for(crate::commands::Cmd::Help).unwrap_or_else(|| "F1".into()));
+    let pad = (area.width as usize).saturating_sub(used);
+    if help.width() + 2 <= pad {
+        spans.push(Span::styled(" ".repeat(pad - help.width()), th.bar));
+        spans.push(Span::styled(help, th.bar));
+    } else {
+        spans.push(Span::styled(" ".repeat(pad), th.bar));
+    }
+    f.render_widget(RParagraph::new(Line::from(clip_spans(spans, area.width as usize))), area);
+}
+
+fn draw_menu(f: &mut Frame, app: &mut App, area: Rect, th: &Theme, ch: &Chrome, menu: usize, item: usize) {
+    let items = MENUS[menu].items;
+    let (x0, w, first, shown) = menu_frame(app, menu, item);
+    let h = shown as u16 + 2;
+    if shown == 0 || area.width < w {
+        return;
+    }
+    let r = Rect::new(x0, 1, w, h);
+    clear(f, r, th);
+    f.render_widget(Block::default().borders(Borders::ALL).border_style(th.border).style(th.menu), r);
+    let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, it) in items.iter().enumerate().skip(first).take(shown) {
+        let y = inner.y + (i - first) as u16;
+        match it {
+            MenuItem::Sep => {
+                // Extend the rule into the borders.
+                let rule = format!("{}{}{}", ch.junction[0b1011], ch.h.repeat(inner.width as usize), ch.junction[0b0111]);
+                f.render_widget(RParagraph::new(Line::from(Span::styled(rule, th.border))), Rect::new(r.x, y, r.width, 1));
+                lines.push(Line::default());
+            }
+            MenuItem::Cmd(c) => {
+                let key = app.keymap.label_for(*c).unwrap_or_default();
+                let label = truncate(&menu_label(*c), (inner.width as usize).saturating_sub(key.width() + 5));
+                let pad = (inner.width as usize).saturating_sub(2 + label.width() + key.width() + 1);
+                let st = if i == item { th.menu_sel } else { th.menu };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {}", label), st),
+                    Span::styled(" ".repeat(pad), st),
+                    Span::styled(format!("{} ", key), if i == item { st } else { st.fg(th.key) }),
+                ]));
+            }
+        }
+    }
+    // Draw item rows one at a time so separators (already painted) are left alone.
+    for (k, line) in lines.into_iter().enumerate() {
+        if matches!(items[first + k], MenuItem::Sep) {
+            continue;
+        }
+        f.render_widget(RParagraph::new(line), Rect::new(inner.x, inner.y + k as u16, inner.width, 1));
+    }
+    // More above / below: mark the border.
+    if first > 0 {
+        f.render_widget(RParagraph::new(Line::from(Span::styled(if ch.h == "-" { "^" } else { "▲" }, th.border))), Rect::new(r.x + r.width - 2, r.y, 1, 1));
+    }
+    if first + shown < items.len() {
+        f.render_widget(RParagraph::new(Line::from(Span::styled(if ch.h == "-" { "v" } else { "▼" }, th.border))), Rect::new(r.x + r.width - 2, r.y + r.height - 1, 1, 1));
     }
 }
 

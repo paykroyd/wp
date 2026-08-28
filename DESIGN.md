@@ -334,8 +334,8 @@ App
 ├── Editor            document + cursor + selection + undo + layout caches
 ├── Commands          registry: id, title, category, handler
 ├── Keymap            two tables (classic, modern); modern includes classic F-keys
-├── Views             draft, page, reveal-codes pane, palette, open dialog,
-│                     help, prompts
+├── Views             draft, page, reveal-codes pane, palette, menus, open
+│                     dialog, help, prompts
 └── Status            filename, dirty flag, Doc/Pg/Ln/Pos, transient indicators
 ```
 
@@ -425,7 +425,8 @@ the classic map keeps `Ctrl+K`. `Cmd+P` earns its place because Ghostty 1.2
 took `Cmd+Shift+P` for its own palette, and `wp` has no Print to collide
 with. On macOS the *advertised* label never picks an `Alt+` binding when the
 command has another: Option is not Alt unless the terminal is configured to
-send it, so `Alt+=` was being shown for a key most Mac users cannot press.
+send it, so `Alt+=` was being shown for a key most Mac users cannot press (it is now
+the menu key, and the modern map's `F10` twin is what gets advertised).
 A Cmd/Super layer rides on top of the modern map for terminals that deliver
 it via the kitty keyboard protocol; every Cmd binding has a Ctrl or F-key
 twin, so nothing depends on it.
@@ -491,7 +492,13 @@ paste it); page view.
   with `w:ins`/`w:del`, comments, fields, hyperlinks, SDTs, and a table).
 - `wp`: draft view with true page rules and paragraph-spacing gaps, status
   block, Reveal Codes pane with editable codes and paragraph pseudo-codes,
-  command palette with `> @ # / ?` modes and key labels, an Open dialog that
+  command palette with `> @ # / ?` modes and key labels, WordPerfect-style
+  pull-down menus (`F10` / `Alt+=`; the bar is on by default and View ▸ Menu
+  Bar makes it 5.1-style, shown only while open; every item is a registry
+  command and the test checks it), a classic blue-screen theme
+  (`theme = "classic"`, colours sampled from a WP 5.1 screenshot: CGA blue
+  ground, light-grey text, bright-white bold and status, red mnemonics, with
+  a 16-colour fallback), an Open dialog that
   browses directories (type to filter, Tab to complete, `/` to jump to a typed
   path), both keymaps with the classic F-key layer, rebinding from config,
   incremental find, replace-all,

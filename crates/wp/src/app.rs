@@ -1,7 +1,7 @@
 //! Application state and command execution.
 
 use crate::commands::{info, Cmd, COMMANDS};
-use crate::config::{state_dir, Config, KeymapChoice};
+use crate::config::{state_dir, Config, KeymapChoice, ThemeChoice};
 use crate::keymap::{Key, Keymap};
 use crate::palette;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -97,6 +97,8 @@ pub enum Overlay {
     Confirm { question: String, action: ConfirmAction },
     Help,
     Message { title: String, lines: Vec<String> },
+    /// A pull-down menu is open: `menu` on the bar, `item` highlighted.
+    Menu { menu: usize, item: usize },
     /// Every match listed before a replace-all; ↑↓ previews each in place.
     ReplacePreview { find: String, with: String, matches: Vec<Match>, selected: usize },
     /// One-at-a-time replacement: the current match is selected in the document.
@@ -245,7 +247,24 @@ impl App {
             return;
         }
         match &self.overlay {
-            Overlay::None => {}
+            Overlay::None => {
+                // A click on the pinned menu bar opens that menu.
+                if self.cfg.menu_bar && ev.row == 0 && matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if let Some(m) = crate::menu::menu_at(ev.column) {
+                        self.needs_redraw = true;
+                        self.overlay = Overlay::Menu { menu: m, item: crate::menu::first_item(m) };
+                    }
+                    return;
+                }
+            }
+            Overlay::Menu { menu, item } => {
+                // Taken out first, like keys: a handler that runs a command
+                // leaves the menu closed unless it puts it back.
+                let (menu, item) = (*menu, *item);
+                self.overlay = Overlay::None;
+                self.menu_mouse(menu, item, ev);
+                return;
+            }
             Overlay::Palette { .. } | Overlay::List { .. } | Overlay::ReplacePreview { .. } => {
                 let code = match ev.kind {
                     MouseEventKind::ScrollUp => Some(KeyCode::Up),
@@ -549,8 +568,23 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// The menu bar is on screen when pinned in the config or while a menu
+    /// is open.
+    pub fn menu_bar_visible(&self) -> bool {
+        self.cfg.menu_bar || matches!(self.overlay, Overlay::Menu { .. })
+    }
+
+    /// The first screen row of the document area.
+    pub fn doc_top(&self) -> u16 {
+        if self.menu_bar_visible() { 1 } else { 0 }
+    }
+
+    pub fn theme(&self) -> ThemeChoice {
+        self.cfg.theme
+    }
+
     pub fn doc_rows(&self) -> u16 {
-        let mut h = self.size.1.saturating_sub(1); // status line
+        let mut h = self.size.1.saturating_sub(1 + self.doc_top()); // status line, menu bar
         if self.cfg.fkey_legend {
             h = h.saturating_sub(5);
         }
@@ -1186,6 +1220,14 @@ impl App {
             }
             Cmd::Redraw => {}
             Cmd::Palette => self.overlay = Overlay::Palette { input: String::new(), selected: 0 },
+            Cmd::Menu => self.overlay = Overlay::Menu { menu: 0, item: crate::menu::first_item(0) },
+            Cmd::MenuBar => {
+                self.cfg.menu_bar = !self.cfg.menu_bar;
+                let _ = self.cfg.save();
+                self.resize(self.size.0, self.size.1);
+            }
+            Cmd::ThemeDefault => self.set_theme(ThemeChoice::Default),
+            Cmd::ThemeClassic => self.set_theme(ThemeChoice::Classic),
             Cmd::GoToPage => {
                 let n = self.ed.page_count();
                 self.prompt(PromptKind::GoToPage, &format!("Go to page (1–{}): ", n), "");
@@ -1760,6 +1802,108 @@ impl App {
     // Overlays
     // ------------------------------------------------------------------
 
+    fn set_theme(&mut self, t: ThemeChoice) {
+        self.cfg.theme = t;
+        let _ = self.cfg.save();
+        self.message(match t {
+            ThemeChoice::Default => "Theme: terminal default",
+            ThemeChoice::Classic => "Theme: classic WordPerfect",
+        });
+    }
+
+    /// Keys while a menu is open: ←/→ change menu, ↑/↓ move, Enter runs,
+    /// a letter jumps to the item (or, with Alt, the menu) it starts with.
+    fn menu_key(&mut self, menu: usize, item: usize, ev: KeyEvent) {
+        use crate::menu::{self, Item, MENUS};
+        let key = Key::from_event(&ev);
+        let n = MENUS.len();
+        // Alt+= / F10 again, Esc, or the keymap's Cancel key closes the menu.
+        if matches!(self.keymap.lookup(&key), Some(Cmd::Menu) | Some(Cmd::Cancel)) {
+            return;
+        }
+        match ev.code {
+            KeyCode::Esc => {}
+            KeyCode::Left => self.overlay = Overlay::Menu { menu: (menu + n - 1) % n, item: menu::first_item((menu + n - 1) % n) },
+            KeyCode::Right | KeyCode::Tab => self.overlay = Overlay::Menu { menu: (menu + 1) % n, item: menu::first_item((menu + 1) % n) },
+            KeyCode::Up => self.overlay = Overlay::Menu { menu, item: menu::prev_item(menu, item) },
+            KeyCode::Down => self.overlay = Overlay::Menu { menu, item: menu::next_item(menu, item) },
+            KeyCode::Home => self.overlay = Overlay::Menu { menu, item: menu::first_item(menu) },
+            KeyCode::End => self.overlay = Overlay::Menu { menu, item: menu::prev_item(menu, menu::first_item(menu)) },
+            KeyCode::Enter => {
+                if let Some(Item::Cmd(c)) = MENUS[menu].items.get(item) {
+                    self.exec(*c);
+                }
+            }
+            KeyCode::Char(c) if key.alt => {
+                if let Some(m) = menu::menu_by_letter(c) {
+                    self.overlay = Overlay::Menu { menu: m, item: menu::first_item(m) };
+                } else {
+                    self.overlay = Overlay::Menu { menu, item };
+                }
+            }
+            KeyCode::Char(c) if !key.ctrl && !key.sup => {
+                // An item's first letter runs it; a menu mnemonic switches menus.
+                if let Some(i) = menu::item_by_letter(menu, item, c) {
+                    if let Some(Item::Cmd(cmd)) = MENUS[menu].items.get(i) {
+                        self.exec(*cmd);
+                    }
+                } else if let Some(m) = menu::menu_by_letter(c) {
+                    self.overlay = Overlay::Menu { menu: m, item: menu::first_item(m) };
+                } else {
+                    self.overlay = Overlay::Menu { menu, item };
+                }
+            }
+            _ => self.overlay = Overlay::Menu { menu, item },
+        }
+    }
+
+    /// Mouse while a menu is open: click a title to switch, an item to run
+    /// it, anywhere else to close. Moving over the bar or the list follows.
+    fn menu_mouse(&mut self, menu: usize, item: usize, ev: MouseEvent) {
+        use crate::menu::{self, Item, MENUS};
+        self.needs_redraw = true;
+        let (x0, w, first, shown) = crate::ui::menu_frame(self, menu, item);
+        let items = MENUS[menu].items;
+        // The drop-down: rows 2.. (row 1 is its top border), columns x0..x0+w.
+        let in_list = |col: u16, row: u16| -> Option<usize> {
+            let r = row.checked_sub(2)? as usize + first;
+            if r < first + shown && col >= x0 && col < x0 + w && matches!(items[r], Item::Cmd(_)) {
+                Some(r)
+            } else {
+                None
+            }
+        };
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if ev.row == 0 {
+                    match menu::menu_at(ev.column) {
+                        Some(m) if m != menu => self.overlay = Overlay::Menu { menu: m, item: menu::first_item(m) },
+                        Some(_) => {} // clicking the open title closes it
+                        None => {}
+                    }
+                } else if let Some(i) = in_list(ev.column, ev.row) {
+                    if let Item::Cmd(c) = items[i] {
+                        self.exec(c);
+                    }
+                }
+                // anywhere else: closed
+            }
+            MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
+                if ev.row == 0 {
+                    if let Some(m) = menu::menu_at(ev.column) {
+                        self.overlay = Overlay::Menu { menu: m, item: if m == menu { item } else { menu::first_item(m) } };
+                        return;
+                    }
+                }
+                let i = in_list(ev.column, ev.row).unwrap_or(item);
+                self.overlay = Overlay::Menu { menu, item: i };
+            }
+            MouseEventKind::ScrollUp => self.overlay = Overlay::Menu { menu, item: menu::prev_item(menu, item) },
+            MouseEventKind::ScrollDown => self.overlay = Overlay::Menu { menu, item: menu::next_item(menu, item) },
+            _ => self.overlay = Overlay::Menu { menu, item },
+        }
+    }
+
     pub fn palette_rows(&mut self, input: &str) -> Vec<PaletteRow> {
         let (mode, q) = match input.chars().next() {
             Some('@') => ('@', &input[1..]),
@@ -2069,6 +2213,7 @@ impl App {
                 _ => self.overlay = Overlay::Confirm { question, action },
             },
             Overlay::Help | Overlay::Message { .. } => {}
+            Overlay::Menu { menu, item } => self.menu_key(menu, item, ev),
             Overlay::ReplacePreview { find, with, matches, mut selected } => match ev.code {
                 KeyCode::Esc => {
                     self.ed.anchor = None;
