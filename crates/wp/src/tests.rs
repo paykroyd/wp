@@ -453,3 +453,34 @@ fn markdown_open_save_docx_and_back() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn mouse_click_drag_and_wheel() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("first line of text");
+    h.key(KeyCode::Enter, NONE);
+    h.type_str("second line");
+    let _ = h.screen();
+    let m = |kind, col, row| MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE };
+    // Text starts at column 1; click on the 'r' of "first" (column 3, row 0).
+    h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), 3, 0));
+    h.app.handle_mouse(m(MouseEventKind::Up(MouseButton::Left), 3, 0));
+    assert_eq!(h.app.ed.cursor, wp_core::Pos::new(0, 2));
+    // Drag to the second line selects across the paragraph break.
+    h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), 1, 0));
+    h.app.handle_mouse(m(MouseEventKind::Drag(MouseButton::Left), 7, 2)); // row 1 is the spacing gap
+    h.app.handle_mouse(m(MouseEventKind::Up(MouseButton::Left), 7, 2));
+    let sel = h.app.ed.selection().unwrap();
+    assert_eq!((sel.start, sel.end), (wp_core::Pos::new(0, 0), wp_core::Pos::new(1, 6)));
+    assert_eq!(h.app.ed.fragment(sel).text(), "first line of text\nsecond");
+    // Wheel moves the cursor by lines; clicking past the end lands at the end.
+    h.app.handle_mouse(m(MouseEventKind::ScrollUp, 0, 0));
+    assert_eq!(h.app.ed.cursor.para, 0);
+    h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), 60, 2));
+    assert_eq!(h.app.ed.cursor, wp_core::Pos::new(1, 11));
+    // Mouse off: events are ignored.
+    h.app.cfg.mouse = false;
+    h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), 1, 0));
+    assert_eq!(h.app.ed.cursor, wp_core::Pos::new(1, 11));
+}

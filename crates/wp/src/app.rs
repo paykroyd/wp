@@ -4,7 +4,7 @@ use crate::commands::{info, Cmd, COMMANDS};
 use crate::config::{state_dir, Config, KeymapChoice};
 use crate::keymap::{Key, Keymap};
 use crate::palette;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use wp_core::model::*;
@@ -175,6 +175,12 @@ pub struct App {
     pub needs_redraw: bool,
     pub block_mode: bool,
     pub quit_after_save: bool,
+    /// Text to hand to the terminal's clipboard (OSC 52) after this event.
+    pub clipboard_out: Option<String>,
+    /// Mouse state: a button is held (dragging selects), and the last click
+    /// for double-click detection.
+    mouse_down: bool,
+    last_click: Option<(Pos, Instant)>,
 }
 
 const UNTITLED: &str = "Untitled";
@@ -210,10 +216,90 @@ impl App {
             needs_redraw: true,
             block_mode: false,
             quit_after_save: false,
+            clipboard_out: None,
+            mouse_down: false,
+            last_click: None,
+        }
+    }
+
+    /// Mouse: click places the cursor, drag selects, double-click selects a
+    /// word, the wheel scrolls; lists and the palette follow the wheel.
+    pub fn handle_mouse(&mut self, ev: MouseEvent) {
+        if !self.cfg.mouse {
+            return;
+        }
+        match &self.overlay {
+            Overlay::None => {}
+            Overlay::Palette { .. } | Overlay::List { .. } | Overlay::ReplacePreview { .. } => {
+                let code = match ev.kind {
+                    MouseEventKind::ScrollUp => Some(KeyCode::Up),
+                    MouseEventKind::ScrollDown => Some(KeyCode::Down),
+                    _ => None,
+                };
+                if let Some(c) = code {
+                    self.handle_key(KeyEvent::new(c, crossterm::event::KeyModifiers::NONE));
+                }
+                return;
+            }
+            _ => return,
+        }
+        self.needs_redraw = true;
+        match ev.kind {
+            MouseEventKind::ScrollUp => self.ed.move_lines(-3, false),
+            MouseEventKind::ScrollDown => self.ed.move_lines(3, false),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(p) = crate::ui::pos_at(self, ev.column, ev.row) else { return };
+                self.mouse_down = true;
+                self.reveal_para_code = None;
+                let double = self.last_click.map_or(false, |(lp, t)| lp == p && t.elapsed() < Duration::from_millis(450));
+                self.last_click = Some((p, Instant::now()));
+                if double {
+                    self.ed.move_to(p, false);
+                    self.ed.word_left(false);
+                    self.ed.word_right(true);
+                    self.block_mode = self.ed.has_selection();
+                } else {
+                    let shift = ev.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+                    self.ed.move_to(p, shift);
+                    if !shift {
+                        self.block_mode = false;
+                    }
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.mouse_down {
+                    if let Some(p) = crate::ui::pos_at(self, ev.column, ev.row) {
+                        self.ed.move_to(p, true);
+                        self.block_mode = self.ed.has_selection();
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.mouse_down = false,
+            _ => {}
+        }
+    }
+
+    /// Bracketed paste from the terminal: typed into the document (or into
+    /// a prompt), never interpreted as keys.
+    pub fn paste_text(&mut self, s: &str) {
+        self.needs_redraw = true;
+        match &mut self.overlay {
+            Overlay::None => {
+                if self.guard_edit() {
+                    let s = s.replace("\r\n", "\n").replace('\r', "\n");
+                    self.ed.insert_str(&s);
+                    self.block_mode = false;
+                }
+            }
+            Overlay::Prompt { input, .. } => input.push_str(s.lines().next().unwrap_or("")),
+            Overlay::Palette { input, .. } => input.push_str(s.lines().next().unwrap_or("")),
+            Overlay::List { filter, .. } => filter.push_str(s.lines().next().unwrap_or("")),
+            _ => {}
         }
     }
 
     pub fn title(&self) -> String {
+
         self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| UNTITLED.into())
     }
 
@@ -566,6 +652,9 @@ impl App {
                 if self.guard_edit() {
                     match self.ed.cut() {
                         Some(f) => {
+                            if self.cfg.system_clipboard {
+                                self.clipboard_out = Some(f.text());
+                            }
                             self.clipboard = Some(f);
                             self.block_mode = false;
                         }
@@ -575,7 +664,11 @@ impl App {
             }
             Cmd::Copy => match self.ed.copy() {
                 Some(f) => {
+                    if self.cfg.system_clipboard {
+                        self.clipboard_out = Some(f.text());
+                    }
                     self.clipboard = Some(f);
+
                     self.ed.clear_selection();
                     self.block_mode = false;
                     self.message("Copied");

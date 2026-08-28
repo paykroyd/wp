@@ -25,6 +25,12 @@ pub struct Config {
     pub show_hint: bool,
     /// Draw a blank row between paragraphs that have paragraph spacing.
     pub draft_spacing: bool,
+    /// Click to place the cursor, drag to select, wheel to scroll. Off means
+    /// the terminal keeps the mouse (for its own copy/paste).
+    pub mouse: bool,
+    /// Copy and cut also write to the system clipboard through the terminal
+    /// (OSC 52) — works over SSH in terminals that allow it.
+    pub system_clipboard: bool,
     /// Extra bindings: key → command id, e.g. `"ctrl+shift+b" = "bold"`.
     pub bindings: BTreeMap<String, String>,
 }
@@ -38,7 +44,10 @@ impl Default for Config {
             text_wrap: 0,
             show_hint: true,
             draft_spacing: true,
+            mouse: true,
+            system_clipboard: true,
             bindings: BTreeMap::new(),
+
         }
     }
 }

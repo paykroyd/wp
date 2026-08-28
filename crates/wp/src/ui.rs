@@ -323,8 +323,64 @@ pub fn draw(f: &mut Frame, app: &mut App, caps: Caps) {
     }
 }
 
+/// The document position under a screen cell, if it is in the document area.
+pub fn pos_at(app: &mut App, x: u16, y: u16) -> Option<Pos> {
+    let rows = app.doc_rows() as usize;
+    if y as usize >= rows {
+        return None;
+    }
+    let scroll = app.scroll;
+    let cols = app.ed.cols();
+    let mut walker = RowWalker::new(app, scroll);
+    let mut row = None;
+    for _ in 0..=y {
+        row = walker.next_row();
+        if row.is_none() {
+            break;
+        }
+    }
+    drop(walker);
+    match row {
+        Some(Row::Line { para, line }) => {
+            let pp = app.ed.doc.para_props(para);
+            let sl = app.ed.screen_lines(para)[line].clone();
+            let width = app.size.0.saturating_sub(2);
+            let slack = width.saturating_sub(sl.indent).saturating_sub(sl.width);
+            let align_off = match pp.align() {
+                Align::Center => slack / 2,
+                Align::Right => slack,
+                _ => 0,
+            };
+            let x0 = 1 + sl.indent + align_off;
+            let _ = cols;
+            let p = &app.ed.doc.paragraphs[para];
+            let idx = layout::screen_idx_at_x(p, &pp, &sl, x.saturating_sub(x0));
+            Some(Pos::new(para, idx))
+        }
+        Some(Row::Block { para }) => Some(Pos::new(para, 0)),
+        Some(Row::Gap) | Some(Row::PageRule(_)) | None => {
+            // Between paragraphs: land on the nearer line above.
+            let mut walker = RowWalker::new(app, scroll);
+            let mut last = None;
+            for _ in 0..=y {
+                match walker.next_row() {
+                    Some(Row::Line { para, line }) => last = Some((para, line)),
+                    Some(Row::Block { para }) => last = Some((para, 0)),
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+            drop(walker);
+            let (para, line) = last?;
+            let end = app.ed.screen_lines(para)[line].end;
+            Some(Pos::new(para, end))
+        }
+    }
+}
+
 /// Returns the cursor screen position.
 fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome) -> Option<(u16, u16)> {
+
     let rows = area.height as usize;
     if rows == 0 {
         return None;

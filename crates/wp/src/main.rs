@@ -11,7 +11,7 @@ mod tests;
 
 use app::App;
 use config::{Config, KeymapChoice};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+use crossterm::event::{self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use std::io::{self, Write};
@@ -194,10 +194,13 @@ fn first_run_prompt() -> Option<KeymapChoice> {
     }
 }
 
-fn setup_terminal() -> io::Result<()> {
+fn setup_terminal(mouse: bool) -> io::Result<()> {
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen)?;
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
+    if mouse {
+        let _ = execute!(out, EnableMouseCapture);
+    }
     // Kitty keyboard protocol where available: disambiguates Shift+F8, Ctrl+Enter, etc.
     let _ = execute!(
         out,
@@ -209,13 +212,42 @@ fn setup_terminal() -> io::Result<()> {
 fn restore_terminal() -> io::Result<()> {
     let mut out = io::stdout();
     let _ = execute!(out, PopKeyboardEnhancementFlags);
+    let _ = execute!(out, DisableMouseCapture, DisableBracketedPaste);
     execute!(out, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     Ok(())
 }
 
+/// Hand text to the terminal's clipboard with OSC 52 (through tmux's
+/// passthrough when inside tmux). Terminals that disallow it ignore it.
+fn osc52_copy(text: &str) {
+    let b64 = base64(text.as_bytes());
+    let seq = if std::env::var("TMUX").is_ok() {
+        format!("\x1bPtmux;\x1b\x1b]52;c;{}\x07\x1b\\", b64)
+    } else {
+        format!("\x1b]52;c;{}\x07", b64)
+    };
+    let mut out = io::stdout();
+    let _ = out.write_all(seq.as_bytes());
+    let _ = out.flush();
+}
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len() * 4 / 3 + 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 fn run(app: &mut App) -> anyhow::Result<()> {
-    setup_terminal()?;
+    setup_terminal(app.cfg.mouse)?;
     // Restore the terminal even if we panic, so the shell is usable.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -253,19 +285,34 @@ fn run(app: &mut App) -> anyhow::Result<()> {
                         match event::read()? {
                             Event::Key(k2) if k2.kind != KeyEventKind::Release => app.handle_key(k2),
                             Event::Resize(w, h) => app.resize(w, h),
-                            Event::Paste(s) => app.ed.insert_str(&s),
+                            Event::Paste(s) => app.paste_text(&s),
+                            Event::Mouse(m) => app.handle_mouse(m),
+                            _ => {}
+                        }
+                    }
+                }
+                Event::Mouse(m) => {
+                    app.handle_mouse(m);
+                    // Coalesce a burst of drag / wheel events.
+                    while event::poll(Duration::from_millis(0))? {
+                        match event::read()? {
+                            Event::Mouse(m2) => app.handle_mouse(m2),
+                            Event::Key(k2) if k2.kind != KeyEventKind::Release => app.handle_key(k2),
+                            Event::Resize(w, h) => app.resize(w, h),
+                            Event::Paste(s) => app.paste_text(&s),
                             _ => {}
                         }
                     }
                 }
                 Event::Resize(w, h) => app.resize(w, h),
-                Event::Paste(s) => {
-                    app.ed.insert_str(&s);
-                    app.needs_redraw = true;
-                }
+                Event::Paste(s) => app.paste_text(&s),
                 _ => {}
             }
         }
+        if let Some(text) = app.clipboard_out.take() {
+            osc52_copy(&text);
+        }
+
         app.autosave_tick();
         if app.quit {
             break;

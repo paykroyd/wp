@@ -289,8 +289,9 @@ pub fn to_markdown(doc: &Document, rels: &dyn Fn(&str) -> Option<String>) -> Exp
             out.push_str("```\n\n");
             prev_code_block = false;
         }
-        let body = inline(doc, i, rels, &mut losses);
+        let body = inline(doc, i, rels, &mut losses).trim_end_matches('\n').to_string();
         let mut prefix = String::new();
+
         if let Some(l) = pp.outline_level.filter(|l| *l < 6 && labels[i].is_none()) {
             prefix = format!("{} ", "#".repeat(l as usize + 1));
         } else if let Some(label) = &labels[i] {
