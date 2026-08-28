@@ -48,6 +48,7 @@ pub fn attr_label(a: &Attr) -> String {
         Attr::Highlight(h) => format!("Hilite:{}", h.docx_name()),
         Attr::CharStyle(s) => format!("Char Style:{}", s),
         Attr::Raw(_) => "Run Props".into(),
+        Attr::RunAttrs(_) => "Run Attrs".into(),
     }
 }
 
@@ -75,6 +76,8 @@ pub fn kind_label(k: AttrKind) -> &'static str {
         AttrKind::Highlight => "hilite",
         AttrKind::CharStyle => "char style",
         AttrKind::Raw => "run props",
+        AttrKind::RunAttrs => "run attrs",
+
     }
 }
 

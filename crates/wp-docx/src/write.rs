@@ -5,6 +5,7 @@ use crate::package::DocxPackage;
 use crate::read::{parse_rpr, parse_sectpr, Ctx};
 use crate::xml::*;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use wp_core::document::Run;
 use wp_core::model::*;
@@ -147,7 +148,7 @@ pub fn render_document(doc: &Document, pkg: &DocxPackage, ctx: &Ctx) -> String {
     }
     out.push_str(&pkg.pre_body);
     out.push_str("<w:body>");
-    let mut bookmark_id = 10_000u32;
+    let mut bookmark_id = BookmarkIds::new(&pkg.bookmark_ids);
     let only_placeholder = pkg.empty_body
         && doc.paragraphs.len() == 1
         && doc.paragraphs[0].items.is_empty()
@@ -162,7 +163,30 @@ pub fn render_document(doc: &Document, pkg: &DocxPackage, ctx: &Ctx) -> String {
     out
 }
 
-fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bookmark_id: &mut u32) {
+/// Bookmark ids: the original id for every bookmark read from the file, fresh
+/// ids above them for new ones.
+struct BookmarkIds {
+    known: HashMap<String, u32>,
+    next: u32,
+}
+
+impl BookmarkIds {
+    fn new(original: &HashMap<String, u32>) -> BookmarkIds {
+        let next = original.values().copied().max().map(|m| m + 1).unwrap_or(0);
+        BookmarkIds { known: original.clone(), next }
+    }
+    fn id(&mut self, name: &str) -> u32 {
+        if let Some(id) = self.known.get(name) {
+            return *id;
+        }
+        let id = self.next;
+        self.next += 1;
+        self.known.insert(name.to_string(), id);
+        id
+    }
+}
+
+fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bookmark_id: &mut BookmarkIds) {
     let p = &doc.paragraphs[para];
     if p.props.raw_block {
         for it in &p.items {
@@ -172,12 +196,20 @@ fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bo
         }
         return;
     }
-    out.push_str("<w:p>");
+    out.push_str("<w:p");
+    if let Some(a) = &p.props.p_attrs {
+        out.push_str(a);
+    }
+    out.push('>');
     render_ppr(&p.props, out, ctx);
     let runs: Vec<Run> = doc.runs(para);
     let mut wrappers: Vec<(u32, bool)> = Vec::new();
     for run in &runs {
         let rpr = render_rpr_attrs(&run.attrs, ctx);
+        let r_open = match run.attrs.iter().find_map(|a| if let Attr::RunAttrs(x) = a { Some(x.as_str()) } else { None }) {
+            Some(a) => format!("<w:r{}>", a),
+            None => "<w:r>".to_string(),
+        };
         let mut open = false;
         let mut text = String::new();
         let deleted_now = |w: &Vec<(u32, bool)>| w.last().map(|x| x.1).unwrap_or(false);
@@ -186,7 +218,7 @@ fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bo
             () => {
                 if !text.is_empty() {
                     if !open {
-                        out.push_str("<w:r>");
+                        out.push_str(&r_open);
                         out.push_str(&rpr);
                         open = true;
                     }
@@ -200,7 +232,7 @@ fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bo
             () => {
                 flush_text!();
                 if !open {
-                    out.push_str("<w:r>");
+                    out.push_str(&r_open);
                     out.push_str(&rpr);
                     open = true;
                 }
@@ -234,14 +266,12 @@ fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bo
                 }
                 Item::Code(Code::Bookmark(name)) => {
                     close_run!();
-                    *bookmark_id += 1;
-                    let _ = write!(out, "<w:bookmarkStart w:id=\"{}\" w:name=\"{}\"/>", bookmark_id, escape_attr(name));
+                    let id = bookmark_id.id(name);
+                    let _ = write!(out, "<w:bookmarkStart w:id=\"{}\" w:name=\"{}\"/>", id, escape_attr(name));
                 }
                 Item::Code(Code::BookmarkEnd(name)) => {
                     close_run!();
-                    // Find the id assigned to the matching start: we assign ids
-                    // sequentially, so search backwards in the output.
-                    let id = find_bookmark_id(out, name).unwrap_or(*bookmark_id);
+                    let id = bookmark_id.id(name);
                     let _ = write!(out, "<w:bookmarkEnd w:id=\"{}\"/>", id);
                 }
                 Item::Code(Code::Opaque(o)) => match o.kind {
@@ -279,14 +309,6 @@ fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bo
     out.push_str("</w:p>");
 }
 
-fn find_bookmark_id(out: &str, name: &str) -> Option<u32> {
-    let needle = format!("w:name=\"{}\"/>", escape_attr(name));
-    let pos = out.rfind(&needle)?;
-    let head = &out[..pos];
-    let start = head.rfind("<w:bookmarkStart w:id=\"")?;
-    let id_str = &head[start + "<w:bookmarkStart w:id=\"".len()..];
-    id_str.split('"').next()?.parse().ok()
-}
 
 /// Elements that must live inside `<w:r>`.
 fn is_run_level(xml: &str) -> bool {
@@ -355,7 +377,7 @@ fn close_unclosed_wrappers(p: &Paragraph, out: &mut String) {
 /// when nothing modelled has changed.
 pub fn render_rpr_attrs(attrs: &[Attr], ctx: &Ctx) -> String {
     let raw = attrs.iter().find_map(|a| if let Attr::Raw(x) = a { Some(x.as_str()) } else { None });
-    let known: Vec<&Attr> = attrs.iter().filter(|a| !matches!(a, Attr::Raw(_))).collect();
+    let known: Vec<&Attr> = attrs.iter().filter(|a| !matches!(a, Attr::Raw(_) | Attr::RunAttrs(_))).collect();
     let mut children: Vec<RawChild> = Vec::new();
     let mut covered: Vec<AttrKind> = Vec::new();
     if let Some(raw) = raw {
@@ -432,7 +454,7 @@ fn attr_element(a: &Attr) -> Option<RawChild> {
         Attr::Color(c) => RawChild { tag: "w:color".into(), xml: format!("<w:color w:val=\"{}\"/>", c.hex()) },
         Attr::Highlight(h) => RawChild { tag: "w:highlight".into(), xml: format!("<w:highlight w:val=\"{}\"/>", h.docx_name()) },
         Attr::CharStyle(s) => RawChild { tag: "w:rStyle".into(), xml: format!("<w:rStyle w:val=\"{}\"/>", escape_attr(s)) },
-        Attr::Raw(_) => return None,
+        Attr::Raw(_) | Attr::RunAttrs(_) => return None,
     })
 }
 
@@ -648,7 +670,10 @@ pub fn render_ppr_body(p: &ParaProps) -> String {
 }
 
 fn render_sectpr(s: &SectionProps, out: &mut String) {
-    out.push_str("<w:sectPr>");
+    out.push_str("<w:sectPr");
+    out.push_str(&s.attrs);
+    out.push('>');
+
     let mut children: Vec<String> = s.opaque_children.clone();
     let original = if children.is_empty() {
         None

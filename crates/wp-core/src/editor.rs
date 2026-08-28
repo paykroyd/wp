@@ -397,7 +397,9 @@ impl Editor {
             for k in open_at_end.keys().rev() {
                 prefix.push(Item::Code(Code::Off(*k)));
             }
-            paras.push(Paragraph { props: p.props.clone(), items: prefix });
+            let mut props = p.props.clone();
+            props.p_attrs = None; // paragraph ids must not be duplicated on paste
+            paras.push(Paragraph { props, items: prefix });
         }
         Fragment { paragraphs: paras }
     }
@@ -812,7 +814,9 @@ impl Editor {
         } else {
             props.sect_break = None;
         }
+        props.p_attrs = None;
         self.apply(Op::Split { at: split_at, props: Some(props) });
+
         let n_open = opens.len();
         if n_open > 0 {
             self.apply(Op::Insert { at: Pos::new(at.para + 1, 0), items: opens });

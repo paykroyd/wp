@@ -59,13 +59,15 @@ pub struct Ctx {
     pub theme_major: Option<String>,
     pub theme_minor: Option<String>,
     bookmark_names: HashMap<String, String>,
+    /// Bookmark name → original `w:id`.
+    pub bookmark_ids: HashMap<String, u32>,
     next_wrapper_id: u32,
     warnings: HashMap<String, usize>,
 }
 
 impl Ctx {
     pub fn new(theme_major: Option<String>, theme_minor: Option<String>) -> Ctx {
-        Ctx { theme_major, theme_minor, bookmark_names: HashMap::new(), next_wrapper_id: 1, warnings: HashMap::new() }
+        Ctx { theme_major, theme_minor, bookmark_names: HashMap::new(), bookmark_ids: HashMap::new(), next_wrapper_id: 1, warnings: HashMap::new() }
     }
     fn warn(&mut self, label: &str) {
         *self.warnings.entry(label.to_string()).or_insert(0) += 1;
@@ -100,6 +102,7 @@ pub fn read_bytes(bytes: &[u8]) -> Result<Loaded> {
     package.prolog = prolog;
     package.root_tag = root_tag;
     package.pre_body = pre_body;
+    package.bookmark_ids = ctx.bookmark_ids.clone();
 
     let mut doc = Document::from_paragraphs(paragraphs);
     doc.styles = styles;
@@ -223,7 +226,13 @@ fn parse_document(xml: &str, ctx: &mut Ctx) -> Result<ParsedDoc> {
                 let after = reader.buffer_position() as usize;
                 let n = e.name().as_ref().to_vec();
                 match n.as_slice() {
-                    b"w:p" => paragraphs.push(Paragraph::new()),
+                    b"w:p" => {
+                        let attrs = tag_attrs(&e);
+                        let props = ParaProps { p_attrs: if attrs.is_empty() { None } else { Some(attrs) }, ..Default::default() };
+                        let mut items = std::mem::take(&mut pending);
+                        let _ = &mut items;
+                        paragraphs.push(Paragraph { props, items });
+                    }
                     b"w:sectPr" => section = parse_sectpr(&xml[before..after]),
                     b"w:bookmarkStart" | b"w:bookmarkEnd" => {
                         pending.push(bookmark_item(&e, &xml[before..after], ctx));
@@ -288,6 +297,9 @@ fn bookmark_item(e: &BytesStart<'_>, raw: &str, ctx: &mut Ctx) -> Item {
     let id = attr(e, "w:id").unwrap_or_default();
     if local(e.name().as_ref()) == b"bookmarkStart" {
         let name = attr(e, "w:name").unwrap_or_else(|| format!("bm{}", id));
+        if let Ok(n) = id.parse::<u32>() {
+            ctx.bookmark_ids.entry(name.clone()).or_insert(n);
+        }
         ctx.bookmark_names.insert(id, name.clone());
         Item::Code(Code::Bookmark(name))
     } else if let Some(name) = ctx.bookmark_names.get(&id) {
@@ -304,11 +316,24 @@ fn bookmark_item(e: &BytesStart<'_>, raw: &str, ctx: &mut Ctx) -> Item {
 pub fn parse_paragraph(xml: &str, ctx: &mut Ctx) -> Result<Paragraph> {
     let mut reader = Reader::from_str(xml);
     let mut para = Paragraph::new();
-    // consume the <w:p> start
+    // consume the <w:p> start, keeping its attributes (rsids, paragraph id)
     loop {
         match reader.read_event() {
-            Ok(Event::Start(_)) => break,
-            Ok(Event::Empty(_)) | Ok(Event::Eof) => return Ok(para),
+            Ok(Event::Start(e)) => {
+                let attrs = tag_attrs(&e);
+                if !attrs.is_empty() {
+                    para.props.p_attrs = Some(attrs);
+                }
+                break;
+            }
+            Ok(Event::Empty(e)) => {
+                let attrs = tag_attrs(&e);
+                if !attrs.is_empty() {
+                    para.props.p_attrs = Some(attrs);
+                }
+                return Ok(para);
+            }
+            Ok(Event::Eof) => return Ok(para),
             Err(e) => return Err(anyhow!("XML error: {}", e)),
             _ => {}
         }
@@ -340,11 +365,14 @@ fn parse_para_content(
                     b"w:pPr" => {
                         let _ = reader.read_to_end(name);
                         let after = reader.buffer_position() as usize;
+                        let p_attrs = para.props.p_attrs.take();
                         para.props = parse_ppr(&xml[before..after], ctx);
+                        para.props.p_attrs = p_attrs;
                     }
                     b"w:r" => {
                         let deleted = wrappers.last().map(|w| w.1).unwrap_or(false);
-                        parse_run(reader, xml, para, ctx, deleted)?;
+                        let run_attrs = tag_attrs(&e);
+                        parse_run(reader, xml, para, ctx, deleted, run_attrs)?;
                     }
                     b"w:sdt" => {
                         // Open = everything up to and including <w:sdtContent>
@@ -371,6 +399,7 @@ fn parse_para_content(
                             kind: OpaqueKind::Open(id),
                             protected: false,
                             deleted: false,
+                            hint: false,
                         })));
                         wrappers.push((id, wrappers.last().map(|w| w.1).unwrap_or(false)));
                         parse_para_content(reader, xml, para, ctx, wrappers, b"w:sdtContent")?;
@@ -390,6 +419,7 @@ fn parse_para_content(
                             kind: OpaqueKind::Close(id),
                             protected: false,
                             deleted: false,
+                            hint: false,
                         })));
                     }
                     b"w:hyperlink" | b"w:ins" | b"w:del" | b"w:moveFrom" | b"w:moveTo" | b"w:smartTag" | b"w:customXml"
@@ -427,6 +457,7 @@ fn parse_para_content(
                             kind: OpaqueKind::Open(id),
                             protected,
                             deleted: deleted || inherited_deleted,
+                            hint: false,
                         })));
                         wrappers.push((id, deleted || inherited_deleted));
                         parse_para_content(reader, xml, para, ctx, wrappers, &n)?;
@@ -437,6 +468,7 @@ fn parse_para_content(
                             kind: OpaqueKind::Close(id),
                             protected,
                             deleted: deleted || inherited_deleted,
+                            hint: false,
                         })));
                     }
                     _ => {
@@ -451,10 +483,16 @@ fn parse_para_content(
                 let after = reader.buffer_position() as usize;
                 let n = e.name().as_ref().to_vec();
                 match n.as_slice() {
-                    b"w:pPr" => para.props = parse_ppr(&xml[before..after], ctx),
+                    b"w:pPr" => {
+                        let p_attrs = para.props.p_attrs.take();
+                        para.props = parse_ppr(&xml[before..after], ctx);
+                        para.props.p_attrs = p_attrs;
+                    }
+
                     b"w:r" => {}
                     b"w:bookmarkStart" | b"w:bookmarkEnd" => para.items.push(bookmark_item(&e, &xml[before..after], ctx)),
-                    b"w:proofErr" => {} // spelling-error markers: Word regenerates them
+                    // Spelling-error markers: Word regenerates them, but a byte-diff shouldn't have to know that.
+                    b"w:proofErr" => para.items.push(Item::Code(Code::Opaque(OpaqueXml::hint(&xml[before..after], "Proof Mark")))),
                     _ => {
                         let label = element_label(&n, ctx);
                         para.items.push(Item::Code(Code::Opaque(OpaqueXml::element(&xml[before..after], label))));
@@ -524,9 +562,12 @@ fn element_label(tag: &[u8], ctx: &mut Ctx) -> String {
     }
 }
 
-fn parse_run(reader: &mut Reader<&[u8]>, xml: &str, para: &mut Paragraph, ctx: &mut Ctx, deleted: bool) -> Result<()> {
+fn parse_run(reader: &mut Reader<&[u8]>, xml: &str, para: &mut Paragraph, ctx: &mut Ctx, deleted: bool, run_attrs: String) -> Result<()> {
     let mut attrs: Vec<Attr> = Vec::new();
     let mut content: Vec<Item> = Vec::new();
+    if !run_attrs.is_empty() {
+        attrs.push(Attr::RunAttrs(run_attrs));
+    }
     loop {
         let before = reader.buffer_position() as usize;
         match reader.read_event() {
@@ -577,7 +618,7 @@ fn parse_run(reader: &mut Reader<&[u8]>, xml: &str, para: &mut Paragraph, ctx: &
                     b"w:cr" => content.push(Item::Code(Code::LineBreak)),
                     b"w:noBreakHyphen" => content.push(Item::Char('\u{2011}')),
                     b"w:softHyphen" => content.push(Item::Char('\u{ad}')),
-                    b"w:lastRenderedPageBreak" => {}
+                    b"w:lastRenderedPageBreak" => content.push(Item::Code(Code::Opaque(OpaqueXml::hint(&xml[before..after], "Rendered Pg Brk")))),
                     _ => {
                         let label = element_label(&n, ctx);
                         content.push(Item::Code(Code::Opaque(OpaqueXml::element(&xml[before..after], label))));
@@ -804,6 +845,10 @@ pub fn parse_ppr(xml: &str, ctx: &Ctx) -> ParaProps {
 pub fn parse_sectpr(xml: &str) -> SectionProps {
     let mut s = SectionProps::default();
     s.opaque_children = Vec::new();
+    if let Some(e) = start_tag(xml) {
+        s.attrs = tag_attrs(&e);
+    }
+
     for child in children_of(xml) {
         if let Some(e) = start_tag(&child.xml) {
             match child.tag.as_str() {

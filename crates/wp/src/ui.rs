@@ -642,11 +642,12 @@ fn draw_reveal(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome
                     toks.push(Tok { text: s, pos: Some((pi, i)), para_code: None, style: st });
                 }
                 Item::Code(code) => {
-                    if let Code::On(Attr::Raw(_)) | Code::Off(AttrKind::Raw) = code {
-                        if !app.reveal_all {
-                            continue;
-                        }
+                    let preserved = matches!(code, Code::On(Attr::Raw(_)) | Code::Off(AttrKind::Raw) | Code::On(Attr::RunAttrs(_)) | Code::Off(AttrKind::RunAttrs))
+                        || matches!(code, Code::Opaque(o) if o.hint);
+                    if preserved && !app.reveal_all {
+                        continue;
                     }
+
                     let mut st = code_style;
                     if in_sel {
                         st = st.add_modifier(Modifier::UNDERLINED);

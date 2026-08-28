@@ -18,10 +18,13 @@ fn corpus_files() -> Vec<PathBuf> {
     v
 }
 
-/// Canonical token stream for a WordprocessingML part. Normalises what Word
-/// itself does not care about: attribute order, revision ids, paragraph ids,
-/// `xml:space`, rendered page-break hints, proofing marks, bookmark ids, and
-/// splits between runs of identical formatting.
+/// Canonical token stream for a WordprocessingML part. Normalises only what
+/// cannot be told apart in the file format itself: attribute order, an
+/// explicit `xml:space="preserve"` on text, and splits between adjacent runs
+/// of identical formatting. Revision ids, paragraph ids, rendered page-break
+/// hints and proofing marks all have to survive. Bookmarks may sit just
+/// outside or just inside a paragraph boundary (both mean the same place),
+/// so they are removed here and compared as a set by `bookmark_tokens`.
 fn canonical(xml: &str) -> Vec<String> {
     let mut reader = Reader::from_str(xml);
     let mut out: Vec<String> = Vec::new();
@@ -39,9 +42,7 @@ fn canonical(xml: &str) -> Vec<String> {
                     }
                     continue;
                 }
-                // Bookmarks may sit just outside or just inside a paragraph
-                // boundary; both mean the same place. Compared separately.
-                if name == "w:lastRenderedPageBreak" || name == "w:proofErr" || name == "w:bookmarkStart" || name == "w:bookmarkEnd" {
+                if name == "w:bookmarkStart" || name == "w:bookmarkEnd" {
                     if !is_empty_event {
                         skip_depth = 1;
                     }
@@ -50,10 +51,7 @@ fn canonical(xml: &str) -> Vec<String> {
                 let mut attrs: Vec<String> = Vec::new();
                 for a in e.attributes().flatten() {
                     let k = String::from_utf8_lossy(a.key.as_ref()).into_owned();
-                    if k.starts_with("w:rsid") || k == "w14:paraId" || k == "w14:textId" || k == "xml:space" {
-                        continue;
-                    }
-                    if k == "w:id" && name.starts_with("w:bookmark") {
+                    if k == "xml:space" {
                         continue;
                     }
                     let v = a.unescape_value().unwrap_or_default().into_owned();
@@ -162,6 +160,33 @@ fn merge_runs(tokens: Vec<String>) -> Vec<String> {
     merged
 }
 
+/// Every bookmark element with its attributes, sorted — position-independent.
+fn bookmark_tokens(xml: &str) -> Vec<String> {
+    let mut reader = Reader::from_str(xml);
+    let mut out = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                if name == "w:bookmarkStart" || name == "w:bookmarkEnd" {
+                    let mut attrs: Vec<String> = e
+                        .attributes()
+                        .flatten()
+                        .map(|a| format!("{}={}", String::from_utf8_lossy(a.key.as_ref()), a.unescape_value().unwrap_or_default()))
+                        .collect();
+                    attrs.sort();
+                    out.push(format!("{} {}", name, attrs.join(" ")));
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => panic!("xml error: {}", e),
+            _ => {}
+        }
+    }
+    out.sort();
+    out
+}
+
 fn main_part(bytes: &[u8]) -> (String, Vec<(String, Vec<u8>)>) {
     let pkg = wp_docx::DocxPackage::from_bytes(bytes).unwrap();
     let main = pkg.get_str(&pkg.main_part).unwrap();
@@ -195,14 +220,10 @@ fn corpus_round_trips_losslessly() {
         }
         let ca = canonical(&a_main);
         let cb = canonical(&b_main);
-        let bm = |s: &str| {
-            let mut v: Vec<&str> = s.match_indices("w:name=\"").map(|(i, _)| s[i + 8..].split('"').next().unwrap_or("")).collect();
-            v.sort();
-            v.into_iter().map(String::from).collect::<Vec<_>>()
-        };
-        if bm(&a_main) != bm(&b_main) {
-            failures.push(format!("{}: bookmark names differ", f.display()));
+        if bookmark_tokens(&a_main) != bookmark_tokens(&b_main) {
+            failures.push(format!("{}: bookmarks differ:\n  expected: {:?}\n  actual:   {:?}", f.display(), bookmark_tokens(&a_main), bookmark_tokens(&b_main)));
         }
+
         if ca != cb {
             let first = ca.iter().zip(cb.iter()).position(|(x, y)| x != y).unwrap_or(ca.len().min(cb.len()));
             let lo = first.saturating_sub(6);

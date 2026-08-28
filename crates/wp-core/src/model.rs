@@ -169,6 +169,8 @@ pub enum AttrKind {
     CharStyle,
     /// Preserved run properties XML that wp does not model.
     Raw,
+    /// Preserved attributes of the `w:r` element itself (revision ids).
+    RunAttrs,
 }
 
 impl AttrKind {
@@ -176,12 +178,12 @@ impl AttrKind {
         use AttrKind::*;
         &[
             Bold, Italic, Underline, Strike, DoubleStrike, VertAlign, SmallCaps, AllCaps, Font,
-            Size, Color, Highlight, CharStyle, Raw,
+            Size, Color, Highlight, CharStyle, Raw, RunAttrs,
         ]
     }
-    /// Kinds shown in Reveal Codes by default (Raw is hidden unless asked).
+    /// Kinds shown in Reveal Codes by default (preserved XML is hidden unless asked).
     pub fn is_visible(self) -> bool {
-        self != AttrKind::Raw
+        !matches!(self, AttrKind::Raw | AttrKind::RunAttrs)
     }
 }
 
@@ -206,6 +208,9 @@ pub enum Attr {
     /// The complete `w:rPr` element of a run as read from a file. Carried
     /// alongside the modelled attributes so unmodelled properties survive.
     Raw(String),
+    /// The attribute text of the `w:r` start tag as read (` w:rsidR="…"`),
+    /// re-emitted verbatim so a byte-diff of the saved file stays quiet.
+    RunAttrs(String),
 }
 
 impl Attr {
@@ -225,6 +230,7 @@ impl Attr {
             Attr::Highlight(_) => AttrKind::Highlight,
             Attr::CharStyle(_) => AttrKind::CharStyle,
             Attr::Raw(_) => AttrKind::Raw,
+            Attr::RunAttrs(_) => AttrKind::RunAttrs,
         }
     }
 }
@@ -251,11 +257,17 @@ pub struct OpaqueXml {
     pub protected: bool,
     /// Text inside is a tracked deletion (`w:delText` on write).
     pub deleted: bool,
+    /// A rendering hint Word regenerates itself (`w:lastRenderedPageBreak`,
+    /// `w:proofErr`): preserved, but hidden in Reveal Codes unless asked.
+    pub hint: bool,
 }
 
 impl OpaqueXml {
     pub fn element(xml: impl Into<String>, label: impl Into<String>) -> OpaqueXml {
-        OpaqueXml { xml: xml.into(), label: label.into(), kind: OpaqueKind::Element, protected: false, deleted: false }
+        OpaqueXml { xml: xml.into(), label: label.into(), kind: OpaqueKind::Element, protected: false, deleted: false, hint: false }
+    }
+    pub fn hint(xml: impl Into<String>, label: impl Into<String>) -> OpaqueXml {
+        OpaqueXml { hint: true, ..OpaqueXml::element(xml, label) }
     }
 }
 
@@ -463,7 +475,7 @@ impl RunProps {
             Attr::Color(c) => self.color = Some(*c),
             Attr::Highlight(h) => self.highlight = Some(if *h == Highlight::None { None } else { Some(*h) }),
             Attr::CharStyle(s) => self.char_style = Some(s.clone()),
-            Attr::Raw(_) => {}
+            Attr::Raw(_) | Attr::RunAttrs(_) => {}
         }
     }
 
@@ -531,6 +543,10 @@ pub struct ParaProps {
     pub sect_break: Option<String>,
     /// The complete `w:pPr` as read, kept until the properties are changed.
     pub raw_ppr: Option<String>,
+    /// Attribute text of the `w:p` start tag as read (` w:rsidR="…"
+    /// w14:paraId="…"`). Never copied to a new paragraph: paragraph ids must
+    /// stay unique.
+    pub p_attrs: Option<String>,
     /// This "paragraph" is a verbatim body-level block (table, content
     /// control, …) held in a single `Opaque` item. Not editable.
     pub raw_block: bool,
@@ -573,6 +589,7 @@ impl ParaProps {
             },
             sect_break: other.sect_break.clone().or_else(|| self.sect_break.clone()),
             raw_ppr: other.raw_ppr.clone(),
+            p_attrs: other.p_attrs.clone(),
             raw_block: other.raw_block,
         }
     }
@@ -646,6 +663,8 @@ pub struct SectionProps {
     /// The full `w:sectPr` element as read, for verbatim re-emission of the
     /// parts we don't model (headers/footers refs, line numbering, etc.).
     pub opaque_children: Vec<String>,
+    /// Attribute text of the `w:sectPr` start tag as read.
+    pub attrs: String,
 }
 
 impl Default for SectionProps {
@@ -664,7 +683,9 @@ impl Default for SectionProps {
             orientation: Orientation::Portrait,
             columns: 1,
             opaque_children: Vec::new(),
+            attrs: String::new(),
         }
+
     }
 }
 

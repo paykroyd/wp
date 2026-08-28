@@ -108,7 +108,20 @@ pub fn children_of(xml: &str) -> Vec<RawChild> {
     out
 }
 
+/// The attribute text of a start tag exactly as written (leading whitespace
+/// included), for verbatim re-emission.
+pub fn tag_attrs(e: &BytesStart<'_>) -> String {
+    let raw = String::from_utf8_lossy(e.attributes_raw()).into_owned();
+    let t = raw.trim_end();
+    if t.trim().is_empty() {
+        String::new()
+    } else {
+        t.to_string()
+    }
+}
+
 /// Parse the start tag of a single raw element for attribute access.
+
 pub fn start_tag(xml: &str) -> Option<BytesStart<'static>> {
     let mut reader = Reader::from_str(xml);
     loop {

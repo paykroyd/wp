@@ -2,6 +2,7 @@
 //! untouched parts can be written back byte-for-byte.
 
 use anyhow::{anyhow, Context, Result};
+use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +30,11 @@ pub struct DocxPackage {
     pub theme_minor: Option<String>,
     /// The body had no paragraphs at all when read (only a `w:sectPr`).
     pub empty_body: bool,
+    /// Original `w:id` of each bookmark by name, so they are written back
+    /// unchanged.
+    pub bookmark_ids: HashMap<String, u32>,
 }
+
 
 impl DocxPackage {
     pub fn from_bytes(bytes: &[u8]) -> Result<DocxPackage> {
