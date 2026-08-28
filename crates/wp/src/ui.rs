@@ -29,13 +29,34 @@ pub fn detect_caps() -> Caps {
 
 pub struct Chrome {
     pub h: &'static str,
+    /// Table borders: vertical, and the corner/junction set indexed by
+    /// which of (up, down, left, right) arms are present.
+    pub v: char,
+    pub junction: [char; 16],
 }
 
 pub fn chrome(c: Caps) -> Chrome {
     if c.ascii {
-        Chrome { h: "-" }
+        Chrome { h: "-", v: '|', junction: ['+'; 16] }
     } else {
-        Chrome { h: "─" }
+        // Bits: 1 = up, 2 = down, 4 = left, 8 = right.
+        let mut j = ['─'; 16];
+        j[0b0011] = '│';
+        j[0b0001] = '│';
+        j[0b0010] = '│';
+        j[0b1100] = '─';
+        j[0b0100] = '─';
+        j[0b1000] = '─';
+        j[0b1010] = '┌';
+        j[0b0110] = '┐';
+        j[0b1001] = '└';
+        j[0b0101] = '┘';
+        j[0b1011] = '├';
+        j[0b0111] = '┤';
+        j[0b1110] = '┬';
+        j[0b1101] = '┴';
+        j[0b1111] = '┼';
+        Chrome { h: "─", v: '│', junction: j }
     }
 }
 
@@ -46,6 +67,56 @@ pub enum Row {
     Gap,
     PageRule(usize),
     Block { para: usize },
+    /// Screen line `line` of table row `row`, whose first paragraph is `para`.
+    TableLine { table: u32, row: usize, para: usize, line: usize },
+    /// The horizontal rule above row `row` (`row == rows` is the bottom rule).
+    TableRule { table: u32, row: usize },
+}
+
+/// (row's first paragraph, line within the row) for a screen line of a
+/// table-cell paragraph; unchanged for any other paragraph. Scroll positions
+/// and cursor rows inside tables are compared in these coordinates.
+fn row_coords(app: &mut App, para: usize, line: usize) -> (usize, usize) {
+    let Some(c) = app.ed.doc.cell_of(para) else { return (para, line) };
+    let Some(paras) = app.ed.doc.table_paras(para) else { return (para, line) };
+    let row = &paras[c.row as usize];
+    let cell = &row[c.col as usize];
+    let mut k = 0;
+    for &p in cell {
+        if p == para {
+            return (row[0][0], k + line);
+        }
+        k += app.ed.screen_lines(p).len();
+    }
+    (row[0][0], k)
+}
+
+/// Screen lines in the table row that starts at paragraph `row_start`.
+fn row_lines(app: &mut App, row_start: usize) -> usize {
+    let Some(c) = app.ed.doc.cell_of(row_start) else { return 1 };
+    let Some(paras) = app.ed.doc.table_paras(row_start) else { return 1 };
+    let row = &paras[c.row as usize];
+    let mut n = 1;
+    for cell in row {
+        let mut k = 0;
+        for &p in cell {
+            k += app.ed.screen_lines(p).len();
+        }
+        n = n.max(k);
+    }
+    n
+}
+
+/// The first paragraph of the next table row, or the paragraph after the
+/// table.
+fn next_row_start(app: &App, row_start: usize) -> usize {
+    let Some(c) = app.ed.doc.cell_of(row_start) else { return row_start + 1 };
+    let Some((_, end)) = app.ed.doc.table_bounds(row_start) else { return row_start + 1 };
+    let mut i = row_start;
+    while i < end && app.ed.doc.cell_of(i).map_or(false, |x| x.row == c.row) {
+        i += 1;
+    }
+    i
 }
 
 fn rgb(c: Rgb) -> Color {
@@ -118,7 +189,42 @@ impl<'a> RowWalker<'a> {
             let idx = app.ed.print_layout(ps.para).lines.get(ps.line).map(|l| l.start).unwrap_or(0);
             page_starts.push((ps.para, idx, i + 1));
         }
+        let start = row_coords(app, start.0, start.1);
         RowWalker { app, para: start.0, line: start.1, pending: Vec::new(), done: false, page_starts }
+    }
+
+    /// Rows of a table: the rule above each row, its lines, the bottom rule.
+    fn next_table_row(&mut self, c: CellRef) -> Option<Row> {
+        let para = self.para;
+        let n = row_lines(self.app, para);
+        let nrows = self.app.ed.doc.tables.get(&c.table).map(|t| t.rows.len()).unwrap_or(c.row as usize + 1);
+        let r = c.row as usize;
+        let line = self.line;
+        let line_row = Row::TableLine { table: c.table, row: r, para, line };
+        let last_line = line + 1 >= n;
+        let last_row = r + 1 >= nrows;
+        // Advance.
+        if last_line {
+            self.para = next_row_start(self.app, para);
+            self.line = 0;
+        } else {
+            self.line += 1;
+        }
+        if last_line && last_row {
+            self.pending.push(Row::TableRule { table: c.table, row: nrows });
+        }
+        if line == 0 {
+            self.pending.push(line_row);
+            let top = Row::TableRule { table: c.table, row: r };
+            // A page beginning at this row: the rule precedes the border.
+            let pg = self.page_starts.iter().find(|&&(p, idx, _)| idx == 0 && p >= para && p < next_row_start(self.app, para)).map(|x| x.2);
+            if let Some(pg) = pg {
+                self.pending.push(top);
+                return Some(Row::PageRule(pg));
+            }
+            return Some(top);
+        }
+        Some(line_row)
     }
 
     fn page_rule_for(&self, para: usize, lines: &[ScreenLine], line: usize) -> Option<usize> {
@@ -146,6 +252,9 @@ impl<'a> RowWalker<'a> {
         if self.para >= n {
             self.done = true;
             return None;
+        }
+        if let Some(c) = self.app.ed.doc.cell_of(self.para) {
+            return self.next_table_row(c);
         }
         let raw_block = self.app.ed.doc.paragraphs[self.para].props.raw_block;
         let lines = self.app.ed.screen_lines(self.para).clone();
@@ -189,6 +298,8 @@ impl<'a> RowWalker<'a> {
 /// cursor precedes the scroll position.
 fn rows_to_cursor(app: &mut App, scroll: (usize, usize), limit: usize) -> Option<usize> {
     let (cp, cl) = app.ed.screen_line_of_cursor();
+    let (cp, cl) = row_coords(app, cp, cl);
+    let scroll = row_coords(app, scroll.0, scroll.1);
     if (cp, cl) < scroll {
         return None;
     }
@@ -211,12 +322,22 @@ fn rows_to_cursor(app: &mut App, scroll: (usize, usize), limit: usize) -> Option
 fn normalize(r: &Row) -> Row {
     match r {
         Row::Block { para } => Row::Line { para: *para, line: 0 },
+        Row::TableLine { para, line, .. } => Row::Line { para: *para, line: *line },
         other => other.clone(),
     }
 }
 
 /// Step the scroll position forward by one text line.
 fn scroll_forward(app: &mut App, s: (usize, usize)) -> (usize, usize) {
+    if app.ed.doc.cell_of(s.0).is_some() {
+        let s = row_coords(app, s.0, s.1);
+        let n = row_lines(app, s.0);
+        if s.1 + 1 < n {
+            return (s.0, s.1 + 1);
+        }
+        let next = next_row_start(app, s.0);
+        return if next < app.ed.doc.paragraphs.len() { (next, 0) } else { s };
+    }
     let n = app.ed.screen_lines(s.0).len();
     if s.1 + 1 < n && !app.ed.doc.paragraphs[s.0].props.raw_block {
         (s.0, s.1 + 1)
@@ -230,9 +351,11 @@ fn scroll_forward(app: &mut App, s: (usize, usize)) -> (usize, usize) {
 pub fn ensure_cursor_visible(app: &mut App, rows: usize) {
     let (cp, cl) = app.ed.screen_line_of_cursor();
     let cl = if app.ed.doc.paragraphs[cp].props.raw_block { 0 } else { cl };
+    let (cp, cl) = row_coords(app, cp, cl);
     if app.scroll.0 >= app.ed.doc.paragraphs.len() {
         app.scroll = (0, 0);
     }
+    app.scroll = row_coords(app, app.scroll.0, app.scroll.1);
     if (cp, cl) < app.scroll {
         // Cursor above: scroll up so the cursor sits a few rows down.
         let mut s = (cp, cl);
@@ -266,11 +389,19 @@ pub fn ensure_cursor_visible(app: &mut App, rows: usize) {
 }
 
 fn scroll_back(app: &mut App, s: (usize, usize)) -> (usize, usize) {
+    let s = row_coords(app, s.0, s.1);
     if s.1 > 0 {
         (s.0, s.1 - 1)
     } else if s.0 > 0 {
-        let n = app.ed.screen_lines(s.0 - 1).len();
-        (s.0 - 1, n.saturating_sub(1))
+        let prev = s.0 - 1;
+        if app.ed.doc.cell_of(prev).is_some() {
+            let (rs, _) = row_coords(app, prev, 0);
+            let n = row_lines(app, rs);
+            (rs, n.saturating_sub(1))
+        } else {
+            let n = app.ed.screen_lines(prev).len();
+            (prev, n.saturating_sub(1))
+        }
     } else {
         s
     }
@@ -358,7 +489,52 @@ pub fn pos_at(app: &mut App, x: u16, y: u16) -> Option<Pos> {
             Some(Pos::new(para, idx))
         }
         Some(Row::Block { para }) => Some(Pos::new(para, 0)),
-        Some(Row::Gap) | Some(Row::PageRule(_)) | None => {
+        Some(Row::TableLine { table, row, para, line }) => {
+            let t = app.ed.doc.tables.get(&table)?.clone();
+            let width = app.size.0.saturating_sub(2);
+            let grid = app.ed.doc.table_screen_grid(&t, width);
+            let paras = app.ed.doc.table_paras(para)?;
+            let cells = paras.get(row)?;
+            // Which cell is under x?
+            let mut cx: u16 = 1 + 1; // left margin + border
+            let mut hit: Option<(usize, u16, u16)> = None; // (cell, x0, width)
+            for (ci, _) in cells.iter().enumerate() {
+                let g = t.grid_col(row, ci);
+                let span = t.rows.get(row).and_then(|r| r.cells.get(ci)).map(|c| c.span()).unwrap_or(1);
+                let w: u16 = grid.iter().skip(g).take(span).sum::<u16>() + (span as u16).saturating_sub(1);
+                if x < cx + w || ci + 1 == cells.len() {
+                    hit = Some((ci, cx + 1, w.saturating_sub(2).max(1)));
+                    break;
+                }
+                cx += w + 1;
+            }
+            let (ci, x0, _w) = hit?;
+            // Which paragraph/line of the cell is on this screen line?
+            let mut k = 0;
+            let mut target: Option<(usize, usize)> = None;
+            for &p in &cells[ci] {
+                let n = app.ed.screen_lines(p).len();
+                if line < k + n {
+                    target = Some((p, line - k));
+                    break;
+                }
+                k += n;
+            }
+            let (p, l) = match target {
+                Some(t) => t,
+                None => {
+                    let p = *cells[ci].last()?;
+                    let n = app.ed.screen_lines(p).len();
+                    (p, n - 1)
+                }
+            };
+            let pp = app.ed.doc.para_props(p);
+            let sl = app.ed.screen_lines(p)[l].clone();
+            let para_ref = &app.ed.doc.paragraphs[p];
+            let idx = layout::screen_idx_at_x(para_ref, &pp, &sl, x.saturating_sub(x0 + sl.indent));
+            Some(Pos::new(p, idx))
+        }
+        Some(Row::TableRule { .. }) | Some(Row::Gap) | Some(Row::PageRule(_)) | None => {
             // Between paragraphs: land on the nearer line above.
             let mut walker = RowWalker::new(app, scroll);
             let mut last = None;
@@ -366,6 +542,7 @@ pub fn pos_at(app: &mut App, x: u16, y: u16) -> Option<Pos> {
                 match walker.next_row() {
                     Some(Row::Line { para, line }) => last = Some((para, line)),
                     Some(Row::Block { para }) => last = Some((para, 0)),
+                    Some(Row::TableLine { para, .. }) => last = Some((para, 0)),
                     Some(_) => {}
                     None => break,
                 }
@@ -435,105 +612,83 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
                 }
             }
             Row::Line { para, line } => {
-                let pi = *para;
-                let pp = app.ed.doc.para_props(pi);
-                let sl = app.ed.screen_lines(pi)[*line].clone();
-                let nlines = app.ed.layout_screen_len(pi);
-                let label = if *line == 0 { app.ed.list_label(pi) } else { None };
-                let cols = app.ed.cols();
-                let runs = app.ed.doc.runs(pi);
-                let p = &app.ed.doc.paragraphs[pi];
-                // Alignment offset.
-                let avail = width.saturating_sub(sl.indent);
-                let slack = avail.saturating_sub(sl.width);
-                let align_off = match pp.align() {
-                    Align::Center => slack / 2,
-                    Align::Right => slack,
-                    _ => 0,
-                };
-                let mut spans: Vec<Span> = Vec::new();
-                let x: u16 = left_margin + sl.indent + align_off;
-                match label {
-                    Some(l) if !l.text.is_empty() => {
-                        let first = layout::screen_first_indent(&pp, cols);
-
-                        let lx = left_margin + first + align_off;
-                        let mut text = l.text.clone();
-                        if caps.ascii {
-                            text = text.chars().map(|c| if c.is_ascii() { c } else { '*' }).collect();
-                        }
-                        let props = app.ed.doc.base_run_props(pi).merge(&l.run);
-                        spans.push(Span::raw(" ".repeat(lx.min(x) as usize)));
-                        spans.push(Span::styled(text.clone(), style_for(&props, caps)));
-                        spans.push(Span::raw(" ".repeat((x as usize).saturating_sub(lx as usize + text.width()))));
-                    }
-                    _ => spans.push(Span::raw(" ".repeat(x as usize))),
-                }
-
-                let mut ri = 0;
-                let mut cur_style: Option<Style> = None;
-                let mut buf = String::new();
-                let mut rel_x: u16 = 0;
-                let flush = |spans: &mut Vec<Span>, buf: &mut String, st: Option<Style>| {
-                    if !buf.is_empty() {
-                        spans.push(Span::styled(std::mem::take(buf), st.unwrap_or_default()));
-                    }
-                };
-                for i in sl.start..sl.end {
-                    while ri + 1 < runs.len() && runs[ri].end <= i {
-                        ri += 1;
-                    }
-                    let it = &p.items[i];
-                    let pos = Pos::new(pi, i);
-                    if pos == cursor && cursor_xy.is_none() {
-                        cursor_xy = Some((area.x + x + rel_x, y));
-                    }
-                    let mut st = style_for(&runs[ri].props, caps);
-                    if sel.map_or(false, |r| r.contains(pos)) {
-                        st = st.add_modifier(Modifier::REVERSED);
-                    }
-                    let adv = layout::screen_advance(it, rel_x, &pp);
-                    let text: String = match it {
-                        Item::Char(c) => {
-                            let c = if runs[ri].props.all_caps.unwrap_or(false) { c.to_uppercase().next().unwrap_or(*c) } else { *c };
-                            if (c as u32) < 0x20 || c == '\u{ad}' { String::new() } else { c.to_string() }
-                        }
-                        Item::Code(Code::Tab) => " ".repeat(adv as usize),
-                        Item::Code(Code::Opaque(o)) if o.kind == OpaqueKind::Element => {
-                            // Zero-width in layout, but show a marker for non-trivial preserved content.
-                            match o.label.as_str() {
-                                "Drawing" | "Picture" | "Object" => String::new(),
-                                _ => String::new(),
-                            }
-                        }
-                        _ => String::new(),
-                    };
-                    if Some(st) != cur_style {
-                        flush(&mut spans, &mut buf, cur_style);
-                        cur_style = Some(st);
-                    }
-                    buf.push_str(&text);
-                    rel_x += adv;
-                }
-                flush(&mut spans, &mut buf, cur_style);
-                // Cursor at end of line.
-                if cursor.para == pi && cursor_xy.is_none() {
-                    let is_last = *line + 1 == nlines;
-                    let in_line = cursor.idx >= sl.start && (cursor.idx < sl.end || (is_last && cursor.idx >= sl.end));
-                    if in_line {
-                        let cx = layout::screen_x_of(p, &pp, &sl, cursor.idx);
-                        cursor_xy = Some((area.x + x + cx, y));
-                    }
-                }
-                // Drawings/placeholder boxes: show inline marker for opaque drawings on this line.
-                for i in sl.start..sl.end {
-                    if let Item::Code(Code::Opaque(o)) = &p.items[i] {
-                        if matches!(o.label.as_str(), "Drawing" | "Picture" | "Object") {
-                            spans.push(Span::styled(format!(" [{}] ", o.label), Style::default().fg(Color::DarkGray).add_modifier(Modifier::REVERSED)));
-                        }
-                    }
+                let (mut spans, cx) = render_screen_line(app, *para, *line, width, caps, sel, cursor);
+                spans.insert(0, Span::raw(" ".repeat(left_margin as usize)));
+                if let Some(cx) = cx {
+                    cursor_xy = Some((area.x + left_margin + cx, y));
                 }
                 lines_out.push(Line::from(spans));
+            }
+            Row::TableRule { table, row } => {
+                let s = table_rule(app, *table, *row, width, ch);
+                lines_out.push(Line::from(vec![Span::raw(" ".repeat(left_margin as usize)), Span::styled(s, Style::default().fg(Color::DarkGray))]));
+            }
+            Row::TableLine { table, row, para, line } => {
+                let border = Style::default().fg(Color::DarkGray);
+                let mut spans: Vec<Span> = vec![Span::raw(" ".repeat(left_margin as usize))];
+                let Some(t) = app.ed.doc.tables.get(table).cloned() else { continue };
+                let grid = app.ed.doc.table_screen_grid(&t, width);
+                let Some(paras) = app.ed.doc.table_paras(*para) else { continue };
+                let cells = &paras[*row];
+                let header = t.rows.get(*row).map_or(false, |r| r.header);
+                spans.push(Span::styled(ch.v.to_string(), border));
+                let mut x: u16 = left_margin + 1;
+                for (ci, cell) in cells.iter().enumerate() {
+                    let g = t.grid_col(*row, ci);
+                    let span = t.rows.get(*row).and_then(|r| r.cells.get(ci)).map(|c| c.span()).unwrap_or(1);
+                    let w: u16 = grid.iter().skip(g).take(span).sum::<u16>() + (span as u16).saturating_sub(1);
+                    let inner = w.saturating_sub(2).max(1);
+                    let continued = t.rows.get(*row).and_then(|r| r.cells.get(ci)).map_or(false, |c| c.vmerge == Some(VMerge::Continue));
+                    // The paragraph/line of this cell on this screen line.
+                    let mut k = 0;
+                    let mut target: Option<(usize, usize)> = None;
+                    for &p in cell {
+                        let n = app.ed.screen_lines(p).len();
+                        if *line < k + n {
+                            target = Some((p, *line - k));
+                            break;
+                        }
+                        k += n;
+                    }
+                    let mut used: u16 = 0;
+                    spans.push(Span::raw(" "));
+                    if let Some((p, l)) = target.filter(|_| !continued) {
+                        if app.ed.doc.paragraphs[p].props.raw_block {
+                            let label = match app.ed.doc.paragraphs[p].items.first() {
+                                Some(Item::Code(Code::Opaque(o))) => o.label.clone(),
+                                _ => "Block".into(),
+                            };
+                            let text: String = format!("[{}]", label).chars().take(inner as usize).collect();
+                            used = text.width() as u16;
+                            spans.push(Span::styled(text, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
+                            if cursor.para == p {
+                                cursor_xy = Some((area.x + x + 1, y));
+                            }
+                        } else {
+                            let (mut cs, cx) = render_screen_line(app, p, l, inner, caps, sel, cursor);
+                            if header {
+                                for sp in cs.iter_mut() {
+                                    sp.style = sp.style.add_modifier(Modifier::BOLD);
+                                }
+                            }
+                            used = cs.iter().map(|sp| sp.content.width() as u16).sum();
+                            if let Some(cx) = cx {
+                                cursor_xy = Some((area.x + x + 1 + cx.min(inner.saturating_sub(1)), y));
+                            }
+                            spans.extend(cs);
+                        }
+                    }
+                    if used < inner {
+                        spans.push(Span::raw(" ".repeat((inner - used) as usize)));
+                    }
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(ch.v.to_string(), border));
+                    x += w + 1;
+                    if x >= left_margin + width {
+                        break;
+                    }
+                }
+                lines_out.push(Line::from(clip_spans(spans, area.width as usize)));
             }
         }
     }
@@ -542,6 +697,184 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
     }
     f.render_widget(RParagraph::new(lines_out), area);
     cursor_xy
+}
+
+/// Render screen line `line` of paragraph `para` into spans no wider than
+/// `width`, with the list label, alignment and selection applied. Returns
+/// the cursor's x offset within the line when the cursor is on it.
+fn render_screen_line(app: &mut App, pi: usize, line: usize, width: u16, caps: Caps, sel: Option<Range>, cursor: Pos) -> (Vec<Span<'static>>, Option<u16>) {
+    let pp = app.ed.doc.para_props(pi);
+    let sl = app.ed.screen_lines(pi)[line].clone();
+    let nlines = app.ed.layout_screen_len(pi);
+    let label = if line == 0 { app.ed.list_label(pi) } else { None };
+    let cols = app.ed.cols();
+    let runs = app.ed.doc.runs(pi);
+    let p = &app.ed.doc.paragraphs[pi];
+    let mut cursor_x: Option<u16> = None;
+    // Alignment offset.
+    let avail = width.saturating_sub(sl.indent);
+    let slack = avail.saturating_sub(sl.width);
+    let align_off = match pp.align() {
+        Align::Center => slack / 2,
+        Align::Right => slack,
+        _ => 0,
+    };
+    let mut spans: Vec<Span> = Vec::new();
+    let x: u16 = sl.indent + align_off;
+    match label {
+        Some(l) if !l.text.is_empty() => {
+            let first = layout::screen_first_indent(&pp, cols);
+            let lx = first + align_off;
+            let mut text = l.text.clone();
+            if caps.ascii {
+                text = text.chars().map(|c| if c.is_ascii() { c } else { '*' }).collect();
+            }
+            let props = app.ed.doc.base_run_props(pi).merge(&l.run);
+            spans.push(Span::raw(" ".repeat(lx.min(x) as usize)));
+            spans.push(Span::styled(text.clone(), style_for(&props, caps)));
+            spans.push(Span::raw(" ".repeat((x as usize).saturating_sub(lx as usize + text.width()))));
+        }
+        _ => spans.push(Span::raw(" ".repeat(x as usize))),
+    }
+
+    let mut ri = 0;
+    let mut cur_style: Option<Style> = None;
+    let mut buf = String::new();
+    let mut rel_x: u16 = 0;
+    let flush = |spans: &mut Vec<Span>, buf: &mut String, st: Option<Style>| {
+        if !buf.is_empty() {
+            spans.push(Span::styled(std::mem::take(buf), st.unwrap_or_default()));
+        }
+    };
+    for i in sl.start..sl.end {
+        while ri + 1 < runs.len() && runs[ri].end <= i {
+            ri += 1;
+        }
+        let it = &p.items[i];
+        let pos = Pos::new(pi, i);
+        if pos == cursor && cursor_x.is_none() {
+            cursor_x = Some(x + rel_x);
+        }
+        let mut st = style_for(&runs[ri].props, caps);
+        if sel.map_or(false, |r| r.contains(pos)) {
+            st = st.add_modifier(Modifier::REVERSED);
+        }
+        let adv = layout::screen_advance(it, rel_x, &pp);
+        let text: String = match it {
+            Item::Char(c) => {
+                let c = if runs[ri].props.all_caps.unwrap_or(false) { c.to_uppercase().next().unwrap_or(*c) } else { *c };
+                if (c as u32) < 0x20 || c == '\u{ad}' { String::new() } else { c.to_string() }
+            }
+            Item::Code(Code::Tab) => " ".repeat(adv as usize),
+            _ => String::new(),
+        };
+        if Some(st) != cur_style {
+            flush(&mut spans, &mut buf, cur_style);
+            cur_style = Some(st);
+        }
+        buf.push_str(&text);
+        rel_x += adv;
+    }
+    flush(&mut spans, &mut buf, cur_style);
+    // Cursor at end of line.
+    if cursor.para == pi && cursor_x.is_none() {
+        let is_last = line + 1 == nlines;
+        let in_line = cursor.idx >= sl.start && (cursor.idx < sl.end || (is_last && cursor.idx >= sl.end));
+        if in_line {
+            let cx = layout::screen_x_of(p, &pp, &sl, cursor.idx);
+            cursor_x = Some(x + cx);
+        }
+    }
+    // Drawings/placeholder boxes: show inline marker for opaque drawings on this line.
+    for i in sl.start..sl.end {
+        if let Item::Code(Code::Opaque(o)) = &p.items[i] {
+            if matches!(o.label.as_str(), "Drawing" | "Picture" | "Object") {
+                spans.push(Span::styled(format!(" [{}] ", o.label), Style::default().fg(Color::DarkGray).add_modifier(Modifier::REVERSED)));
+            }
+        }
+    }
+    (clip_spans(spans, width as usize), cursor_x)
+}
+
+/// Truncate spans to `width` terminal cells.
+fn clip_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::with_capacity(spans.len());
+    let mut used = 0usize;
+    for sp in spans {
+        let w = sp.content.width();
+        if used + w <= width {
+            used += w;
+            out.push(sp);
+            continue;
+        }
+        let mut text = String::new();
+        for c in sp.content.chars() {
+            let cw = layout::cell_width(c) as usize;
+            if used + cw > width {
+                break;
+            }
+            used += cw;
+            text.push(c);
+        }
+        if !text.is_empty() {
+            out.push(Span::styled(text, sp.style));
+        }
+        break;
+    }
+    out
+}
+
+/// The horizontal rule above table row `row` (or below the last row), with
+/// junctions where the cell borders of the rows above and below meet.
+fn table_rule(app: &App, table: u32, row: usize, width: u16, ch: &Chrome) -> String {
+    let Some(t) = app.ed.doc.tables.get(&table) else { return String::new() };
+    let grid = app.ed.doc.table_screen_grid(t, width);
+    // x positions of cell borders in a row (relative to the table's left edge).
+    let borders = |r: usize| -> Vec<u16> {
+        let mut v = vec![0u16];
+        let mut x = 0u16;
+        let mut g = 0usize;
+        if let Some(rr) = t.rows.get(r) {
+            for c in &rr.cells {
+                for _ in 0..c.span() {
+                    x += grid.get(g).copied().unwrap_or(3) + 1;
+                    g += 1;
+                }
+                v.push(x);
+            }
+        }
+        v
+    };
+    let above: Vec<u16> = if row > 0 { borders(row - 1) } else { Vec::new() };
+    let below: Vec<u16> = if row < t.rows.len() { borders(row) } else { Vec::new() };
+    let total: u16 = grid.iter().sum::<u16>() + grid.len() as u16;
+    let mut s = String::new();
+    for x in 0..=total {
+        if x as usize >= width as usize {
+            break;
+        }
+        let up = above.contains(&x);
+        let down = below.contains(&x);
+        let mut bits = 0;
+        if up {
+            bits |= 1;
+        }
+        if down {
+            bits |= 2;
+        }
+        if x > 0 {
+            bits |= 4;
+        }
+        if x < total {
+            bits |= 8;
+        }
+        if !up && !down {
+            s.push_str(ch.h);
+        } else {
+            s.push(ch.junction[bits]);
+        }
+    }
+    s
 }
 
 fn draw_status(f: &mut Frame, app: &mut App, area: Rect, caps: Caps) {
@@ -564,6 +897,9 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect, caps: Caps) {
     }
     if let Some(r) = app.repeat {
         indicators.push(format!("Repeat {}", r));
+    }
+    if let Some(c) = app.ed.current_cell() {
+        indicators.push(format!("Cell {}", c.name()));
     }
     let msg = app.status_text().unwrap_or_default();
     let right = format!("Doc 1  Pg {}/{}  Ln {:.2}\"  Pos {:.2}\"", pg, pages, ln as f64 / 1440.0, pos as f64 / 1440.0);
@@ -695,7 +1031,7 @@ fn draw_reveal(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome
             let pages = &app.ed.layout.pagination.pages;
             pages.iter().filter(|ps| ps.para == pi && ps.line > 0).filter_map(|ps| pl.lines.get(ps.line).map(|l| l.start)).collect()
         };
-        for (ci, (_, label)) in reveal::para_codes(&p.props).iter().enumerate() {
+        for (ci, (_, label)) in reveal::para_codes_at(&app.ed.doc, pi).iter().enumerate() {
             toks.push(Tok { text: label.clone(), pos: None, para_code: Some((pi, ci)), style: code_style });
         }
         let soft_starts: Vec<usize> = pl.lines.iter().skip(1).map(|l| l.start).collect();

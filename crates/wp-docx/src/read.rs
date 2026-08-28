@@ -72,7 +72,7 @@ impl Ctx {
     pub fn new(theme_major: Option<String>, theme_minor: Option<String>) -> Ctx {
         Ctx { theme_major, theme_minor, bookmark_names: HashMap::new(), bookmark_ids: HashMap::new(), opaque_bookmarks: Default::default(), next_wrapper_id: 1, warnings: HashMap::new() }
     }
-    fn warn(&mut self, label: &str) {
+    pub(crate) fn warn(&mut self, label: &str) {
         *self.warnings.entry(label.to_string()).or_insert(0) += 1;
     }
     fn wrapper_id(&mut self) -> u32 {
@@ -100,7 +100,7 @@ pub fn read_bytes(bytes: &[u8]) -> Result<Loaded> {
     };
 
     let main = package.get_str(&package.main_part).ok_or_else(|| anyhow!("main part missing"))?;
-    let (paragraphs, section, prolog, root_tag, pre_body, had_sectpr) = parse_document(&main, &mut ctx)?;
+    let (paragraphs, section, prolog, root_tag, pre_body, had_sectpr, tables) = parse_document(&main, &mut ctx)?;
     package.empty_body = paragraphs.is_empty();
     package.had_sectpr = had_sectpr;
     package.prolog = prolog;
@@ -111,6 +111,7 @@ pub fn read_bytes(bytes: &[u8]) -> Result<Loaded> {
     let mut doc = Document::from_paragraphs(paragraphs);
     doc.styles = styles;
     doc.section = section;
+    doc.tables = tables;
     if let Some(xml) = package.numbering_part.as_deref().and_then(|p| package.get_str(p)) {
         doc.numbering = parse_numbering(&xml, &ctx);
     }
@@ -171,7 +172,7 @@ fn theme_fonts(pkg: &DocxPackage) -> (Option<String>, Option<String>) {
 // document.xml
 // ---------------------------------------------------------------------------
 
-type ParsedDoc = (Vec<Paragraph>, SectionProps, String, String, String, bool);
+type ParsedDoc = (Vec<Paragraph>, SectionProps, String, String, String, bool, std::collections::BTreeMap<u32, Table>);
 
 fn parse_document(xml: &str, ctx: &mut Ctx) -> Result<ParsedDoc> {
     // A byte-order mark is kept as part of the prolog.
@@ -187,6 +188,7 @@ fn parse_document(xml: &str, ctx: &mut Ctx) -> Result<ParsedDoc> {
     let mut pending: Vec<Item> = Vec::new(); // body-level opaque items awaiting a paragraph
     let mut pre_body_start = 0usize;
     let mut had_sectpr = false;
+    let mut tables = std::collections::BTreeMap::new();
 
     loop {
         let before = reader.buffer_position() as usize;
@@ -226,6 +228,33 @@ fn parse_document(xml: &str, ctx: &mut Ctx) -> Result<ParsedDoc> {
                         let after = reader.buffer_position() as usize;
                         section = parse_sectpr(&xml[before..after]);
                         had_sectpr = true;
+                    }
+                    b"w:tbl" => {
+                        let _ = reader.read_to_end(name);
+                        let after = reader.buffer_position() as usize;
+                        let raw = &xml[before..after];
+                        let id = tables.keys().next_back().map(|k: &u32| k + 1).unwrap_or(1);
+                        let before_table = std::mem::take(&mut pending);
+                        match crate::table::parse_table(raw, id, ctx, &mut pending)? {
+                            Some((table, mut paras)) => {
+                                // Markers that sat before the table go back
+                                // in front of it (body level on its first
+                                // paragraph).
+                                if !before_table.is_empty() {
+                                    let mut items = before_table;
+                                    items.append(&mut paras[0].items);
+                                    paras[0].items = items;
+                                }
+                                tables.insert(id, table);
+                                paragraphs.append(&mut paras);
+                            }
+                            None => {
+                                pending = before_table;
+                                let label = block_label(&n, raw);
+                                ctx.warn("table with unsupported structure");
+                                paragraphs.push(raw_block(raw, &label));
+                            }
+                        }
                     }
                     _ => {
                         let _ = reader.read_to_end(name);
@@ -280,17 +309,17 @@ fn parse_document(xml: &str, ctx: &mut Ctx) -> Result<ParsedDoc> {
             None => paragraphs.push(Paragraph { props: ParaProps::default(), items: pending }),
         }
     }
-    Ok((paragraphs, section, prolog, root_tag, pre_body, had_sectpr))
+    Ok((paragraphs, section, prolog, root_tag, pre_body, had_sectpr, tables))
 }
 
-fn raw_block(raw: &str, label: &str) -> Paragraph {
+pub(crate) fn raw_block(raw: &str, label: &str) -> Paragraph {
     Paragraph {
         props: ParaProps { raw_block: true, ..Default::default() },
         items: vec![Item::Code(Code::Opaque(OpaqueXml::element(raw, label)))],
     }
 }
 
-fn block_label(tag: &[u8], raw: &str) -> String {
+pub(crate) fn block_label(tag: &[u8], raw: &str) -> String {
     match tag {
         b"w:tbl" => {
             let rows = raw.matches("<w:tr>").count() + raw.matches("<w:tr ").count();
@@ -305,7 +334,7 @@ fn block_label(tag: &[u8], raw: &str) -> String {
     }
 }
 
-fn warning_label_for_block(tag: &[u8]) -> String {
+pub(crate) fn warning_label_for_block(tag: &[u8]) -> String {
     match tag {
         b"w:tbl" => "table".into(),
         b"w:sdt" => "content control".into(),
@@ -317,7 +346,7 @@ fn warning_label_for_block(tag: &[u8]) -> String {
 /// A bookmark becomes a `[Bookmark:name]` code when it is the plain kind
 /// (unique name, only id and name). Anything else — duplicate names, table
 /// column bookmarks, unmatched ends — is kept verbatim so it comes back exactly.
-fn bookmark_item(e: &BytesStart<'_>, raw: &str, ctx: &mut Ctx, level: OpaqueLevel) -> Item {
+pub(crate) fn bookmark_item(e: &BytesStart<'_>, raw: &str, ctx: &mut Ctx, level: OpaqueLevel) -> Item {
     let id = attr(e, "w:id").unwrap_or_default();
     if local(e.name().as_ref()) == b"bookmarkStart" {
         let name = attr(e, "w:name").unwrap_or_else(|| format!("bm{}", id));
@@ -549,7 +578,7 @@ fn parse_para_content(
     }
 }
 
-fn element_label(tag: &[u8], ctx: &mut Ctx) -> String {
+pub(crate) fn element_label(tag: &[u8], ctx: &mut Ctx) -> String {
     match tag {
         b"w:commentRangeStart" | b"w:commentRangeEnd" | b"w:commentReference" => {
             if tag == b"w:commentRangeStart" {

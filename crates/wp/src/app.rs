@@ -43,6 +43,8 @@ pub enum PromptKind {
     FirstLine,
     Margins,
     TabSet,
+    TableInsert,
+    ColumnWidth,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -996,14 +998,70 @@ impl App {
             }
             Cmd::InsertTab => {
                 if self.guard_edit() {
-                    // Tab at the start of a list item demotes it, as in Word.
+                    // Tab at the start of a list item demotes it, as in Word;
+                    // in a table cell it moves to the next cell.
                     let c = self.ed.cursor;
                     let at_start = self.ed.doc.paragraphs[c.para].items[..c.idx].iter().all(|i| i.is_code());
-                    if at_start && !self.ed.has_selection() && self.ed.doc.list_ref(c.para).is_some() {
+                    if self.ed.current_cell().is_some() && !self.ed.has_selection() {
+                        self.exec(Cmd::TableNextCell);
+                    } else if at_start && !self.ed.has_selection() && self.ed.doc.list_ref(c.para).is_some() {
                         self.list_level(1);
                     } else {
                         self.ed.insert_code(Code::Tab);
                     }
+                }
+            }
+            Cmd::TableInsert => {
+                if self.guard_edit() {
+                    if self.ed.current_cell().is_some() {
+                        self.message("Already in a table — nested tables aren't editable in this version");
+                    } else {
+                        self.prompt(PromptKind::TableInsert, "Table size, rows × columns (e.g. 3x4): ", "3x3");
+                    }
+                }
+            }
+            Cmd::TableNextCell => {
+                if self.ed.current_cell().is_none() {
+                    self.message("Not in a table");
+                } else if self.guard_edit() {
+                    let rows = self.ed.doc.tables.get(&self.ed.current_cell().unwrap().table).map(|t| t.rows.len());
+                    self.ed.next_cell();
+                    let now = self.ed.doc.tables.get(&self.ed.current_cell().unwrap().table).map(|t| t.rows.len());
+                    if now > rows {
+                        self.message("New row added");
+                    }
+                }
+            }
+            Cmd::TablePrevCell => {
+                if !self.ed.prev_cell() {
+                    self.message("Not in a table");
+                }
+            }
+            Cmd::TableInsertRowBelow => self.table_op(|ed| ed.insert_row(true), "Row inserted below"),
+            Cmd::TableInsertRowAbove => self.table_op(|ed| ed.insert_row(false), "Row inserted above"),
+            Cmd::TableInsertColRight => self.table_op(|ed| ed.insert_column(true), "Column inserted right"),
+            Cmd::TableInsertColLeft => self.table_op(|ed| ed.insert_column(false), "Column inserted left"),
+            Cmd::TableDeleteRow => self.table_op(|ed| ed.delete_row(), "Row deleted"),
+            Cmd::TableDeleteCol => self.table_op(|ed| ed.delete_column(), "Column deleted"),
+            Cmd::TableDelete => self.table_op(|ed| ed.delete_table(), "Table deleted"),
+            Cmd::TableToText => self.table_op(|ed| ed.table_to_text(), "Table converted to tab-separated text"),
+            Cmd::TableHeaderRow => {
+                if self.ed.current_cell().is_none() {
+                    self.message("Not in a table");
+                } else if self.guard_edit() {
+                    match self.ed.toggle_header_row() {
+                        Some(true) => self.message("Row repeats as a header at the top of each page"),
+                        Some(false) => self.message("Row no longer repeats as a header"),
+                        None => self.message("Not in a table"),
+                    }
+                }
+            }
+            Cmd::TableColWidth => {
+                if self.ed.current_cell().is_none() {
+                    self.message("Not in a table");
+                } else if self.guard_edit() {
+                    let cur = self.ed.current_column_width().unwrap_or(1440);
+                    self.prompt(PromptKind::ColumnWidth, "Column width in inches: ", &format!("{:.2}", cur as f64 / 1440.0));
                 }
             }
             Cmd::ListBullet => self.toggle_list(ListKind::Bullet),
@@ -1017,6 +1075,9 @@ impl App {
                 self.list("List numbering format", items, ListAction::ListFormat);
             }
             Cmd::ListIndent => self.list_level(1),
+            Cmd::ListOutdent if self.ed.current_cell().is_some() && self.ed.doc.list_ref(self.ed.cursor.para).is_none() => {
+                self.exec(Cmd::TablePrevCell);
+            }
             Cmd::ListOutdent => {
                 if self.ed.doc.list_ref(self.ed.cursor.para).is_some() {
                     self.list_level(-1);
@@ -1312,7 +1373,7 @@ impl App {
     fn move_left(&mut self, sel: bool) {
         if self.reveal && !sel {
             let c = self.ed.cursor;
-            let n = reveal::para_codes(&self.ed.doc.paragraphs[c.para].props).len();
+            let n = reveal::para_codes_at(&self.ed.doc, c.para).len();
             match self.reveal_para_code {
                 Some(i) if i > 0 => {
                     self.reveal_para_code = Some(i - 1);
@@ -1342,7 +1403,7 @@ impl App {
         if self.reveal && !sel {
             if let Some(i) = self.reveal_para_code {
                 let c = self.ed.cursor;
-                let n = reveal::para_codes(&self.ed.doc.paragraphs[c.para].props).len();
+                let n = reveal::para_codes_at(&self.ed.doc, c.para).len();
                 self.reveal_para_code = if i + 1 < n { Some(i + 1) } else { None };
                 return;
             }
@@ -1351,7 +1412,7 @@ impl App {
         let at_end = c.idx >= self.ed.doc.paragraphs[c.para].items.len();
         if self.reveal && !sel && at_end && c.para + 1 < self.ed.doc.paragraphs.len() {
             // Step onto the next paragraph's property codes, if any.
-            let n = reveal::para_codes(&self.ed.doc.paragraphs[c.para + 1].props).len();
+            let n = reveal::para_codes_at(&self.ed.doc, c.para + 1).len();
             self.ed.move_to(Pos::new(c.para + 1, 0), false);
             self.reveal_para_code = if n > 0 { Some(0) } else { None };
             return;
@@ -1359,13 +1420,50 @@ impl App {
         self.ed.move_right(sel, self.reveal);
     }
 
+    /// Run a table command that needs the cursor in a table.
+    fn table_op(&mut self, f: impl FnOnce(&mut wp_core::Editor) -> bool, done: &str) {
+        if self.ed.current_cell().is_none() {
+            self.message("Not in a table — Table: Insert… creates one");
+            return;
+        }
+        if !self.guard_edit() {
+            return;
+        }
+        if f(&mut self.ed) {
+            self.message(done);
+        } else {
+            self.message("Couldn't do that here");
+        }
+        self.block_mode = false;
+        self.reveal_para_code = None;
+    }
+
     fn delete_para_code(&mut self, i: usize) {
         let para = self.ed.cursor.para;
-        let codes = reveal::para_codes(&self.ed.doc.paragraphs[para].props);
+        let codes = reveal::para_codes_at(&self.ed.doc, para);
         if let Some((which, label)) = codes.get(i) {
             if *which == ParaCode::RawBlock {
                 self.message("This block is preserved as a whole and can't be removed here");
                 return;
+            }
+            match which {
+                ParaCode::TableDef => {
+                    // As in WordPerfect: deleting [Tbl Def] leaves the text.
+                    if self.guard_edit() && self.ed.table_to_text() {
+                        self.message("Deleted [Tbl Def] — the table is now tab-separated text (Undo restores it)");
+                        self.reveal_para_code = None;
+                    }
+                    return;
+                }
+                ParaCode::Row => {
+                    self.message("Use Table: Delete Row to remove a row");
+                    return;
+                }
+                ParaCode::Cell => {
+                    self.message("Use Table: Delete Column to remove a column");
+                    return;
+                }
+                _ => {}
             }
             self.ed.clear_para_code(para, *which);
             self.message(format!("Deleted {}", label));
@@ -2320,6 +2418,34 @@ impl App {
                     self.message("Enter four values in inches: top bottom left right");
                 }
             }
+            PromptKind::TableInsert => {
+                let nums: Vec<usize> = v.split(|c: char| !c.is_ascii_digit()).filter(|t| !t.is_empty()).filter_map(|t| t.parse().ok()).collect();
+                let (rows, cols) = match nums.as_slice() {
+                    [r, c, ..] => (*r, *c),
+                    [r] => (*r, *r),
+                    _ => {
+                        self.message("Enter rows and columns, e.g. 3x4");
+                        return;
+                    }
+                };
+                if rows == 0 || cols == 0 || rows > 1000 || cols > 63 {
+                    self.message("Tables can have 1–1000 rows and 1–63 columns");
+                    return;
+                }
+                if self.ed.insert_table(rows, cols) {
+                    self.message(format!("Inserted a {}×{} table — Tab moves between cells", rows, cols));
+                } else {
+                    self.message("Can't insert a table here");
+                }
+            }
+            PromptKind::ColumnWidth => match parse_inches(&v) {
+                Some(w) if w >= 360 => {
+                    if self.ed.set_column_width(w) {
+                        self.message(format!("Column width {:.2}\"", w as f64 / 1440.0));
+                    }
+                }
+                _ => self.message("Enter a width in inches (at least 0.25)"),
+            },
             PromptKind::TabSet => {
                 let mut tabs = Vec::new();
                 for tok in v.split_whitespace() {

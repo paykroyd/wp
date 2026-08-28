@@ -22,12 +22,15 @@ built and why; §11 is the current status and gap list), `KEYBINDINGS.md`.
 ## Layout
 
 - `crates/wp-core` — model, editing, undo, layout/pagination, metrics. No
-  terminal, no file formats. Everything here is unit-testable.
+  terminal, no file formats. Everything here is unit-testable. Tables are
+  cell-tagged paragraphs plus a grid in `Document::tables` (`table.rs`,
+  DESIGN.md §3.7).
 - `crates/wp-docx` — `.docx` reader/writer. `tests/roundtrip.rs` is the
   **release gate**: every file in `corpus/` must round-trip with the main part
   semantically identical and every other part byte-identical.
-- `crates/wp-md` — Markdown import/export on top of `pulldown-cmark`; emits
-  table blocks and footnotes as WordprocessingML, so it depends on `wp-docx`.
+- `crates/wp-md` — Markdown import/export on top of `pulldown-cmark`; builds
+  tables and footnotes in the model (it still uses `wp-docx` to read the cells
+  of a preserved table block on export).
 - `crates/wp` — the binary: `app.rs` (state + command execution), `ui.rs`
 
   (rendering), `commands.rs` (registry — every capability is a command),
@@ -38,7 +41,9 @@ built and why; §11 is the current status and gap list), `KEYBINDINGS.md`.
 - **Never damage a document.** Anything the reader doesn't model must be kept
   verbatim: run properties as `Attr::Raw`, paragraph properties in `raw_ppr`,
   unknown elements as `Code::Opaque`, body blocks as `raw_block` paragraphs,
-  other zip parts untouched. When modelling something new, update
+  table properties as `raw_tblpr`/`raw_trpr`/`raw_tcpr`, other zip parts
+  untouched. A table whose structure the reader doesn't expect falls back to
+  a preserved block, never a best guess. When modelling something new, update
   `parse_rpr`/`render_rpr_attrs` (or `parse_ppr`/`render_ppr_body`) together
   and add a corpus fixture that exercises it.
 - **Formatting is never a mystery.** Character formatting is only ever paired

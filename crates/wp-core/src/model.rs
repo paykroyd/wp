@@ -257,6 +257,8 @@ pub enum OpaqueLevel {
     Para,
     /// A direct child of `w:body`, next to the paragraph rather than in it.
     Body,
+    /// A direct child of `w:tc`, next to the paragraph inside its cell.
+    Cell,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -568,6 +570,10 @@ pub struct ParaProps {
     /// This "paragraph" is a verbatim body-level block (table, content
     /// control, …) held in a single `Opaque` item. Not editable.
     pub raw_block: bool,
+    /// The table cell this paragraph belongs to, if any. Cell paragraphs are
+    /// contiguous in the document, in row-major order; the grid itself lives
+    /// in `Document::tables` (DESIGN.md §3.7).
+    pub cell: Option<CellRef>,
 }
 
 impl ParaProps {
@@ -609,6 +615,7 @@ impl ParaProps {
             raw_ppr: other.raw_ppr.clone(),
             p_attrs: other.p_attrs.clone(),
             raw_block: other.raw_block,
+            cell: other.cell,
         }
     }
 
@@ -655,6 +662,175 @@ impl ParaProps {
     }
     pub fn page_break_before(&self) -> bool {
         self.page_break_before.unwrap_or(false)
+    }
+}
+
+
+/// Which table cell a paragraph belongs to. `col` is the cell's index within
+/// its row (not the grid column: a cell may span several grid columns).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CellRef {
+    pub table: u32,
+    pub row: u32,
+    pub col: u32,
+}
+
+impl CellRef {
+    pub const fn new(table: u32, row: u32, col: u32) -> CellRef {
+        CellRef { table, row, col }
+    }
+    /// Spreadsheet-style name, `A1` = first column of the first row.
+    pub fn name(&self) -> String {
+        format!("{}{}", column_letters(self.col), self.row + 1)
+    }
+}
+
+/// `0 → A`, `25 → Z`, `26 → AA`.
+pub fn column_letters(mut col: u32) -> String {
+    let mut s = Vec::new();
+    loop {
+        s.push((b'A' + (col % 26) as u8) as char);
+        if col < 26 {
+            break;
+        }
+        col = col / 26 - 1;
+    }
+    s.iter().rev().collect()
+}
+
+/// Vertical merge state of a cell (`w:vMerge`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VMerge {
+    /// The top cell of a vertically merged region.
+    Restart,
+    /// Continues the region begun above; its content is not shown.
+    Continue,
+}
+
+/// Default cell margin on each side (Word's `TableNormal`: 108 twips).
+pub const DEFAULT_CELL_MARGIN: Twips = 108;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct TableCell {
+    /// Grid columns spanned (`w:gridSpan`), at least 1.
+    pub span: u16,
+    pub vmerge: Option<VMerge>,
+    /// Preferred width in twips (`w:tcW` of type `dxa`), when known.
+    pub width: Option<Twips>,
+    /// Cell shading fill (`w:shd/@w:fill`), when a plain colour.
+    pub shading: Option<Rgb>,
+    /// The complete `w:tcPr` as read (empty when the cell had none);
+    /// `None` means it is regenerated from the fields on write.
+    pub raw_tcpr: Option<String>,
+    /// Attribute text of the `w:tc` start tag.
+    pub attrs: String,
+}
+
+impl TableCell {
+    pub fn new() -> TableCell {
+        TableCell { span: 1, ..Default::default() }
+    }
+    pub fn span(&self) -> usize {
+        self.span.max(1) as usize
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct TableRow {
+    pub cells: Vec<TableCell>,
+    /// Repeat as a header row at the top of each page (`w:tblHeader`).
+    pub header: bool,
+    /// Don't break this row across pages (`w:cantSplit`).
+    pub cant_split: bool,
+    /// Row height in twips (`w:trHeight`), when set.
+    pub height: Option<Twips>,
+    /// Everything before the first `w:tc` (`w:tblPrEx`, `w:trPr`), verbatim.
+    pub raw_trpr: Option<String>,
+    /// Attribute text of the `w:tr` start tag.
+    pub attrs: String,
+}
+
+/// A table's grid and properties. The cell *contents* are the paragraphs
+/// tagged with a `CellRef` naming this table.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct Table {
+    /// Grid column widths in twips (`w:tblGrid`).
+    pub grid: Vec<Twips>,
+    pub rows: Vec<TableRow>,
+    /// Table style id (`w:tblStyle`).
+    pub style: Option<String>,
+    /// Left/right cell margins (`w:tblCellMar`), defaulting to Word's 108.
+    pub cell_margin_left: Twips,
+    pub cell_margin_right: Twips,
+    /// The complete `w:tblPr` as read, re-emitted verbatim.
+    pub raw_tblpr: Option<String>,
+    /// The complete `w:tblGrid` as read; regenerated when columns change.
+    pub raw_grid: Option<String>,
+    /// Attribute text of the `w:tbl` start tag.
+    pub attrs: String,
+}
+
+impl Table {
+    /// A new `rows × cols` table filling `width`, with single borders.
+    pub fn new(rows: usize, cols: usize, width: Twips) -> Table {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let w = (width / cols as Twips).max(360);
+        Table {
+            grid: vec![w; cols],
+            rows: (0..rows).map(|_| TableRow { cells: (0..cols).map(|_| TableCell { span: 1, width: Some(w), ..Default::default() }).collect(), ..Default::default() }).collect(),
+            style: Some("TableGrid".into()),
+            cell_margin_left: DEFAULT_CELL_MARGIN,
+            cell_margin_right: DEFAULT_CELL_MARGIN,
+            raw_tblpr: None,
+            raw_grid: None,
+            attrs: String::new(),
+        }
+    }
+    pub fn cols(&self) -> usize {
+        self.grid.len().max(1)
+    }
+    pub fn width(&self) -> Twips {
+        self.grid.iter().sum()
+    }
+    /// The first grid column a cell starts at.
+    pub fn grid_col(&self, row: usize, col: usize) -> usize {
+        self.rows.get(row).map(|r| r.cells.iter().take(col).map(|c| c.span()).sum()).unwrap_or(0)
+    }
+    /// Twips from the table's left edge to the cell's left edge, and the
+    /// cell's full width (before margins).
+    pub fn cell_extent(&self, row: usize, col: usize) -> (Twips, Twips) {
+        let g = self.grid_col(row, col);
+        let span = self.rows.get(row).and_then(|r| r.cells.get(col)).map(|c| c.span()).unwrap_or(1);
+        let x: Twips = self.grid.iter().take(g).sum();
+        let w: Twips = self.grid.iter().skip(g).take(span).sum();
+        (x, w.max(360))
+    }
+    /// Width available to text inside a cell.
+    pub fn cell_text_width(&self, row: usize, col: usize) -> Twips {
+        let (_, w) = self.cell_extent(row, col);
+        (w - self.cell_margin_left - self.cell_margin_right).max(360)
+    }
+    /// The cell index in `row` that covers grid column `g`.
+    pub fn cell_at_grid(&self, row: usize, g: usize) -> usize {
+        let Some(r) = self.rows.get(row) else { return 0 };
+        let mut acc = 0;
+        for (i, c) in r.cells.iter().enumerate() {
+            acc += c.span();
+            if g < acc {
+                return i;
+            }
+        }
+        r.cells.len().saturating_sub(1)
+    }
+    /// Mark the grid as changed so it is regenerated on write.
+    pub fn touch_grid(&mut self) {
+        self.raw_grid = None;
+        for r in &mut self.rows {
+            for c in &mut r.cells {
+                c.raw_tcpr = None;
+            }
+        }
     }
 }
 

@@ -236,6 +236,65 @@ pub fn to_markdown(doc: &Document, rels: &dyn Fn(&str) -> Option<String>) -> Exp
     while i < n {
         let p = &doc.paragraphs[i];
         let pp = doc.para_props(i);
+        // Tables become GFM tables: one row per row, cell paragraphs joined
+        // by spaces. Merged cells and nested tables cannot be expressed.
+        if let Some(c) = p.props.cell {
+            let (_, end) = doc.table_bounds(i).unwrap();
+            let rows = doc.table_paras(i).unwrap();
+            let table = doc.tables.get(&c.table);
+            let mut lossy = false;
+            if prev_code_block {
+                out.push_str("```\n\n");
+                prev_code_block = false;
+            }
+            let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+            for (ri, row) in rows.iter().enumerate() {
+                out.push('|');
+                for ci in 0..ncols {
+                    let mut cell = String::new();
+                    if let Some(paras) = row.get(ci) {
+                        for &pi in paras {
+                            if doc.paragraphs[pi].props.raw_block {
+                                lossy = true;
+                                continue;
+                            }
+                            let text = inline(doc, pi, rels, &mut losses);
+                            let mut text = text.trim();
+                            // GFM's header row is bold by convention; an
+                            // explicit bold around the whole cell is redundant.
+                            if ri == 0 && text.len() > 4 && text.starts_with("**") && text.ends_with("**") && !text[2..text.len() - 2].contains("**") {
+                                text = &text[2..text.len() - 2];
+                            }
+                            if !text.is_empty() {
+                                if !cell.is_empty() {
+                                    cell.push(' ');
+                                }
+                                cell.push_str(text);
+                            }
+                        }
+                    }
+                    let cell = cell.replace('|', "\\|").replace('\n', " ");
+                    out.push_str(&format!(" {} |", cell));
+                }
+                if table.and_then(|t| t.rows.get(ri)).map_or(false, |r| r.cells.iter().any(|x| x.span() > 1 || x.vmerge.is_some())) {
+                    lossy = true;
+                }
+                out.push('\n');
+                if ri == 0 {
+                    out.push('|');
+                    for _ in 0..ncols {
+                        out.push_str(" --- |");
+                    }
+                    out.push('\n');
+                }
+            }
+            if lossy {
+                losses.flag("merged or nested table cells");
+            }
+            out.push('\n');
+            i = end;
+            continue;
+        }
         // Preserved blocks: tables become GFM tables, the rest is dropped.
         if p.props.raw_block {
             if let Some(Item::Code(Code::Opaque(o))) = p.items.first() {
@@ -382,7 +441,8 @@ mod tests {
         assert!(doc.runs(1).iter().any(|r| r.props.is_strike()));
         let labels: Vec<String> = doc.list_labels().into_iter().map(|l| l.map(|l| l.text).unwrap_or_default()).collect();
         assert_eq!(&labels[2..7], &["•", "•", "◦", "1.", "2."]);
-        assert!(doc.paragraphs.iter().any(|p| p.props.raw_block));
+        assert_eq!(doc.tables.len(), 1);
+        assert!(doc.paragraphs.iter().any(|p| p.props.cell.is_some()));
         assert_eq!(doc.footnotes.len(), 1);
         assert_eq!(doc.extra_rels.len(), 1);
         let rels = |id: &str| doc.extra_rels.iter().find(|r| r.id == id).map(|r| r.target.clone());

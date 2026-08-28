@@ -15,6 +15,9 @@ pub struct Document {
     pub numbering: Numbering,
     pub footnotes: Vec<Footnote>,
     pub extra_rels: Vec<ExtraRel>,
+    /// Table grids, by id. Contents are the paragraphs whose `props.cell`
+    /// names the table.
+    pub tables: BTreeMap<u32, Table>,
 }
 
 impl Default for Document {
@@ -55,6 +58,7 @@ impl Document {
             numbering: Numbering::default(),
             footnotes: Vec::new(),
             extra_rels: Vec::new(),
+            tables: BTreeMap::new(),
         }
     }
 

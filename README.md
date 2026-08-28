@@ -18,9 +18,12 @@ command palette so nothing has to be memorised.
 ```
 
 **Status: 0.2 Round-trip.** Take a `.docx` someone sent you, edit it, and send
-it back: what `wp` doesn't edit yet (tables, comments, tracked changes, fields,
-images) is shown as a labelled placeholder and preserved byte-for-byte — down to
-Word's revision ids — across a 62-file test corpus. Lists are real Word lists
+it back: what `wp` doesn't edit yet (comments, tracked changes, fields,
+images, nested tables) is shown as a labelled placeholder and preserved
+byte-for-byte — down to Word's revision ids — across a 62-file test corpus.
+Tables are editable (the first piece of 0.3): insert one from the palette,
+Tab between cells, add and remove rows and columns, and Word gets back exactly
+the table it sent. Lists are real Word lists
 with their numbering, find and replace does regular expressions, formatting
 ("find bold text in Heading 2") and codes ("find the next page break") with a
 preview before replacing, and Markdown opens and saves with one honest line
@@ -114,7 +117,9 @@ Put the cursor on a code and press `Delete`: the code *and its pair* are gone
 and the formatting with them. Paragraph codes (`[Style:…]`, `[Just:Center]`,
 `[L Ind:0.5"]`) sit at the start of the paragraph and delete the same way.
 `[SRt]` and `[SPg]` are where the layout broke a line or a page; they're shown,
-not editable.
+not editable. Tables show as `[Tbl Def:3×4]`, `[Row]` and `[Cell:B2]` on the
+first paragraph of each cell; deleting `[Tbl Def]` turns the table into
+tab-separated text, as it did in WordPerfect.
 
 ## Fidelity
 

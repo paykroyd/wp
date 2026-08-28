@@ -120,6 +120,34 @@ pub enum ParaCode {
     Mark,
     Opaque,
     RawBlock,
+    /// `[Tbl Def]` on a table's first paragraph.
+    TableDef,
+    /// `[Row]` on a row's first paragraph.
+    Row,
+    /// `[Cell:A1]` on a cell's first paragraph.
+    Cell,
+}
+
+/// The codes at the start of paragraph `para`: table structure first (which
+/// needs the document, to know where a cell begins), then the paragraph's
+/// direct properties.
+pub fn para_codes_at(doc: &crate::Document, para: usize) -> Vec<(ParaCode, String)> {
+    let mut v = Vec::new();
+    if let Some(c) = doc.cell_of(para) {
+        if doc.is_cell_start(para) {
+            let first_of_table = para == 0 || doc.cell_of(para - 1).map_or(true, |p| p.table != c.table);
+            if first_of_table {
+                let (rows, cols) = doc.tables.get(&c.table).map(|t| (t.rows.len(), t.cols())).unwrap_or((0, 0));
+                v.push((ParaCode::TableDef, format!("[Tbl Def:{}×{}]", rows, cols)));
+            }
+            if c.col == 0 {
+                v.push((ParaCode::Row, "[Row]".to_string()));
+            }
+            v.push((ParaCode::Cell, format!("[Cell:{}]", c.name())));
+        }
+    }
+    v.extend(para_codes(&doc.paragraphs[para].props));
+    v
 }
 
 /// The codes to display at the start of a paragraph for its *direct*
@@ -242,7 +270,8 @@ pub fn clear_para_code(p: &mut ParaProps, which: ParaCode) {
         ParaCode::SectBreak => p.sect_break = None,
         ParaCode::Mark => p.mark = RunProps::default(),
         ParaCode::Opaque => p.opaque.clear(),
-        ParaCode::RawBlock => {}
+        // Table structure is not a paragraph property; the app handles these.
+        ParaCode::RawBlock | ParaCode::TableDef | ParaCode::Row | ParaCode::Cell => {}
     }
     p.raw_ppr = None;
 }

@@ -203,7 +203,7 @@ impl Editor {
         }
         if self.layout.pagination_dirty {
             let layouts: Vec<ParaLayout> = self.layout.print.iter().map(|l| l.clone().unwrap()).collect();
-            self.layout.pagination = layout::paginate(&self.doc.section, &layouts);
+            self.layout.pagination = layout::paginate(&self.doc, &layouts);
             self.layout.pagination_dirty = false;
         }
     }
@@ -227,7 +227,8 @@ impl Editor {
         if self.layout.screen[para].is_none() {
             let pp = self.doc.para_props(para);
             let cells = self.label_cells(para);
-            let lines = layout::wrap_screen(&self.doc.paragraphs[para], &pp, self.layout.cols, cells);
+            let cols = self.doc.cell_screen_width(para, self.layout.cols).unwrap_or(self.layout.cols);
+            let lines = layout::wrap_screen(&self.doc.paragraphs[para], &pp, cols, cells);
             self.layout.screen[para] = Some(lines);
         }
         self.layout.screen[para].as_ref().unwrap()
@@ -249,8 +250,9 @@ impl Editor {
         let y = self.layout.pagination.placements[c.para].line_y.get(li).copied().unwrap_or(0);
         let xs = layout::item_x_positions(&self.doc, c.para, &line);
         let x = xs.get(c.idx.saturating_sub(line.start)).copied().unwrap_or(0);
+        let cell_x = self.doc.cell_x(c.para);
         let sec = &self.doc.section;
-        (page + 1, sec.margin_top + y, sec.margin_left + line.x + x)
+        (page + 1, sec.margin_top + y, sec.margin_left + cell_x + line.x + x)
     }
 
     /// The position at which page `page` (1-based) starts.
@@ -321,11 +323,51 @@ impl Editor {
             }
             Op::ReplaceItems { para, .. } => self.invalidate(*para),
             Op::SetSection(_) => self.invalidate_all(),
+            Op::InsertPara { para, .. } => self.cache_insert(*para),
+            Op::RemovePara { para } => self.cache_remove(*para),
+            Op::SetTable { id, .. } => self.invalidate_table(*id),
         }
         let inv = self.doc.apply(op);
         self.dirty = true;
         self.open_group(GroupKind::Other);
         self.history.open.as_mut().unwrap().inverses.push(inv);
+    }
+
+    /// Apply a primitive op inside the current undo group (for the table
+    /// operations in `table.rs`).
+    pub(crate) fn apply_op(&mut self, op: Op) {
+        self.apply(op)
+    }
+
+    fn cache_insert(&mut self, para: usize) {
+        let p = para.min(self.layout.print.len());
+        self.layout.print.insert(p, None);
+        self.layout.screen.insert(p, None);
+        self.layout.labels.insert(p.min(self.layout.labels.len()), None);
+        self.layout.labels_dirty = true;
+        self.layout.pagination_dirty = true;
+    }
+
+    fn cache_remove(&mut self, para: usize) {
+        if para < self.layout.print.len() {
+            self.layout.print.remove(para);
+            self.layout.screen.remove(para);
+        }
+        if para < self.layout.labels.len() {
+            self.layout.labels.remove(para);
+        }
+        self.layout.labels_dirty = true;
+        self.layout.pagination_dirty = true;
+    }
+
+    /// A table's grid changed: every paragraph in it wraps differently.
+    fn invalidate_table(&mut self, id: u32) {
+        for i in 0..self.doc.paragraphs.len() {
+            if self.doc.paragraphs[i].props.cell.map_or(false, |c| c.table == id) {
+                self.invalidate(i);
+            }
+        }
+        self.layout.pagination_dirty = true;
     }
 
     pub fn can_undo(&self) -> bool {
@@ -409,6 +451,9 @@ impl Editor {
             }
             Op::ReplaceItems { para, .. } => self.invalidate(*para),
             Op::SetSection(_) => self.invalidate_all(),
+            Op::InsertPara { para, .. } => self.cache_insert(*para),
+            Op::RemovePara { para } => self.cache_remove(*para),
+            Op::SetTable { id, .. } => self.invalidate_table(*id),
         }
     }
 
@@ -673,6 +718,19 @@ impl Editor {
         let (para, li) = self.screen_line_of_cursor();
         let (tp, tl) = if li > 0 {
             (para, li - 1)
+        } else if self.doc.is_cell_start(para) {
+            // Top of a cell: the same column one row up, or the paragraph
+            // before the table.
+            if self.move_row(-1, x, select) {
+                return;
+            }
+            let (start, _) = self.doc.table_bounds(para).unwrap();
+            if start == 0 {
+                self.move_to(Pos::new(0, 0), select);
+                return;
+            }
+            let n = self.screen_lines(start - 1).len();
+            (start - 1, n - 1)
         } else if para > 0 {
             let n = self.screen_lines(para - 1).len();
             (para - 1, n - 1)
@@ -688,8 +746,22 @@ impl Editor {
         self.goal_x = Some(x);
         let (para, li) = self.screen_line_of_cursor();
         let n = self.screen_lines(para).len();
+        let cell_end = self.doc.cell_of(para).is_some() && (para + 1 >= self.doc.paragraphs.len() || !self.doc.same_cell(para, para + 1));
         let (tp, tl) = if li + 1 < n {
             (para, li + 1)
+        } else if cell_end {
+            // Bottom of a cell: the same column one row down, or the
+            // paragraph after the table.
+            if self.move_row(1, x, select) {
+                return;
+            }
+            let (_, end) = self.doc.table_bounds(para).unwrap();
+            if end >= self.doc.paragraphs.len() {
+                let e = self.doc.end_pos();
+                self.move_to(e, select);
+                return;
+            }
+            (end, 0)
         } else if para + 1 < self.doc.paragraphs.len() {
             (para + 1, 0)
         } else {
@@ -867,7 +939,7 @@ impl Editor {
                 if let Some(st) = self.doc.styles.get(&sid) {
                     if let Some(next) = st.next.clone() {
                         if next != sid {
-                            props = ParaProps { style: Some(next), ..ParaProps::default() };
+                            props = ParaProps { style: Some(next), cell: props.cell, ..ParaProps::default() };
                         }
                     }
                 }
@@ -906,10 +978,8 @@ impl Editor {
         self.open_group(GroupKind::Other);
         if r.start.para == r.end.para {
             self.apply(Op::Delete { at: r.start, len: r.end.idx - r.start.idx });
-        } else {
+        } else if self.doc.same_cell(r.start.para, r.end.para) && (r.start.para + 1..r.end.para).all(|i| self.doc.same_cell(i, r.start.para)) {
             // Tail of last paragraph, whole middle paragraphs, head of first.
-            let last = &self.doc.paragraphs[r.end.para];
-            let _ = last;
             self.apply(Op::Delete { at: Pos::new(r.end.para, 0), len: r.end.idx });
             for pi in (r.start.para + 1..r.end.para).rev() {
                 let n = self.doc.paragraphs[pi].items.len();
@@ -919,10 +989,57 @@ impl Editor {
             let n = self.doc.paragraphs[r.start.para].items.len();
             self.apply(Op::Delete { at: r.start, len: n - r.start.idx });
             self.apply(Op::Join { para: r.start.para });
+        } else {
+            self.delete_range_across_cells(r);
         }
-        self.cursor = r.start;
+        self.cursor = self.doc.clamp(r.start);
         self.anchor = None;
-        self.normalize_para(r.start.para);
+        let para = self.cursor.para;
+        self.normalize_para(para);
+    }
+
+    /// A range crossing table cells: text is removed, but paragraphs are
+    /// never joined across a cell boundary and every cell keeps one
+    /// paragraph. A table lying wholly inside the range is removed.
+    fn delete_range_across_cells(&mut self, r: Range) {
+        // Tables strictly inside the range (neither end paragraph in them).
+        let mut whole: Vec<u32> = Vec::new();
+        for pi in r.start.para + 1..r.end.para {
+            if let Some(c) = self.doc.cell_of(pi) {
+                let ends_in = self.doc.cell_of(r.start.para).map_or(false, |x| x.table == c.table) || self.doc.cell_of(r.end.para).map_or(false, |x| x.table == c.table);
+                if !ends_in && !whole.contains(&c.table) {
+                    whole.push(c.table);
+                }
+            }
+        }
+        // Tail of the end paragraph.
+        self.apply(Op::Delete { at: Pos::new(r.end.para, 0), len: r.end.idx });
+        // Middle paragraphs, from the end: removed, or cleared when they are
+        // the last paragraph left in their cell.
+        for pi in (r.start.para + 1..r.end.para).rev() {
+            let n = self.doc.paragraphs[pi].items.len();
+            let in_cell = self.doc.cell_of(pi).is_some();
+            let sole = in_cell && !self.doc.same_cell(pi - 1, pi) && (pi + 1 >= self.doc.paragraphs.len() || !self.doc.same_cell(pi, pi + 1));
+            if sole || self.doc.paragraphs[pi].props.raw_block {
+                self.apply(Op::Delete { at: Pos::new(pi, 0), len: n });
+            } else {
+                self.apply(Op::RemovePara { para: pi });
+            }
+        }
+        // Head of the start paragraph.
+        let n = self.doc.paragraphs[r.start.para].items.len();
+        self.apply(Op::Delete { at: r.start, len: n - r.start.idx });
+        // Whole tables go entirely.
+        for id in whole {
+            if let Some((s, e)) = self.doc.table_span(id) {
+                self.remove_table_paras(id, s, e);
+            }
+        }
+        // Join the ends when nothing structural separates them any more.
+        let next = r.start.para + 1;
+        if next < self.doc.paragraphs.len() && self.doc.same_cell(r.start.para, next) && !self.doc.paragraphs[next].props.raw_block {
+            self.apply(Op::Join { para: r.start.para });
+        }
     }
 
     pub fn delete_selection(&mut self) {
@@ -976,8 +1093,8 @@ impl Editor {
         }
         let c = self.cursor;
         if c.idx == 0 {
-            if c.para == 0 {
-                return;
+            if c.para == 0 || !self.doc.same_cell(c.para - 1, c.para) {
+                return; // a cell boundary is not a character
             }
             self.commit();
             self.join_with_previous(c.para);
@@ -987,6 +1104,9 @@ impl Editor {
         let Some(prev) = self.prev_pos(c, codes_visible) else { return };
         if prev.para != c.para {
             // Only invisible codes precede the cursor: join with the previous paragraph.
+            if !self.doc.same_cell(prev.para, c.para) {
+                return;
+            }
             self.commit();
             self.join_with_previous(c.para);
             self.commit();
@@ -1027,7 +1147,7 @@ impl Editor {
         let p = if codes_visible { c } else { self.skip_forward(c, false) };
         self.commit();
         if p.idx >= n_items {
-            if c.para + 1 < self.doc.paragraphs.len() {
+            if c.para + 1 < self.doc.paragraphs.len() && self.doc.same_cell(c.para, c.para + 1) {
                 self.join_with_previous(c.para + 1);
                 self.cursor = c;
             }
@@ -1355,12 +1475,17 @@ impl Editor {
             self.delete_selection();
         }
         let n = f.paragraphs.len();
+        let cell = self.doc.cell_of(self.cursor.para);
         for (i, p) in f.paragraphs.iter().enumerate() {
             if i > 0 {
                 self.split_paragraph_raw();
-                // Middle/last paragraphs carry their own props.
+                // Middle/last paragraphs carry their own props, but always
+                // belong to the cell they are pasted into.
                 let props = if i + 1 < n || p.props != ParaProps::default() {
-                    Some(p.props.clone())
+                    let mut props = p.props.clone();
+                    props.cell = cell;
+                    props.raw_block = false;
+                    Some(props)
                 } else {
                     None
                 };

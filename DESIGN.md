@@ -57,9 +57,10 @@ wp/
 
 `wp-core` has no terminal dependency and no knowledge of `.docx`. Everything in
 it is testable with plain `cargo test` and no TTY (this includes lists,
-numbering, and search). `wp-docx` depends on `wp-core` only; `wp-md` depends on
-both (it emits table blocks and footnotes in WordprocessingML). The binary
-depends on all three.
+numbering, search, and tables). `wp-docx` depends on `wp-core` only; `wp-md`
+depends on both (footnotes are built as model paragraphs; a preserved table
+block still needs `wp-docx` to read its cells for export). The binary depends
+on all three.
 
 ---
 
@@ -156,6 +157,48 @@ file's unit means read and write are lossless by construction.
 `Item` is 16 bytes. A 500-page document is ~1.5 M characters → 24 MB for the
 stream, plus layout caches. Well under the 250 MB ceiling with room for undo.
 
+### 3.7 Tables: cells are paragraphs, the grid is a property
+
+A table is not a nested block. Its cells' paragraphs sit in the same flat
+`Vec<Paragraph>` as everything else, in row-major order, each carrying
+`props.cell = Some(CellRef { table, row, col })`. The grid — column widths,
+row properties, per-cell span / vertical merge / width / shading, and the
+verbatim `tblPr` / `trPr` / `tcPr` — lives in `Document::tables`, keyed by the
+table id. This is WordPerfect's own layout of a table in the code stream
+(`[Tbl Def]`, `[Row]`, `[Cell]`… `[Tbl Off]`), and it is what `.docx` writes
+too once the `w:tbl`/`w:tr`/`w:tc` wrappers are peeled off.
+
+What this buys:
+
+- `Pos` is still `(paragraph, item)`. Cursor movement, selection, search and
+  replace, undo, autosave, Reveal Codes and the `.docx` writer needed no new
+  addressing scheme. Reveal Codes draws `[Tbl Def:3×4]`, `[Row]` and
+  `[Cell:B2]` as pseudo-codes on the first paragraph of each cell, from the
+  tags alone.
+- Structural edits are sequences of the primitive ops: insert / delete a row
+  or column is `InsertPara` / `RemovePara` plus `SetParaProps` to renumber
+  the cells after it and one `SetTable` for the grid. Undo is therefore the
+  same word-grouped history as typing; there is no table-specific undo.
+- The editor enforces the invariants the model cannot: a cell always keeps at
+  least one paragraph; Backspace / Delete never join across a cell boundary
+  (the boundary is not a character, as in WordPerfect); a range that crosses
+  cells clears them rather than joining them, and removes a table only when
+  the range covers all of it; paste into a cell tags the pasted paragraphs
+  with that cell; Enter in a cell adds a paragraph to the cell.
+- Layout needs one extra input: a cell paragraph wraps to its column's width
+  (`Table::cell_text_width`) rather than the page's. Pagination places a row
+  as a unit — all cells start at the same y, the row is as tall as its
+  tallest cell, a row that doesn't fit moves to the next page whole, and only
+  a row taller than a page is split line by line. Draft view scales the grid
+  to the terminal width (three cells minimum per column) and draws the box.
+
+Nested tables, content controls and anything else inside a cell that is not a
+paragraph stay preserved blocks *inside* the cell (`raw_block` with a cell
+tag). A table whose XML has structure the reader does not expect — a content
+control wrapping rows, an unknown element between cells — falls back to a
+single preserved block, exactly the 0.2 behaviour, so nothing is ever
+rewritten into a shape the reader did not understand.
+
 ---
 
 ## 4. Editing and undo
@@ -246,9 +289,13 @@ goes back to the same place. Start-tag attributes of `w:p`, `w:r`, and
 `w:sectPr` (revision ids, paragraph ids) are kept as text and re-emitted;
 `w:proofErr` and `w:lastRenderedPageBreak` are kept as hidden hint opaques;
 bookmarks keep their original ids, and any bookmark that is not the plain kind
-(duplicate name, table-column attributes) is kept verbatim. All other zip
-entries are stored untouched as `(name, bytes)` on the `DocxPackage` that
-accompanies the `Document` in memory.
+(duplicate name, table-column attributes) is kept verbatim. Body-level tables
+become cell-tagged paragraphs (§3.7) with `tblPr`, `trPr` and `tcPr` — and the
+absence of a `tcPr` — recorded verbatim, so an untouched table writes back
+token-identical; the grid is regenerated only when a column is added,
+removed or resized. All other zip entries are stored untouched as
+`(name, bytes)` on the `DocxPackage` that accompanies the `Document` in
+memory.
 
 ### 6.2 Writing
 
@@ -350,6 +397,7 @@ clean save or exit.
 | E5 | Embedded metrics from OFL metric-compatible fonts | Reading system fonts at runtime | One binary, works on a bare console with no fonts installed, identical pagination on every machine |
 | E6 | Synchronous layout in v0.1 | Background layout thread | Measured cost is negligible at 500 pages; keep the interface pure so it can move later |
 | E7 | Twips as `i32` | Points as `f32` | Lossless with the file format; no accumulated drift over a long document |
+| E8 | Table cells as tagged paragraphs in the flat stream, grid as a property (§3.7) | Nested `Block::Table { rows: Vec<Vec<Vec<Paragraph>>> }` with a path-shaped cursor | Keeps `Pos`, undo, search and the writer unchanged; matches both WordPerfect's stream and `.docx`'s serialisation; structural edits reduce to existing ops |
 
 ---
 
@@ -407,10 +455,25 @@ twin, so nothing depends on it.
 
 Known gaps carried into 0.3: a document that declares WordprocessingML as the
 *default* namespace (no `w:` prefix) opens as preserved blocks only; Markdown
-tables import as preserved table blocks until tables are editable; Markdown
 images become links; right-aligned list labels (`lvlJc="right"`) are placed
 left-aligned; `[List:…]` in Reveal Codes shows the instance id rather than
 the format.
+
+**0.3 Documents, in progress — tables (2026-08-28).** The model of §3.7:
+`.docx` tables read into editable cells and write back verbatim (the full
+corpus gate passes with every table fixture parsed, not preserved); insert a
+table (`Table: Insert…`, Alt+F7 in classic), Tab / Shift+Tab between cells
+(Tab at the last cell adds a row), ↑/↓ across rows by column, insert and
+delete rows and columns, delete table, convert to tab-separated text (also
+what deleting `[Tbl Def]` does), column width, header-row flag; draft view
+draws the grid with spans and vertical merges; Reveal Codes shows the
+structure; the status line shows the cell; Markdown tables import as real
+tables and export from them. Still to do for P0-17: merge and split cells
+(spans and merges are preserved and drawn, not created), borders and shading
+as editable properties, sort by column, `SUM`/`AVERAGE` formulas, header rows
+actually repeating in pagination, `cantSplit`, and row heights; a literal tab
+inside a cell (Tab navigates; insert one from the palette outside a cell and
+paste it); page view.
 
 **0.1 Preview** provided:
 
@@ -443,7 +506,7 @@ Measured on a 330-page, 142 k-word `.docx`: cold open with full pagination
 **Not yet (by milestone):**
 
 - 0.3: page view (the command exists and toggles a status indicator only),
-  tables as editable objects, headers/footers, multiple sections.
+  the rest of tables (above), headers/footers, multiple sections.
 - 1.0: footnotes, TOC, cross-references, captions, index, images, spelling,
   macros, tutorial.
 

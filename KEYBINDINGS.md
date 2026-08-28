@@ -82,6 +82,7 @@ Selected with `keymap = "classic"`. `Esc` followed by a number repeats the next 
 | `F7` | Exit | File |
 | `Shift+F7` | Word Count | View |
 | `Ctrl+F7` | Insert Page Break | Insert |
+| `Alt+F7` | Table: Insert… | Table |
 | `F8` | Underline | Format ▸ Character |
 | `Shift+F8` | Line Spacing: Double | Format ▸ Paragraph |
 | `Alt+F8` | Apply Style… | Styles |
@@ -267,6 +268,18 @@ Commands with no default key in either map:
 - Style Browser (inheritance and overrides at cursor)
 - Style: Title
 - Tab Stops…
+- Table: Column Width…
+- Table: Convert to Text (tab-separated)
+- Table: Delete Column
+- Table: Delete Row
+- Table: Delete Table
+- Table: Insert Column Left
+- Table: Insert Column Right
+- Table: Insert Row Above
+- Table: Insert Row Below
+- Table: Next Cell
+- Table: Previous Cell
+- Table: Repeat Row as Header on Each Page
 - Text Color…
 - Warnings — Unsupported Content in This Document
 - Widow/Orphan Control

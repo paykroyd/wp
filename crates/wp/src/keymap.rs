@@ -235,6 +235,7 @@ const CLASSIC: &[(&str, &str)] = &[
     ("f7", "exit"),
     ("shift+f7", "word-count"),
     ("ctrl+f7", "page-break"),
+    ("alt+f7", "table-insert"),
     ("f8", "underline"),
     ("shift+f8", "spacing-double"),
     ("alt+f8", "style"),

@@ -137,7 +137,7 @@ fn open_docx_render_and_page_rules() {
     h.app.open_path(&p).unwrap();
     let s = h.screen();
     assert!(s.contains("Quarterly Report"), "{}", s);
-    assert!(s.contains("table") || s.contains("Table"), "table placeholder: {}", s);
+    assert!(s.contains("│ r0c0") && s.contains("┌─"), "table grid: {}", s);
     let pages = h.app.ed.page_count();
     assert!(pages >= 2, "pages = {}", pages);
     h.key(KeyCode::End, CTRL);
@@ -154,8 +154,8 @@ fn open_docx_render_and_page_rules() {
         }
     }
     assert!(seen_rule);
-    // The one-line warning summary mentions the table.
-    assert!(h.app.warnings.iter().any(|w| w.label == "table"));
+    // Tables are editable now, so the warning summary doesn't mention one.
+    assert!(!h.app.warnings.iter().any(|w| w.label.starts_with("table")));
 }
 
 #[test]
@@ -430,7 +430,7 @@ fn markdown_open_save_docx_and_back() {
     assert_eq!(h.app.format, crate::app::Format::Markdown);
     let s = h.screen();
     assert!(s.contains("Notes") && s.contains("• item one") && s.contains("2. second"), "{}", s);
-    assert!(s.contains("Table 2×2") || s.contains("Table"), "{}", s);
+    assert!(s.contains("│ h1") && s.contains("│ y"), "{}", s);
     // To .docx: numbering, footnotes and the hyperlink relationship are all created.
     let docx = dir.join("notes.docx");
     h.app.save_to(&docx, crate::app::Format::Docx).unwrap();
@@ -566,3 +566,133 @@ fn open_dialog_navigates_by_arrows_and_typed_paths() {
     assert!(h.app.path.is_none());
 }
 
+
+#[test]
+fn table_insert_navigate_render_and_save() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("Before the table.");
+    h.key(KeyCode::Enter, NONE);
+    // Insert via the palette prompt.
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("Table: Insert…");
+    h.key(KeyCode::Enter, NONE);
+    let s = h.screen();
+    assert!(s.contains("rows × columns"), "{}", s);
+    h.key(KeyCode::Backspace, NONE);
+    h.key(KeyCode::Backspace, NONE);
+    h.key(KeyCode::Backspace, NONE);
+    h.type_str("2x3");
+    h.key(KeyCode::Enter, NONE);
+    assert_eq!(h.app.ed.doc.tables.len(), 1);
+    assert_eq!(h.app.ed.current_cell().map(|c| c.name()), Some("A1".into()));
+    // Type across cells with Tab; Shift+Tab goes back.
+    h.type_str("one");
+    h.key(KeyCode::Tab, NONE);
+    h.type_str("two");
+    h.key(KeyCode::Tab, NONE);
+    h.type_str("three");
+    h.key(KeyCode::Tab, NONE);
+    assert_eq!(h.app.ed.current_cell().map(|c| c.name()), Some("A2".into()));
+    h.type_str("four");
+    h.key(KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(h.app.ed.current_cell().map(|c| c.name()), Some("C1".into()));
+    let s = h.screen();
+    assert!(s.contains("┌─"), "top rule: {}", s);
+    assert!(s.contains("│ one"), "{}", s);
+    assert!(s.contains("│ two"), "{}", s);
+    assert!(s.contains("│ four"), "{}", s);
+    assert!(s.contains("┼"), "junction: {}", s);
+    assert!(s.contains("└─"), "bottom rule: {}", s);
+    h.app.status = None; // the "Inserted…" message hides the indicators
+    let s = h.screen();
+    assert!(s.contains("Cell C1"), "status shows the cell: {}", s);
+    // Enter adds a paragraph to the cell; Backspace at the cell start does nothing.
+    h.key(KeyCode::Enter, NONE);
+    h.type_str("more");
+    assert_eq!(h.app.ed.doc.cell_of(h.app.ed.cursor.para).map(|c| c.name()), Some("C1".into()));
+    h.key(KeyCode::Home, NONE);
+    h.key(KeyCode::Backspace, NONE);
+    h.key(KeyCode::Backspace, NONE);
+    assert_eq!(h.app.ed.doc.paragraphs[h.app.ed.cursor.para].text(), "morethree");
+    h.key(KeyCode::Backspace, NONE);
+    assert_eq!(h.app.ed.doc.paragraphs[h.app.ed.cursor.para].text(), "morethree");
+    // Down from the top row lands in the same column of the next row.
+    h.key(KeyCode::Down, NONE);
+    assert_eq!(h.app.ed.current_cell().map(|c| c.name()), Some("C2".into()));
+    h.key(KeyCode::Down, NONE);
+    assert!(h.app.ed.current_cell().is_none());
+    // Reveal Codes shows the table structure.
+    h.key(KeyCode::Up, NONE);
+    h.key(KeyCode::F(3), ALT);
+    let s = h.screen();
+    assert!(s.contains("[Cell:C2]") && s.contains("[Cell:B2]"), "{}", s);
+    h.key(KeyCode::BackTab, KeyModifiers::SHIFT);
+    h.key(KeyCode::BackTab, KeyModifiers::SHIFT);
+    let s = h.screen();
+    assert!(s.contains("[Row][Cell:A2]"), "{}", s);
+    h.key(KeyCode::F(3), ALT);
+    // Row and column commands.
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("insert row below");
+    h.key(KeyCode::Enter, NONE);
+    assert_eq!(h.app.ed.doc.tables[&1].rows.len(), 3);
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("delete column");
+    h.key(KeyCode::Enter, NONE);
+    assert_eq!(h.app.ed.doc.tables[&1].cols(), 2);
+    assert!(h.app.ed.doc.table_is_consistent(1));
+    // Clicking in a cell moves the cursor there.
+    let m = |kind, col, row| MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE };
+    let s = h.screen();
+    // Column A ("one"/"four") is gone; "two" is now A1.
+    assert!(!s.contains("│ one"), "{}", s);
+    let y = s.lines().position(|l| l.contains("│ two")).unwrap() as u16;
+    h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), 5, y));
+    h.app.handle_mouse(m(MouseEventKind::Up(MouseButton::Left), 5, y));
+    assert_eq!(h.app.ed.current_cell().map(|c| c.name()), Some("A1".into()));
+    assert_eq!(h.app.ed.cursor.idx, 2);
+    // Saved as .docx, the table comes back as a table.
+    let dir = std::env::temp_dir().join(format!("wp-table-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let docx = dir.join("t.docx");
+    h.app.save_to(&docx, crate::app::Format::Docx).unwrap();
+    let l = wp_docx::read(&docx).unwrap();
+    assert_eq!(l.doc.tables.len(), 1);
+    assert_eq!(l.doc.tables[&1].rows.len(), 3);
+    assert!(l.doc.table_is_consistent(1));
+    let xml = l.package.get_str("word/document.xml").unwrap();
+    assert!(xml.contains("<w:tbl><w:tblPr><w:tblStyle w:val=\"TableGrid\"/>"), "{}", xml);
+    assert!(xml.contains("<w:tblGrid><w:gridCol"), "{}", xml);
+    assert!(xml.matches("<w:tr>").count() == 3, "{}", xml);
+    assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+    // Undo all the way back.
+    let mut h2 = Harness::new(KeymapChoice::Modern);
+    h2.app.open_path(&docx).unwrap();
+    let s = h2.screen();
+    assert!(s.contains("│ two") && s.contains("│ morethree"), "{}", s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn table_corpus_spans_and_merges_render() {
+    let p = corpus("word-tables.docx");
+    if !p.exists() {
+        return;
+    }
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.open_path(&p).unwrap();
+    let s = h.screen();
+    assert!(s.contains("│ Header 1"), "{}", s);
+    assert!(s.contains("│ Merged"), "{}", s);
+    assert!(s.contains("[Table 1×1]"), "nested table placeholder: {}", s);
+    // Only the nested table is reported as not editable.
+    assert!(h.app.warnings.iter().any(|w| w.label == "nested table"), "{:?}", h.app.warnings);
+    assert!(!h.app.warnings.iter().any(|w| w.label == "table"), "{:?}", h.app.warnings);
+    // Three tables, all consistent.
+    for id in h.app.ed.doc.tables.keys() {
+        assert!(h.app.ed.doc.table_is_consistent(*id), "table {}", id);
+    }
+    // Delete the whole document's text and undo: structure survives.
+    h.key(KeyCode::Char('a'), CTRL | KeyModifiers::SHIFT);
+}

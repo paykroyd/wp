@@ -210,31 +210,20 @@ impl Builder {
 
     fn finish_table(&mut self) {
         let Some((rows, _)) = self.table.take() else { return };
-        let ctx = wp_docx::Ctx::new(None, None);
         let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(1).max(1);
-        let text_width = self.doc.section.text_width();
-        let colw = (text_width / ncols as i32).max(720);
-        let mut xml = String::from("<w:tbl><w:tblPr><w:tblStyle w:val=\"TableGrid\"/><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/><w:left w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/><w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/><w:right w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/><w:insideH w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/><w:insideV w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/></w:tblBorders><w:tblLook w:val=\"04A0\" w:firstRow=\"1\" w:lastRow=\"0\" w:firstColumn=\"1\" w:lastColumn=\"0\" w:noHBand=\"0\" w:noVBand=\"1\"/></w:tblPr><w:tblGrid>");
-        for _ in 0..ncols {
-            xml.push_str(&format!("<w:gridCol w:w=\"{}\"/>", colw));
-        }
-        xml.push_str("</w:tblGrid>");
-        let mut tmp = Document::new();
-        tmp.styles = self.doc.styles.clone();
+        let id = self.doc.next_table_id();
+        let mut table = Table::new(rows.len().max(1), ncols, self.doc.section.text_width());
+        table.rows[0].header = true;
         for (ri, row) in rows.iter().enumerate() {
-            xml.push_str("<w:tr>");
-            if ri == 0 {
-                xml.push_str("<w:trPr><w:tblHeader/></w:trPr>");
-            }
             for ci in 0..ncols {
-                xml.push_str(&format!("<w:tc><w:tcPr><w:tcW w:w=\"{}\" w:type=\"dxa\"/></w:tcPr>", colw));
-                let paras: Vec<Paragraph> = row.get(ci).cloned().unwrap_or_default();
+                let mut paras: Vec<Paragraph> = row.get(ci).cloned().unwrap_or_default();
                 if paras.is_empty() {
-                    xml.push_str("<w:p/>");
+                    paras.push(Paragraph::new());
                 }
                 for mut p in paras {
                     p.props.space_after = Some(0);
                     p.props.line_spacing = Some(LineSpacing::Auto(240));
+                    p.props.cell = Some(CellRef::new(id, ri as u32, ci as u32));
                     if ri == 0 {
                         p.props.mark.bold = Some(true);
                         let mut items = vec![Item::Code(Code::On(Attr::Bold(true)))];
@@ -242,20 +231,11 @@ impl Builder {
                         items.push(Item::Code(Code::Off(AttrKind::Bold)));
                         p.items = items;
                     }
-                    tmp.paragraphs = vec![p];
-                    xml.push_str(&wp_docx::render_paragraph_xml(&tmp, 0, &ctx));
+                    self.doc.paragraphs.push(p);
                 }
-                xml.push_str("</w:tc>");
             }
-            xml.push_str("</w:tr>");
         }
-        xml.push_str("</w:tbl>");
-        let label = format!("Table {}×{}", rows.len(), ncols);
-        let para = Paragraph {
-            props: ParaProps { raw_block: true, ..Default::default() },
-            items: vec![Item::Code(Code::Opaque(OpaqueXml::element(xml, label).at(OpaqueLevel::Body)))],
-        };
-        self.doc.paragraphs.push(para);
+        self.doc.tables.insert(id, table);
     }
 
     fn open_link(&mut self, url: &str) {
@@ -473,6 +453,10 @@ pub fn from_markdown(text: &str) -> Document {
     }
     b.flush_para();
     b.finish_table();
+    // Word wants a paragraph after a table that ends the body.
+    if b.doc.paragraphs.last().map_or(false, |p| p.props.cell.is_some()) {
+        b.doc.paragraphs.push(Paragraph::new());
+    }
     if b.doc.paragraphs.is_empty() {
         b.doc.paragraphs.push(Paragraph::new());
     }

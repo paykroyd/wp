@@ -135,7 +135,8 @@ pub fn layout_paragraph(doc: &Document, para: usize, label: Option<&ListLabel>) 
     let p = &doc.paragraphs[para];
     let pp = doc.para_props(para);
     let runs: Vec<Run> = doc.runs(para);
-    let text_width = doc.section.text_width();
+    // Inside a table cell the column, not the page, bounds the text.
+    let text_width = doc.cell_text_width(para).unwrap_or_else(|| doc.section.text_width());
     let base_x = pp.indent_left();
     let mut first_off = pp.first_line_offset();
     let label = label.filter(|l| !l.text.is_empty()).map(|l| place_label(doc, para, &pp, l));
@@ -340,32 +341,112 @@ impl Pagination {
     }
 }
 
-/// Paginate the document given per-paragraph layouts.
-pub fn paginate(section: &SectionProps, layouts: &[ParaLayout]) -> Pagination {
-    let page_h = section.text_height();
-    let mut pages = vec![PageStart { para: 0, line: 0 }];
-    let mut placements: Vec<ParaPlacement> = Vec::with_capacity(layouts.len());
-    let mut y: Twips = 0;
-    let mut page: u32 = 0;
-    let mut after_hard_break = true; // start of document behaves like one
+/// Paginate the document given per-paragraph layouts. Table rows are placed
+/// as units: the cells of a row start at the same y, the row's height is
+/// its tallest cell's, and a row taller than the space left moves to the
+/// next page whole (splitting only when it is taller than a page).
+pub fn paginate(doc: &Document, layouts: &[ParaLayout]) -> Pagination {
     let n = layouts.len();
-
-    let new_page = |pages: &mut Vec<PageStart>, page: &mut u32, y: &mut Twips, para: usize, line: usize| {
-        *page += 1;
-        *y = 0;
-        pages.push(PageStart { para, line });
+    let mut pg = Pager {
+        page_h: doc.section.text_height(),
+        pages: vec![PageStart { para: 0, line: 0 }],
+        placements: Vec::with_capacity(n),
+        y: 0,
+        page: 0,
+        after_hard_break: true, // start of document behaves like one
     };
-
     let mut i = 0;
     while i < n {
+        if doc.cell_of(i).is_some() {
+            let (_, end) = doc.table_bounds(i).unwrap();
+            let rows = doc.table_paras(i).unwrap();
+            let header_h: Twips = 0;
+            let _ = header_h;
+            for row in &rows {
+                pg.place_row(row, layouts);
+            }
+            if pg.y >= pg.page_h && end < n {
+                pg.new_page(end, 0);
+                pg.after_hard_break = false;
+            }
+            i = end;
+            continue;
+        }
+        pg.place_para(i, layouts);
+        i += 1;
+    }
+    Pagination { pages: pg.pages, placements: pg.placements }
+}
+
+struct Pager {
+    page_h: Twips,
+    pages: Vec<PageStart>,
+    placements: Vec<ParaPlacement>,
+    y: Twips,
+    page: u32,
+    after_hard_break: bool,
+}
+
+impl Pager {
+    fn new_page(&mut self, para: usize, line: usize) {
+        self.page += 1;
+        self.y = 0;
+        self.pages.push(PageStart { para, line });
+    }
+
+    /// One table row: every cell starts at the same y; lines that run past
+    /// the page bottom continue on the next page.
+    fn place_row(&mut self, row: &[Vec<usize>], layouts: &[ParaLayout]) {
+        let page_h = self.page_h;
+        let cell_h = |cell: &Vec<usize>| -> Twips { cell.iter().map(|&p| layouts[p].space_before + layouts[p].height() + layouts[p].space_after).sum() };
+        let row_h = row.iter().map(cell_h).max().unwrap_or(0);
+        let first = row.first().and_then(|c| c.first().copied()).unwrap_or(0);
+        if self.y > 0 && self.y + row_h > page_h && row_h <= page_h {
+            self.new_page(first, 0);
+        }
+        let (page0, y0) = (self.page, self.y);
+        let mut end = (page0, y0);
+        for cell in row {
+            let (mut pg, mut yy) = (page0, y0);
+            for &p in cell {
+                let l = &layouts[p];
+                let mut pl = ParaPlacement { line_page: Vec::with_capacity(l.lines.len()), line_y: Vec::with_capacity(l.lines.len()) };
+                yy += l.space_before;
+                for (li, line) in l.lines.iter().enumerate() {
+                    if yy + line.height > page_h && yy > 0 {
+                        pg += 1;
+                        yy = 0;
+                        if pg as usize >= self.pages.len() {
+                            self.pages.push(PageStart { para: p, line: li });
+                        }
+                    }
+                    pl.line_page.push(pg);
+                    pl.line_y.push(yy);
+                    yy += line.height;
+                }
+                yy += l.space_after;
+                self.placements.push(pl);
+            }
+            if (pg, yy) > end {
+                end = (pg, yy);
+            }
+        }
+        self.page = end.0;
+        self.y = end.1;
+        self.after_hard_break = false;
+    }
+
+    fn place_para(&mut self, i: usize, layouts: &[ParaLayout]) {
+        let page_h = self.page_h;
+        let n = layouts.len();
         let l = &layouts[i];
         let mut pl = ParaPlacement { line_page: Vec::with_capacity(l.lines.len()), line_y: Vec::with_capacity(l.lines.len()) };
         let mut sb = l.space_before;
-        if y == 0 && !after_hard_break {
+        if self.y == 0 && !self.after_hard_break {
             sb = 0; // Word suppresses space-before at the top of a page after a soft break
         }
-        if l.page_break_before && y > 0 {
-            new_page(&mut pages, &mut page, &mut y, i, 0);
+        if l.page_break_before && self.y > 0 {
+            self.new_page(i, 0);
             sb = l.space_before;
         }
         let total = l.height();
@@ -389,85 +470,84 @@ pub fn paginate(section: &SectionProps, layouts: &[ParaLayout]) -> Pagination {
             needed += l.space_after + extra;
         }
 
-        let fits_whole = y + needed <= page_h;
+        let fits_whole = self.y + needed <= page_h;
         let fits_fresh = needed <= page_h;
-        if !fits_whole && fits_fresh && y > 0 {
-            new_page(&mut pages, &mut page, &mut y, i, 0);
+        if !fits_whole && fits_fresh && self.y > 0 {
+            self.new_page(i, 0);
             sb = l.space_before;
-            if !after_hard_break {
+            if !self.after_hard_break {
                 sb = 0;
             }
         }
 
         // Place lines.
-        let mut ly = y + sb;
+        let mut ly = self.y + sb;
         let nl = l.lines.len();
         let mut li = 0;
         while li < nl {
             let line = &l.lines[li];
             if ly + line.height > page_h && ly > 0 {
                 // Line doesn't fit. Widow/orphan: avoid leaving a lone line.
+                let page = self.page;
                 let lines_on_this_page = li - pl.line_page.iter().rposition(|&p| p != page).map(|p| p + 1).unwrap_or(0);
                 if l.widow_control && !l.keep_lines {
                     if lines_on_this_page == 1 && nl >= 2 && li == 1 {
                         // Orphan: pull the first line down.
                         pl.line_page.pop();
                         pl.line_y.pop();
-                        new_page(&mut pages, &mut page, &mut y, i, 0);
+                        self.new_page(i, 0);
                         ly = 0;
                         li = 0;
-                        after_hard_break = false;
+                        self.after_hard_break = false;
                         continue;
                     }
                     if nl - li == 1 && lines_on_this_page >= 2 {
                         // Widow: push the previous line over too.
                         pl.line_page.pop();
                         pl.line_y.pop();
-                        new_page(&mut pages, &mut page, &mut y, i, li - 1);
+                        self.new_page(i, li - 1);
                         ly = 0;
                         li -= 1;
-                        after_hard_break = false;
+                        self.after_hard_break = false;
                         continue;
                     }
                 } else if l.keep_lines && li > 0 && total <= page_h {
                     pl.line_page.clear();
                     pl.line_y.clear();
-                    new_page(&mut pages, &mut page, &mut y, i, 0);
+                    self.new_page(i, 0);
                     ly = 0;
                     li = 0;
-                    after_hard_break = false;
+                    self.after_hard_break = false;
                     continue;
                 }
-                new_page(&mut pages, &mut page, &mut y, i, li);
+                self.new_page(i, li);
                 ly = 0;
             }
-            pl.line_page.push(page);
+            pl.line_page.push(self.page);
             pl.line_y.push(ly);
             ly += line.height;
             if line.page_break_after {
                 if li + 1 < nl {
-                    new_page(&mut pages, &mut page, &mut y, i, li + 1);
+                    self.new_page(i, li + 1);
                     ly = 0;
                 } else {
                     // Break at the end of the paragraph: next paragraph starts a page.
                     ly = page_h + 1;
                 }
-                after_hard_break = true;
+                self.after_hard_break = true;
             } else {
-                after_hard_break = false;
+                self.after_hard_break = false;
             }
             li += 1;
         }
-        y = ly + l.space_after;
-        if y >= page_h && i + 1 < n {
-            let hard = after_hard_break;
-            new_page(&mut pages, &mut page, &mut y, i + 1, 0);
-            after_hard_break = hard;
+        self.y = ly + l.space_after;
+        if self.y >= page_h && i + 1 < n {
+            let hard = self.after_hard_break;
+            self.new_page(i + 1, 0);
+            self.after_hard_break = hard;
         }
-        placements.push(pl);
-        i += 1;
+        self.placements.push(pl);
     }
-    Pagination { pages, placements }
 }
 
 // ---------------------------------------------------------------------------
@@ -532,7 +612,7 @@ pub fn screen_first_indent(pp: &ParaProps, cols: u16) -> u16 {
 /// width of a list label drawn at the first-line position; the text starts
 /// after it (at the left indent when the label fits in the hanging space).
 pub fn wrap_screen(p: &Paragraph, pp: &ParaProps, cols: u16, label_cells: u16) -> Vec<ScreenLine> {
-    let cols = cols.max(10);
+    let cols = cols.max(3);
     let left = twips_to_cells(pp.indent_left()).clamp(0, cols as i32 / 2) as u16;
     let right = twips_to_cells(pp.indent_right()).clamp(0, cols as i32 / 4) as u16;
     let mut first_indent = screen_first_indent(pp, cols);
@@ -550,7 +630,7 @@ pub fn wrap_screen(p: &Paragraph, pp: &ParaProps, cols: u16, label_cells: u16) -
     let mut had_glyph = false;
     while i < n {
         let indent = if lines.is_empty() { first_indent } else { left };
-        let avail = cols.saturating_sub(indent + right).max(8);
+        let avail = cols.saturating_sub(indent + right).max(3);
         let it = &p.items[i];
         if matches!(it, Item::Code(Code::LineBreak) | Item::Code(Code::PageBreak)) {
             lines.push(ScreenLine { start, end: i + 1, indent, width: width_nonspace });
@@ -650,7 +730,7 @@ mod tests {
         for w in l.lines.windows(2) {
             assert!(w[0].end == w[1].start);
         }
-        let pg = paginate(&doc.section, &[l]);
+        let pg = paginate(&doc, &[l]);
         assert!(pg.page_count() >= 2);
     }
 
@@ -671,7 +751,7 @@ mod tests {
         doc.paragraphs[0].items.push(Item::Code(Code::PageBreak));
         let layouts: Vec<ParaLayout> = (0..2).map(|i| layout_paragraph(&doc, i, None)).collect();
 
-        let pg = paginate(&doc.section, &layouts);
+        let pg = paginate(&doc, &layouts);
         assert_eq!(pg.page_count(), 2);
         assert_eq!(pg.page_of(1, 0), 1);
     }

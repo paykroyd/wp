@@ -17,6 +17,13 @@ pub enum Op {
     /// Replace the whole paragraph's items (used by attribute rewrites).
     ReplaceItems { para: usize, items: Vec<Item> },
     SetSection(SectionProps),
+    /// Insert a whole paragraph before index `para` (`para == len` appends).
+    InsertPara { para: usize, paragraph: Paragraph },
+    /// Remove paragraph `para`. The document always keeps at least one
+    /// paragraph; callers must not remove the last.
+    RemovePara { para: usize },
+    /// Set (or, with `None`, remove) a table definition.
+    SetTable { id: u32, table: Option<Table> },
 }
 
 impl Document {
@@ -61,6 +68,22 @@ impl Document {
             Op::SetSection(s) => {
                 let old = std::mem::replace(&mut self.section, s);
                 Op::SetSection(old)
+            }
+            Op::InsertPara { para, paragraph } => {
+                let at = para.min(self.paragraphs.len());
+                self.paragraphs.insert(at, paragraph);
+                Op::RemovePara { para: at }
+            }
+            Op::RemovePara { para } => {
+                let paragraph = self.paragraphs.remove(para);
+                Op::InsertPara { para, paragraph }
+            }
+            Op::SetTable { id, table } => {
+                let old = match table {
+                    Some(t) => self.tables.insert(id, t),
+                    None => self.tables.remove(&id),
+                };
+                Op::SetTable { id, table: old }
             }
         }
     }

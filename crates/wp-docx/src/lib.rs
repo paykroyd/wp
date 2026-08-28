@@ -8,6 +8,7 @@
 
 pub mod package;
 pub mod read;
+pub mod table;
 pub mod write;
 pub mod xml;
 

@@ -283,8 +283,47 @@ pub fn render_document(doc: &Document, pkg: &DocxPackage, ctx: &Ctx) -> String {
         && doc.paragraphs[0].items.is_empty()
         && doc.paragraphs[0].props == ParaProps::default();
     if !only_placeholder {
+        let mut cur: Option<CellRef> = None;
+        let mut table: Option<Table> = None;
         for i in 0..doc.paragraphs.len() {
-            render_paragraph(doc, i, &mut out, ctx, &mut bookmark_id);
+            let cell = doc.paragraphs[i].props.cell;
+            if cell != cur {
+                // Close what the previous paragraph was in, open what this
+                // one is in: cell, row, table — innermost first.
+                if let Some(c) = cur {
+                    out.push_str("</w:tc>");
+                    if cell.map_or(true, |n| n.table != c.table || n.row != c.row) {
+                        out.push_str("</w:tr>");
+                    }
+                    if cell.map_or(true, |n| n.table != c.table) {
+                        out.push_str("</w:tbl>");
+                        table = None;
+                    }
+                }
+                if let Some(n) = cell {
+                    if table.is_none() {
+                        emit_lead_trail(&doc.paragraphs[i], &mut out, OpaqueLevel::Body, true);
+                        let t = crate::table::table_for_write(doc, n.table);
+                        crate::table::open_table(&t, &mut out);
+                        table = Some(t);
+                    }
+                    let t = table.as_ref().unwrap();
+                    if cur.map_or(true, |c| c.table != n.table || c.row != n.row) {
+                        crate::table::open_row(t, n.row as usize, &mut out);
+                    }
+                    crate::table::open_cell(t, n.row as usize, n.col as usize, &mut out);
+                }
+                cur = cell;
+            }
+            let last_of_table = cell.is_some() && doc.paragraphs.get(i + 1).map_or(true, |p| p.props.cell.map_or(true, |n| n.table != cell.unwrap().table));
+            let first_of_table = cell.is_some() && (i == 0 || doc.paragraphs[i - 1].props.cell.map_or(true, |p| p.table != cell.unwrap().table));
+            render_paragraph_in(doc, i, &mut out, ctx, &mut bookmark_id, first_of_table, last_of_table);
+        }
+        if cur.is_some() {
+            out.push_str("</w:tc></w:tr></w:tbl>");
+            if let Some(p) = doc.paragraphs.last() {
+                emit_lead_trail(p, &mut out, OpaqueLevel::Body, false);
+            }
         }
     }
     if pkg.had_sectpr || doc.section != SectionProps::default() {
@@ -317,24 +356,54 @@ impl BookmarkIds {
     }
 }
 
+/// The leading (or trailing) opaque elements of a paragraph that sat next to
+/// it rather than in it, emitted verbatim. Body-level ones on a table's
+/// first/last paragraph belong outside the table.
+fn emit_lead_trail(p: &Paragraph, out: &mut String, level: OpaqueLevel, lead: bool) {
+    let is_next = |it: &Item| matches!(it, Item::Code(Code::Opaque(o)) if o.kind == OpaqueKind::Element && matches!(o.level, OpaqueLevel::Body | OpaqueLevel::Cell));
+    let n_lead = p.items.iter().take_while(|it| is_next(it)).count();
+    let n_trail = if n_lead == p.items.len() { 0 } else { p.items.iter().rev().take_while(|it| is_next(it)).count() };
+    let items = if lead { &p.items[..n_lead] } else { &p.items[p.items.len() - n_trail..] };
+    for it in items {
+        if let Item::Code(Code::Opaque(o)) = it {
+            if o.level == level {
+                out.push_str(&o.xml);
+            }
+        }
+    }
+}
+
 fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bookmark_id: &mut BookmarkIds) {
+    render_paragraph_in(doc, para, out, ctx, bookmark_id, false, false)
+}
+
+/// `outer_lead` / `outer_trail`: the paragraph is the first / last of a table,
+/// so its body-level neighbours were (or will be) emitted around the table.
+fn render_paragraph_in(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bookmark_id: &mut BookmarkIds, outer_lead: bool, outer_trail: bool) {
     let p = &doc.paragraphs[para];
     if p.props.raw_block {
+        let mut any = false;
         for it in &p.items {
             if let Item::Code(Code::Opaque(o)) = it {
                 out.push_str(&o.xml);
+                any = true;
             }
+        }
+        if !any && p.props.cell.is_some() {
+            out.push_str("<w:p/>"); // a cell must end with a paragraph
         }
         return;
     }
     // Elements that sat next to the paragraph in the body (a comment range
     // start, a bookmark before a table) go back outside it.
-    let is_body = |it: &Item| matches!(it, Item::Code(Code::Opaque(o)) if o.kind == OpaqueKind::Element && o.level == OpaqueLevel::Body);
+    let is_body = |it: &Item| matches!(it, Item::Code(Code::Opaque(o)) if o.kind == OpaqueKind::Element && matches!(o.level, OpaqueLevel::Body | OpaqueLevel::Cell));
     let lead = p.items.iter().take_while(|it| is_body(it)).count();
     let trail = if lead == p.items.len() { 0 } else { p.items.iter().rev().take_while(|it| is_body(it)).count() };
     for it in &p.items[..lead] {
         if let Item::Code(Code::Opaque(o)) = it {
-            out.push_str(&o.xml);
+            if !(outer_lead && o.level == OpaqueLevel::Body) {
+                out.push_str(&o.xml);
+            }
         }
     }
     out.push_str("<w:p");
@@ -458,7 +527,9 @@ fn render_paragraph(doc: &Document, para: usize, out: &mut String, ctx: &Ctx, bo
     out.push_str("</w:p>");
     for it in &p.items[p.items.len() - trail..] {
         if let Item::Code(Code::Opaque(o)) = it {
-            out.push_str(&o.xml);
+            if !(outer_trail && o.level == OpaqueLevel::Body) {
+                out.push_str(&o.xml);
+            }
         }
     }
 }
