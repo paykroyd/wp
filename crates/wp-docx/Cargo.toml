@@ -1,0 +1,12 @@
+[package]
+name = "wp-docx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = ".docx reader/writer for wp with lossless preservation"
+
+[dependencies]
+wp-core.workspace = true
+zip.workspace = true
+quick-xml.workspace = true
+anyhow.workspace = true

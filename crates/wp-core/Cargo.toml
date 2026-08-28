@@ -1,0 +1,11 @@
+[package]
+name = "wp-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Document model, editing, and layout engine for wp"
+
+[dependencies]
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+serde.workspace = true
