@@ -46,19 +46,24 @@ On first run you pick a keyboard. Both are complete and you can switch later.
 
 | | Modern | Classic (WordPerfect 5.1) |
 |---|---|---|
-| Command palette | `Ctrl+K` | `Alt+F10` (or `Ctrl+K`) |
+| Command palette | `Ctrl+Shift+P` (`Cmd+Shift+P`, `Alt+=`) | `Ctrl+K` / `Alt+F10` |
 | Reveal Codes | `Alt+F3` | `Alt+F3` / `F11` |
-| Save / Open / Exit | `Ctrl+S` / `Ctrl+O` / `Ctrl+Q` | `F10` / `F5` / `F7` |
-| Bold / Italic / Underline | `Ctrl+B` / `Ctrl+I` / `Ctrl+U` | `F6` / `Ctrl+F10` / `F8` |
-| Select | `Shift+arrows` | `Alt+F4` then move |
-| Find | `Ctrl+F` | `F2` |
+| Save / Open / Exit | `Ctrl+S` / `Ctrl+O` / `Ctrl+Q` (or `Cmd+…`) | `F10` / `F5` / `F7` |
+| Bold / Italic / Underline | `Cmd+B/I/U` or `Ctrl+Shift+B` / `Ctrl+I` / `Ctrl+Shift+U` | `F6` / `Ctrl+F10` / `F8` |
+| Move | emacs: `Ctrl+F/B/N/P`, `Ctrl+A/E`, `Alt+F/B` — and arrows | arrows |
+| Delete | `Ctrl+D/H`, `Ctrl+K` to end of line, `Ctrl+U` to start, `Alt+D` word | `Del`, `Backspace` |
+| Select | `Shift+arrows`, `Ctrl+Space` sets the mark | `Alt+F4` then move |
+| Find | `Ctrl+Shift+F` / `Cmd+F` | `F2` |
 | Undo | `Ctrl+Z` | `Ctrl+Z` |
-| Center / flush right | `Ctrl+E` / `Ctrl+R` | `Shift+F6` / `Alt+F6` |
+| Center / flush right | `Ctrl+Shift+E` / `Ctrl+R` | `Shift+F6` / `Alt+F6` |
 | Repeat count | — | `Esc` `8` `↓` |
 
-The F-keys keep their classic meanings under the modern map, so you can learn
-them gradually. `F1` (modern) or `F3` (classic) shows help; Ctrl+K → *F-Key
-Legend* shows the keyboard template card.
+The full list for both keyboards is in [KEYBINDINGS.md](KEYBINDINGS.md). The
+F-keys keep their classic meanings under the modern map, so you can learn them
+gradually. `F1` (modern) or `F3` (classic) shows help; the palette's *F-Key
+Legend* shows the keyboard template card. `Cmd+…` bindings work in terminals
+that report the Cmd key (Ghostty, kitty, WezTerm); `wp --probe-keys` shows
+what yours sends.
 
 The palette prefixes: `>` commands (default), `@` jump to a heading, `#` jump to
 a page, `/` incremental find, `?` help.

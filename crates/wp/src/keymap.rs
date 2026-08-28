@@ -13,6 +13,9 @@ pub struct Key {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    /// Cmd on macOS / Super elsewhere. Only delivered by terminals that
+    /// speak the kitty keyboard protocol (Ghostty, kitty, WezTerm…).
+    pub sup: bool,
 }
 
 impl Key {
@@ -21,6 +24,7 @@ impl Key {
         let mut ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
         let mut alt = ev.modifiers.contains(KeyModifiers::ALT);
         let mut shift = ev.modifiers.contains(KeyModifiers::SHIFT);
+        let sup = ev.modifiers.contains(KeyModifiers::SUPER) || ev.modifiers.contains(KeyModifiers::META);
         // xterm reports modified F-keys as higher F numbers.
         if let KeyCode::F(n) = code {
             match n {
@@ -46,15 +50,15 @@ impl Key {
         }
         // Letters: normalise case so Shift+b and B match "shift+b".
         if let KeyCode::Char(c) = code {
-            if c.is_ascii_uppercase() && (ctrl || alt) {
+            let modded = ctrl || alt || sup;
+            if c.is_ascii_uppercase() && modded {
                 code = KeyCode::Char(c.to_ascii_lowercase());
                 shift = true;
-            } else if c.is_ascii_uppercase() {
-                // plain typed capital: leave as text, not a binding
+            } else if c.is_ascii_alphabetic() && !modded {
+                // plain typed letter: text, not a binding
                 shift = false;
-            } else if ctrl || alt {
-                // some terminals send lowercase with SHIFT set
-            } else {
+            } else if !c.is_ascii_alphabetic() {
+                // punctuation already encodes shift ('<' vs ','): drop the flag
                 shift = false;
             }
         }
@@ -62,19 +66,31 @@ impl Key {
             code = KeyCode::Tab;
             shift = true;
         }
-        Key { code, ctrl, alt, shift }
+        Key { code, ctrl, alt, shift, sup }
     }
 
     /// Parse "ctrl+shift+f8", "alt+f3", "f6", "ctrl+k", "enter", "esc".
     pub fn parse(s: &str) -> Option<Key> {
-        let mut k = Key { code: KeyCode::Null, ctrl: false, alt: false, shift: false };
-        let parts: Vec<&str> = s.split('+').map(|p| p.trim()).collect();
+        let mut k = Key { code: KeyCode::Null, ctrl: false, alt: false, shift: false, sup: false };
+        // "ctrl++" means Ctrl and the '+' key.
+        let (body, last_char) = match s.strip_suffix("++") {
+            Some(b) => (b, Some("+")),
+            None => (s, None),
+        };
+        let mut parts: Vec<&str> = body.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+        if let Some(c) = last_char {
+            parts.push(c);
+        }
+        if parts.is_empty() {
+            return None;
+        }
         let (mods, last) = parts.split_at(parts.len() - 1);
         for m in mods {
             match m.to_ascii_lowercase().as_str() {
                 "ctrl" | "control" | "c" => k.ctrl = true,
                 "alt" | "meta" | "option" | "m" => k.alt = true,
                 "shift" | "s" => k.shift = true,
+                "cmd" | "super" | "win" | "command" => k.sup = true,
                 _ => return None,
             }
         }
@@ -110,6 +126,9 @@ impl Key {
 
     pub fn label(&self) -> String {
         let mut s = String::new();
+        if self.sup {
+            s.push_str("Cmd+");
+        }
         if self.ctrl {
             s.push_str("Ctrl+");
         }
@@ -180,7 +199,6 @@ const COMMON: &[(&str, &str)] = &[
     ("enter", "enter"),
     ("tab", "tab"),
     ("insert", "typeover"),
-    ("ctrl+k", "palette"),
     ("alt+f3", "reveal-codes"),
     ("f11", "reveal-codes"),
     ("ctrl+pagedown", "next-page"),
@@ -193,6 +211,7 @@ const COMMON: &[(&str, &str)] = &[
 const CLASSIC: &[(&str, &str)] = &[
     ("f1", "cancel"),
     ("esc", "repeat"),
+    ("ctrl+k", "palette"),
     ("shift+f1", "page-setup"),
     ("f2", "find"),
     ("shift+f2", "find-backward"),
@@ -229,46 +248,70 @@ const CLASSIC: &[(&str, &str)] = &[
     ("ctrl+z", "undo"),
 ];
 
-/// What everyone else expects; the classic F-keys sit underneath.
+/// What everyone else expects, plus emacs / macOS-readline movement and
+/// deletion on the Ctrl and Alt (Meta) keys. The classic F-keys sit underneath.
 const MODERN: &[(&str, &str)] = &[
     ("esc", "cancel"),
     ("f1", "help"),
+    ("f3", "find-next"),
+    ("shift+f3", "find-prev"),
+    // emacs movement
+    ("ctrl+f", "right"),
+    ("ctrl+b", "left"),
+    ("ctrl+n", "down"),
+    ("ctrl+p", "up"),
+    ("ctrl+a", "line-start"),
+    ("ctrl+e", "line-end"),
+    ("alt+f", "word-right"),
+    ("alt+b", "word-left"),
+    ("alt+v", "page-up"),
+    ("alt+<", "doc-start"),
+    ("alt+>", "doc-end"),
+    ("ctrl+space", "block"),
+    // emacs / readline deletion
+    ("ctrl+d", "delete"),
+    ("ctrl+h", "backspace"),
+    ("ctrl+k", "delete-eol"),
+    ("ctrl+u", "delete-bol"),
+    ("alt+d", "delete-word"),
+    ("ctrl+w", "cut"),
+    ("alt+w", "copy"),
+    ("ctrl+y", "paste"),
+    // everything else
+    ("ctrl+shift+p", "palette"),
+    ("alt+=", "palette"),
     ("ctrl+s", "save"),
     ("ctrl+shift+s", "save-as"),
     ("ctrl+o", "open"),
-    ("ctrl+n", "new"),
+    ("ctrl+shift+n", "new"),
     ("ctrl+q", "exit"),
-    ("ctrl+w", "exit"),
     ("ctrl+z", "undo"),
-    ("ctrl+y", "redo"),
     ("ctrl+shift+z", "redo"),
     ("ctrl+x", "cut"),
     ("ctrl+c", "copy"),
     ("ctrl+v", "paste"),
     ("ctrl+shift+v", "paste-plain"),
-    ("ctrl+a", "select-all"),
-    ("ctrl+b", "bold"),
+    ("ctrl+shift+a", "select-all"),
+    ("ctrl+shift+b", "bold"),
     ("ctrl+i", "italic"),
-    ("ctrl+u", "underline"),
-    ("ctrl+d", "font"),
-    ("ctrl+shift+d", "double-underline"),
+    ("ctrl+shift+u", "underline"),
+    ("ctrl+alt+u", "double-underline"),
+    ("ctrl+shift+d", "font"),
     ("ctrl+shift+x", "strikethrough"),
-    ("ctrl+shift+=", "superscript"),
+    ("ctrl++", "superscript"),
     ("ctrl+=", "subscript"),
     ("ctrl+shift+k", "small-caps"),
-    ("ctrl+shift+a", "all-caps"),
-    ("ctrl+space", "remove-formatting"),
-    ("ctrl+f", "find"),
-    ("ctrl+h", "replace"),
-    ("f3", "find-next"),
-    ("shift+f3", "find-prev"),
+    ("ctrl+alt+a", "all-caps"),
+    ("ctrl+\\", "remove-formatting"),
+    ("ctrl+shift+f", "find"),
+    ("ctrl+shift+h", "replace"),
     ("ctrl+g", "goto-page"),
-    ("ctrl+e", "align-center"),
+    ("ctrl+shift+e", "align-center"),
     ("ctrl+l", "align-left"),
     ("ctrl+r", "align-right"),
     ("ctrl+j", "align-justify"),
-    ("ctrl+m", "indent"),
-    ("ctrl+shift+m", "outdent"),
+    ("alt+]", "indent"),
+    ("alt+[", "outdent"),
     ("ctrl+t", "hanging-indent"),
     ("ctrl+1", "spacing-single"),
     ("ctrl+5", "spacing-1.5"),
@@ -276,9 +319,56 @@ const MODERN: &[(&str, &str)] = &[
     ("ctrl+alt+1", "style-heading-1"),
     ("ctrl+alt+2", "style-heading-2"),
     ("ctrl+alt+3", "style-heading-3"),
-    ("ctrl+shift+n", "style-normal"),
-    ("ctrl+p", "word-count"),
-    ("alt+=", "palette"),
+    ("ctrl+alt+0", "style-normal"),
+    ("ctrl+shift+w", "word-count"),
+];
+
+/// The Cmd (Super) layer, added on top of the modern map. Only terminals
+/// that report Cmd deliver these (Ghostty, kitty, WezTerm with the kitty
+/// keyboard protocol), and the terminal's own Cmd shortcuts win; every command
+/// here also has a Ctrl or F-key binding.
+const MAC: &[(&str, &str)] = &[
+    ("cmd+s", "save"),
+    ("cmd+shift+s", "save-as"),
+    ("cmd+o", "open"),
+    ("cmd+n", "new"),
+    ("cmd+q", "exit"),
+    ("cmd+z", "undo"),
+    ("cmd+shift+z", "redo"),
+    ("cmd+x", "cut"),
+    ("cmd+c", "copy"),
+    ("cmd+v", "paste"),
+    ("cmd+shift+v", "paste-plain"),
+    ("cmd+a", "select-all"),
+    ("cmd+b", "bold"),
+    ("cmd+i", "italic"),
+    ("cmd+u", "underline"),
+    ("cmd+d", "font"),
+    ("cmd+f", "find"),
+    ("cmd+g", "find-next"),
+    ("cmd+shift+g", "find-prev"),
+    ("cmd+shift+h", "replace"),
+    ("cmd+e", "align-center"),
+    ("cmd+l", "align-left"),
+    ("cmd+r", "align-right"),
+    ("cmd+j", "align-justify"),
+    ("cmd+]", "indent"),
+    ("cmd+[", "outdent"),
+    ("cmd+shift+p", "palette"),
+    ("cmd+left", "line-start"),
+    ("cmd+right", "line-end"),
+    ("cmd+up", "doc-start"),
+    ("cmd+down", "doc-end"),
+    ("cmd+shift+left", "select-line-start"),
+    ("cmd+shift+right", "select-line-end"),
+    ("cmd+shift+up", "select-doc-start"),
+    ("cmd+shift+down", "select-doc-end"),
+    ("cmd+backspace", "delete-bol"),
+    ("cmd+delete", "delete-eol"),
+    ("cmd+alt+1", "style-heading-1"),
+    ("cmd+alt+2", "style-heading-2"),
+    ("cmd+alt+3", "style-heading-3"),
+    ("cmd+alt+0", "style-normal"),
 ];
 
 pub struct Keymap {
@@ -302,6 +392,7 @@ impl Keymap {
             KeymapChoice::Modern => {
                 add(CLASSIC);
                 add(MODERN);
+                add(MAC);
             }
         }
         for (k, c) in &cfg.bindings {
@@ -329,14 +420,19 @@ impl Keymap {
         if labels.is_empty() {
             return None;
         }
-        labels.sort_by_key(|l| (matches!(l.as_str(), "F1" | "Esc") as u8, l.starts_with('F') as u8, l.len()));
+        // Prefer keys every terminal delivers: Ctrl/Alt over Cmd, then F-keys, then short.
+        let is_fkey = |l: &str| {
+            let last = l.rsplit('+').next().unwrap_or("");
+            last.len() >= 2 && last.starts_with('F') && last[1..].chars().all(|c| c.is_ascii_digit())
+        };
+        labels.sort_by_key(|l| (l.starts_with("Cmd+") as u8, matches!(l.as_str(), "F1" | "Esc") as u8, is_fkey(l) as u8, l.len()));
         Some(labels.remove(0))
     }
 
     /// Verify every listed command is still reachable somehow (palette
     /// completeness is by construction; this is for the F-key legend).
     pub fn fkey_row(&self, n: u8) -> [Option<Cmd>; 4] {
-        let f = |ctrl, alt, shift| self.map.get(&Key { code: KeyCode::F(n), ctrl, alt, shift }).copied();
+        let f = |ctrl, alt, shift| self.map.get(&Key { code: KeyCode::F(n), ctrl, alt, shift, sup: false }).copied();
         [f(true, false, false), f(false, true, false), f(false, false, true), f(false, false, false)]
     }
 }

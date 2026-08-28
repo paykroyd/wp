@@ -72,9 +72,9 @@ fn typing_and_status() {
 fn bold_via_key_and_reveal_codes() {
     let mut h = Harness::new(KeymapChoice::Modern);
     h.type_str("plain ");
-    h.key(KeyCode::Char('b'), CTRL);
+    h.key(KeyCode::Char('b'), CTRL | KeyModifiers::SHIFT);
     h.type_str("bold");
-    h.key(KeyCode::Char('b'), CTRL);
+    h.key(KeyCode::Char('B'), CTRL); // uppercase form some terminals send
     h.type_str(" plain");
     assert_eq!(h.app.ed.doc.text(), "plain bold plain");
     assert_eq!(h.app.ed.doc.runs(0).len(), 3);
@@ -113,11 +113,11 @@ fn delete_code_in_reveal_codes_removes_pair() {
 fn palette_finds_and_runs_commands() {
     let mut h = Harness::new(KeymapChoice::Modern);
     h.type_str("centre me");
-    h.key(KeyCode::Char('k'), CTRL);
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
     h.type_str("cent");
     let s = h.screen();
     assert!(s.contains("Center"), "{}", s);
-    assert!(s.contains("Ctrl+E"), "palette must show the key: {}", s);
+    assert!(s.contains("Ctrl+Shift+E"), "palette must show the key: {}", s);
     h.key(KeyCode::Enter, NONE);
     assert_eq!(h.app.ed.doc.paragraphs[0].props.align, Some(wp_core::Align::Center));
     // Every listed command must resolve and be findable by its own title.
@@ -209,7 +209,7 @@ fn find_incremental_and_undo_groups() {
     let mut h = Harness::new(KeymapChoice::Modern);
     h.type_str("one two three two");
     h.key(KeyCode::Home, CTRL);
-    h.key(KeyCode::Char('f'), CTRL);
+    h.key(KeyCode::Char('f'), CTRL | KeyModifiers::SHIFT);
     h.type_str("two");
     assert!(matches!(h.app.overlay, Overlay::Prompt { .. }));
     assert_eq!(h.app.ed.selection().map(|r| r.start.idx), Some(4));
@@ -220,6 +220,33 @@ fn find_incremental_and_undo_groups() {
     h.key(KeyCode::End, CTRL);
     h.key(KeyCode::Char('z'), CTRL);
     assert_eq!(h.app.ed.doc.text(), "one two three");
+}
+
+#[test]
+fn emacs_and_cmd_keys() {
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("alpha beta gamma");
+    h.key(KeyCode::Char('a'), CTRL); // line start
+    assert_eq!(h.app.ed.cursor.idx, 0);
+    h.key(KeyCode::Char('f'), ALT); // word right
+    assert_eq!(h.app.ed.cursor.idx, 6);
+    h.key(KeyCode::Char('b'), CTRL); // char left
+    h.key(KeyCode::Char('f'), CTRL); // char right
+    assert_eq!(h.app.ed.cursor.idx, 6);
+    h.key(KeyCode::Char('d'), ALT); // delete word
+    assert_eq!(h.app.ed.doc.text(), "alpha gamma");
+    h.key(KeyCode::Char('k'), CTRL); // kill to end of line
+    assert_eq!(h.app.ed.doc.text(), "alpha ");
+    h.key(KeyCode::Char('u'), CTRL); // kill to start of line
+    assert_eq!(h.app.ed.doc.text(), "");
+    h.type_str("x");
+    h.key(KeyCode::Char('b'), KeyModifiers::SUPER); // Cmd+B bold
+    h.type_str("y");
+    assert!(h.app.ed.doc.run_props_at(h.app.ed.cursor).is_bold());
+    h.key(KeyCode::Backspace, KeyModifiers::SUPER); // Cmd+Backspace
+    assert_eq!(h.app.ed.doc.text(), "");
+    assert_eq!(crate::keymap::Key::parse("cmd+shift+z").map(|k| k.label()), Some("Cmd+Ctrl+Shift+Z".replace("Ctrl+", "")));
+    assert_eq!(crate::keymap::Key::parse("ctrl++").map(|k| k.label()), Some("Ctrl++".into()));
 }
 
 #[test]

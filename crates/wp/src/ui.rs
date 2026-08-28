@@ -295,7 +295,9 @@ pub fn draw(f: &mut Frame, app: &mut App, caps: Caps) {
     // Hint line.
     if app.hint && y_bottom >= 4 {
         y_bottom -= 1;
-        let hint = Line::from(vec![Span::styled(" Ctrl+K for commands · F1 for help · Alt+F3 for Reveal Codes · any key dismisses this line", Style::default().fg(Color::DarkGray))]);
+        let pal = app.keymap.label_for(crate::commands::Cmd::Palette).unwrap_or_else(|| "Ctrl+K".into());
+        let help = app.keymap.label_for(crate::commands::Cmd::Help).unwrap_or_else(|| "F1".into());
+        let hint = Line::from(vec![Span::styled(format!(" {} for commands · {} for help · Alt+F3 for Reveal Codes · any key dismisses this line", pal, help), Style::default().fg(Color::DarkGray))]);
         f.render_widget(RParagraph::new(hint), Rect::new(0, y_bottom, area.width, 1));
     }
 

@@ -371,7 +371,7 @@ impl App {
             }
             None => {
                 if let KeyCode::Char(c) = key.code {
-                    if !key.ctrl && !key.alt {
+                    if !key.ctrl && !key.alt && !key.sup {
                         // Typing with a plain uppercase Char: use the event's char.
                         let ch = if let KeyCode::Char(orig) = ev.code { orig } else { c };
                         for _ in 0..n {
@@ -563,6 +563,16 @@ impl App {
                     let e = self.ed.cursor;
                     self.ed.commit();
                     self.ed.delete_range(Range::new(c, e));
+                    self.ed.commit();
+                }
+            }
+            Cmd::DeleteToStartOfLine => {
+                if self.guard_edit() {
+                    let c = self.ed.cursor;
+                    self.ed.move_home(false);
+                    let s = self.ed.cursor;
+                    self.ed.commit();
+                    self.ed.delete_range(Range::new(s, c));
                     self.ed.commit();
                 }
             }
@@ -1098,7 +1108,7 @@ impl App {
         let _ = self.cfg.save();
         self.message(match k {
             KeymapChoice::Classic => "Classic keyboard: F6 bold, F8 underline, F10 save, F7 exit, Alt+F3 reveal codes, F1 cancel, Esc repeat",
-            KeymapChoice::Modern => "Modern keyboard: Ctrl+S save, Ctrl+B bold, Ctrl+Z undo, Ctrl+F find — F-keys keep their classic meanings",
+            KeymapChoice::Modern => "Modern keyboard: emacs movement on Ctrl/Alt, Cmd+B/S/Z where the terminal delivers Cmd, Ctrl+Shift+P palette — F-keys keep their classic meanings",
         });
     }
 
@@ -1379,7 +1389,7 @@ impl App {
                     }
                     self.overlay = Overlay::Palette { input, selected: 0 };
                 }
-                KeyCode::Char(c) if !key.ctrl && !key.alt => {
+                KeyCode::Char(c) if !key.ctrl && !key.alt && !key.sup => {
                     if input.is_empty() && c == '/' {
                         self.find.origin = self.ed.cursor;
                         self.find.origin_anchor = self.ed.anchor;
@@ -1414,7 +1424,7 @@ impl App {
                     input.clear();
                     self.overlay = Overlay::Prompt { kind, label, input };
                 }
-                KeyCode::Char(c) if !key.ctrl && !key.alt => {
+                KeyCode::Char(c) if !key.ctrl && !key.alt && !key.sup => {
                     input.push(c);
                     if let PromptKind::Find { backward } = kind {
                         self.incremental_find(&input, backward);
@@ -1454,7 +1464,7 @@ impl App {
                         filter.pop();
                         self.overlay = Overlay::List { title, items, selected: 0, action, filter };
                     }
-                    KeyCode::Char(c) if !key.ctrl && !key.alt => {
+                    KeyCode::Char(c) if !key.ctrl && !key.alt && !key.sup => {
                         filter.push(c);
                         self.overlay = Overlay::List { title, items, selected: 0, action, filter };
                     }

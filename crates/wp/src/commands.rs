@@ -25,6 +25,7 @@ pub enum Cmd {
     Block,
     DeleteWord,
     DeleteToEndOfLine,
+    DeleteToStartOfLine,
     Typeover,
     Cancel,
     // Character formatting
@@ -184,7 +185,8 @@ pub static COMMANDS: &[Command] = &[
     cmd!(SelectAll, "select-all", "Select All", "Edit"),
     cmd!(Block, "block", "Block (Start Selection)", "Edit", "select mark"),
     cmd!(DeleteWord, "delete-word", "Delete Word", "Edit"),
-    cmd!(DeleteToEndOfLine, "delete-eol", "Delete to End of Line", "Edit"),
+    cmd!(DeleteToEndOfLine, "delete-eol", "Delete to End of Line", "Edit", "kill line"),
+    cmd!(DeleteToStartOfLine, "delete-bol", "Delete to Start of Line", "Edit", "kill backward"),
     cmd!(Typeover, "typeover", "Toggle Typeover (Insert/Overwrite)", "Edit"),
     cmd!(Cancel, "cancel", "Cancel", "Edit", "escape"),
     cmd!(Bold, "bold", "Bold", "Format ▸ Character"),

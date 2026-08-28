@@ -25,6 +25,7 @@ fn usage() {
     println!("       wp --classic | --modern    choose the keyboard for this run");
     println!("       wp --text FILE.docx        dump a .docx as plain text and exit");
     println!("       wp --check FILE.docx       report unsupported content and page count, then exit");
+    println!("       wp --probe-keys            show what your terminal sends for each key, then Esc Esc Esc");
     println!("       wp --version");
 }
 
@@ -46,11 +47,18 @@ fn main() {
             "--classic" => keymap_override = Some(KeymapChoice::Classic),
             "--modern" => keymap_override = Some(KeymapChoice::Modern),
             "--text" => mode = "text",
+            "--probe-keys" => mode = "probe",
             "--check" => mode = "check",
             _ => file = Some(PathBuf::from(a)),
         }
     }
 
+    if mode == "probe" {
+        if let Err(e) = probe_keys() {
+            eprintln!("wp: {}", e);
+        }
+        return;
+    }
     if mode != "edit" {
         let Some(f) = file else {
             eprintln!("--{} needs a file", mode);
@@ -112,6 +120,42 @@ fn main() {
         eprintln!("wp: {}", e);
         std::process::exit(1);
     }
+}
+
+/// Print raw key events so users can see what their terminal delivers
+/// (e.g. whether Cmd reaches the program).
+fn probe_keys() -> anyhow::Result<()> {
+    println!("Press keys to see what wp receives. Esc three times to stop.\r");
+    enable_raw_mode()?;
+    let mut out = io::stdout();
+    let enhanced = execute!(
+        out,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS)
+    )
+    .is_ok();
+    print!("kitty keyboard protocol: {}\r\n", if enhanced { "requested (works if the terminal supports it)" } else { "not available" });
+    let mut escapes = 0;
+    loop {
+        if let Event::Key(k) = event::read()? {
+            if k.kind == KeyEventKind::Release {
+                continue;
+            }
+            let key = keymap::Key::from_event(&k);
+            print!("{:<28} raw: {:?} {:?}\r\n", key.label(), k.code, k.modifiers);
+            io::stdout().flush().ok();
+            if k.code == KeyCode::Esc {
+                escapes += 1;
+                if escapes >= 3 {
+                    break;
+                }
+            } else {
+                escapes = 0;
+            }
+        }
+    }
+    let _ = execute!(out, PopKeyboardEnhancementFlags);
+    disable_raw_mode()?;
+    Ok(())
 }
 
 /// First launch: one question, one line of explanation.
