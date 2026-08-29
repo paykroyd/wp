@@ -34,7 +34,10 @@ built and why; §11 is the current status and gap list), `KEYBINDINGS.md`.
 - `crates/wp-gdoc` — Google Docs: `read.rs` turns `documents.get` JSON into
   the model plus a `Baseline`; `write.rs` diffs the edited document against
   it into `batchUpdate` requests (DESIGN.md §6a). No networking. Fixtures in
-  `tests/fixtures` come from `tools/make_gdoc_fixtures.py`.
+  `tests/fixtures` come from `tools/make_gdoc_fixtures.py`. The binary's
+  client is `crates/wp/src/google.rs` (OAuth loopback flow, `ureq`), driven
+  through `App::pending` / `run_pending`; it needs `[google] client_id` /
+  `client_secret` in `~/.config/wp/config.toml`.
 - `crates/wp` — the binary: `app.rs` (state + command execution), `ui.rs`
 
   (rendering), `commands.rs` (registry — every capability is a command),

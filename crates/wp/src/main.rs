@@ -3,6 +3,7 @@
 mod app;
 mod commands;
 mod config;
+mod google;
 mod keymap;
 mod menu;
 mod palette;
@@ -23,10 +24,12 @@ use ui::ScreenLen as _;
 fn usage() {
     println!("wp {} — a word processor for the terminal\n", env!("CARGO_PKG_VERSION"));
     println!("Usage: wp [FILE.docx | FILE.md | FILE.txt]");
+    println!("       wp gdoc:<id> | <docs.google.com URL>   open a Google Doc (needs [google] in config.toml)");
     println!("       wp --classic | --modern    choose the keyboard for this run");
     println!("       wp --text FILE.docx        dump a .docx as plain text and exit");
     println!("       wp --md FILE.docx          dump a .docx as Markdown and exit");
     println!("       wp --check FILE.docx       report unsupported content and page count, then exit");
+    println!("       wp --check gdoc:<id>       the same for a Google Doc (also --text, --md); never writes");
     println!("       wp --probe-keys            show what your terminal sends for each key, then Esc Esc Esc");
     println!("       wp --version");
 }
@@ -34,6 +37,7 @@ fn usage() {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut file: Option<PathBuf> = None;
+    let mut gdoc: Option<String> = None;
     let mut keymap_override: Option<KeymapChoice> = None;
     let mut mode = "edit";
     for a in &args {
@@ -52,7 +56,10 @@ fn main() {
             "--md" => mode = "md",
             "--probe-keys" => mode = "probe",
             "--check" => mode = "check",
-            _ => file = Some(PathBuf::from(a)),
+            _ => match google::parse_doc_ref(a) {
+                Some(id) => gdoc = Some(id),
+                None => file = Some(PathBuf::from(a)),
+            },
         }
     }
 
@@ -63,6 +70,15 @@ fn main() {
         return;
     }
     if mode != "edit" {
+        if let Some(id) = gdoc {
+            // Read-only: sign in if needed, fetch, report. Nothing is written.
+            let (cfg, _) = Config::load();
+            if let Err(e) = check_gdoc(&cfg, &id, mode) {
+                eprintln!("wp: {}", e);
+                std::process::exit(1);
+            }
+            return;
+        }
         let Some(f) = file else {
             eprintln!("--{} needs a file", mode);
             std::process::exit(2);
@@ -129,13 +145,61 @@ fn main() {
             app.message(format!("New file: {}", f.display()));
         }
     }
-    app.check_recovery();
+    if let Some(id) = gdoc {
+        // Opened (and recovery checked) once the terminal is up, so the
+        // sign-in message has a screen to appear on.
+        app.queue(app::Pending::Open { id, force: true });
+    } else {
+        app.check_recovery();
+    }
 
     if let Err(e) = run(&mut app) {
         let _ = restore_terminal();
         eprintln!("wp: {}", e);
         std::process::exit(1);
     }
+}
+
+/// `--check` / `--text` / `--md` on a Google Doc: the same reports, over the
+/// Docs API, with the sign-in done on the command line.
+fn check_gdoc(cfg: &Config, id: &str, mode: &str) -> anyhow::Result<()> {
+    if !cfg.google.is_set() {
+        anyhow::bail!("Google Docs needs [google] client_id and client_secret in {}", config::config_path().display());
+    }
+    let mut client = google::Client::new(cfg.google.clone());
+    if !client.signed_in() {
+        let flow = client.begin_sign_in()?;
+        let opened = google::open_in_browser(&flow.url);
+        eprintln!("{}\n\n  {}\n", if opened { "A browser window has been opened to sign in to Google. If it did not appear, open:" } else { "Open this address in a browser to sign in to Google:" }, flow.url);
+        eprintln!("Waiting for the sign-in to complete…");
+        client.finish_sign_in(flow, || false)?;
+        eprintln!("Signed in.");
+    }
+    let json = client.get_document(id)?;
+    let l = wp_gdoc::read(&json).map_err(anyhow::Error::msg)?;
+    if mode == "text" {
+        print!("{}", wp_core::text::to_text(&l.doc, None));
+    } else if mode == "md" {
+        let rels = |rid: &str| l.doc.extra_rels.iter().find(|r| r.id == rid).map(|r| r.target.clone());
+        let e = wp_md::to_markdown(&l.doc, &rels);
+        print!("{}", e.text);
+        if let Some(w) = e.warning() {
+            eprintln!("{}", w);
+        }
+    } else {
+        let mut ed = wp_core::Editor::new(l.doc);
+        println!("{} (Google Doc {}, revision {}): {} paragraphs, {} words, {} pages", l.baseline.title, l.baseline.document_id, l.baseline.revision_id, ed.doc.paragraphs.len(), ed.doc.word_count(), ed.page_count());
+        let unchanged = wp_gdoc::diff(&l.baseline, &ed.doc).map_err(anyhow::Error::msg)?;
+        println!("Diff of the unedited document: {} requests (expected 0).", unchanged.len());
+        if l.warnings.is_empty() {
+            println!("Nothing unsupported.");
+        } else {
+            for w in &l.warnings {
+                println!("{}", w);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Print raw key events so users can see what their terminal delivers
@@ -267,6 +331,10 @@ fn run(app: &mut App) -> anyhow::Result<()> {
         if app.needs_redraw {
             terminal.draw(|f| ui::draw(f, app, caps))?;
             app.needs_redraw = false;
+        }
+        if let Some(p) = app.pending.take() {
+            app.run_pending(p);
+            continue;
         }
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {

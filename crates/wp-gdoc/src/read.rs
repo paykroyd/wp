@@ -3,6 +3,7 @@
 
 use crate::json::*;
 use crate::project::ListMap;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wp_core::model::*;
 use wp_core::numbering::ListKind;
@@ -10,21 +11,21 @@ use wp_core::style::Style;
 use wp_core::Document;
 
 /// A paragraph as read, with the index range it occupies in its segment.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BPara {
     pub para: Paragraph,
     pub start: i64,
     pub end: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum BBlock {
     Paras(Vec<BPara>),
     Table { start: i64, end: i64, cells: Vec<Vec<Vec<BPara>>> },
 }
 
 /// The body, or one footnote.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BSegment {
     pub id: Option<String>,
     pub blocks: Vec<BBlock>,
@@ -32,7 +33,7 @@ pub struct BSegment {
 
 /// What the writer needs to turn edits into `batchUpdate` requests against
 /// the revision that was read.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Baseline {
     pub document_id: String,
     pub title: String,

@@ -2,6 +2,7 @@
 
 use crate::commands::{info, Cmd, COMMANDS};
 use crate::config::{state_dir, Config, KeymapChoice, ThemeChoice};
+use crate::google;
 use crate::keymap::{Key, Keymap};
 use crate::palette;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -18,6 +19,25 @@ pub enum Format {
     Docx,
     Text,
     Markdown,
+    /// A Google Doc opened through the Docs API; saves are `batchUpdate`
+    /// diffs against `App::gdoc` (DESIGN.md §6a).
+    GoogleDoc,
+}
+
+/// The Google Doc the editor holds, and the baseline its edits are diffed against.
+pub struct GdocState {
+    pub id: String,
+    pub title: String,
+    pub baseline: wp_gdoc::Baseline,
+}
+
+/// A network action queued to run after the next draw, so what the screen
+/// says while it blocks (a sign-in URL, "Contacting Google…") is visible.
+pub enum Pending {
+    Open { id: String, force: bool },
+    Save,
+    List(String),
+    SignIn { flow: google::SignIn, then: Box<Pending> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +65,8 @@ pub enum PromptKind {
     TabSet,
     TableInsert,
     ColumnWidth,
+    /// Google Drive: a name to search for, or a document URL / `gdoc:<id>`.
+    DriveSearch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +74,7 @@ pub enum ConfirmAction {
     ExitSave,
     NewDiscard,
     OpenDiscard(PathBuf),
+    OpenDriveDiscard(String),
     Recover(PathBuf),
 }
 
@@ -64,6 +87,7 @@ pub enum ListAction {
     FontColor,
     HighlightColor,
     ListFormat,
+    OpenDrive,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,6 +223,9 @@ pub struct App {
     /// for double-click detection.
     mouse_down: bool,
     last_click: Option<(Pos, Instant)>,
+    pub gdoc: Option<GdocState>,
+    google: Option<google::Client>,
+    pub pending: Option<Pending>,
 }
 
 const UNTITLED: &str = "Untitled";
@@ -237,6 +264,9 @@ impl App {
             clipboard_out: None,
             mouse_down: false,
             last_click: None,
+            gdoc: None,
+            google: None,
+            pending: None,
         }
     }
 
@@ -336,7 +366,9 @@ impl App {
     }
 
     pub fn title(&self) -> String {
-
+        if let Some(g) = &self.gdoc {
+            return format!("{} (Google Docs)", g.title);
+        }
         self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| UNTITLED.into())
     }
 
@@ -388,6 +420,7 @@ impl App {
             self.warnings.clear();
         }
         self.path = Some(path.to_path_buf());
+        self.gdoc = None;
         self.scroll = (0, 0);
         self.reveal_para_code = None;
         self.needs_redraw = true;
@@ -442,6 +475,15 @@ impl App {
 
     pub fn save_to(&mut self, path: &Path, format: Format) -> anyhow::Result<()> {
         self.ed.commit();
+        if format == Format::GoogleDoc {
+            self.queue(Pending::Save);
+            return Ok(());
+        }
+        // Leaving Google Docs for a file: what only Docs can hold goes.
+        let mut dropped = Vec::new();
+        if self.gdoc.is_some() {
+            dropped = wp_gdoc::detach(&mut self.ed.doc);
+        }
         match format {
             Format::Docx => {
                 wp_docx::write(&self.ed.doc, self.package.as_ref(), path)?;
@@ -454,6 +496,7 @@ impl App {
                 let wrap = if self.cfg.text_wrap > 0 { Some(self.cfg.text_wrap) } else { None };
                 std::fs::write(path, wp_core::text::to_text(&self.ed.doc, wrap))?;
             }
+            Format::GoogleDoc => unreachable!("handled above"),
             Format::Markdown => {
                 let export = self.markdown_export();
                 std::fs::write(path, &export.text)?;
@@ -467,12 +510,191 @@ impl App {
                 }
             }
         }
+        self.remove_recovery();
         self.path = Some(path.to_path_buf());
         self.format = format;
+        self.gdoc = None;
         self.ed.dirty = false;
-        self.remove_recovery();
-        self.message(format!("Saved {}", path.display()));
+        if dropped.is_empty() {
+            self.message(format!("Saved {}", path.display()));
+        } else {
+            self.message(format!("Saved {} — not carried over from Google Docs: {}", path.display(), dropped.join(", ")));
+        }
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Google Docs (DESIGN.md §6a)
+    // ------------------------------------------------------------------
+
+    /// Run `p` after the next draw.
+    pub fn queue(&mut self, p: Pending) {
+        if !matches!(p, Pending::SignIn { .. }) {
+            self.message("Contacting Google…");
+        }
+        self.pending = Some(p);
+        self.needs_redraw = true;
+    }
+
+    /// The queued network action. Signs in first when there is no token,
+    /// showing the URL while it waits for the browser to come back.
+    pub fn run_pending(&mut self, p: Pending) {
+        if self.google.is_none() {
+            if !self.cfg.google.is_set() {
+                self.message(format!("Google Docs needs an OAuth desktop client: add [google] client_id and client_secret to {}", crate::config::config_path().display()));
+                return;
+            }
+            self.google = Some(google::Client::new(self.cfg.google.clone()));
+        }
+        if let Pending::SignIn { flow, then } = p {
+            let res = self.google.as_mut().unwrap().finish_sign_in(flow, cancel_pressed);
+            self.overlay = Overlay::None;
+            self.needs_redraw = true;
+            match res {
+                Ok(()) => self.run_pending(*then),
+                Err(e) => self.message(format!("Google sign-in failed: {}", e)),
+            }
+            return;
+        }
+        if !self.google.as_ref().unwrap().signed_in() {
+            match self.google.as_ref().unwrap().begin_sign_in() {
+                Ok(flow) => {
+                    let opened = google::open_in_browser(&flow.url);
+                    let mut lines = vec![if opened { "A browser window has been opened for you to sign in." } else { "Open this address in a browser to sign in:" }.to_string(), String::new()];
+                    let url = flow.url.clone();
+                    let mut rest = url.as_str();
+                    while !rest.is_empty() {
+                        let n = rest.char_indices().nth(72).map(|(i, _)| i).unwrap_or(rest.len());
+                        lines.push(rest[..n].to_string());
+                        rest = &rest[n..];
+                    }
+                    lines.push(String::new());
+                    lines.push("Waiting for the sign-in to complete… Esc cancels.".into());
+                    self.overlay = Overlay::Message { title: "Sign in to Google".into(), lines };
+                    self.pending = Some(Pending::SignIn { flow, then: Box::new(p) });
+                    self.needs_redraw = true;
+                }
+                Err(e) => self.message(format!("Google sign-in failed: {}", e)),
+            }
+            return;
+        }
+        match p {
+            Pending::Open { id, force } => self.open_gdoc(&id, force),
+            Pending::Save => self.save_gdoc(),
+            Pending::List(q) => self.list_gdocs(&q),
+            Pending::SignIn { .. } => {}
+        }
+    }
+
+    fn open_gdoc(&mut self, id: &str, force: bool) {
+        if self.ed.dirty && !force {
+            self.overlay = Overlay::Confirm { question: "Discard unsaved changes and open the Google Doc? (y/n)".into(), action: ConfirmAction::OpenDriveDiscard(id.to_string()) };
+            self.needs_redraw = true;
+            return;
+        }
+        let json = match self.google.as_mut().unwrap().get_document(id) {
+            Ok(j) => j,
+            Err(e) => return self.message(format!("Could not open the Google Doc: {}", e)),
+        };
+        match wp_gdoc::read(&json) {
+            Ok(l) => {
+                self.load_gdoc(id, l);
+                self.check_recovery();
+            }
+            Err(e) => self.message(format!("Could not read the Google Doc: {}", e)),
+        }
+    }
+
+    /// Install a document read from Google Docs.
+    pub fn load_gdoc(&mut self, id: &str, l: wp_gdoc::Loaded) {
+        self.ed.replace_document(l.doc);
+        self.package = None;
+        self.path = None;
+        self.format = Format::GoogleDoc;
+        self.warnings.clear();
+        self.sticky_status = None;
+        let title = l.baseline.title.clone();
+        self.gdoc = Some(GdocState { id: id.to_string(), title: title.clone(), baseline: l.baseline });
+        self.scroll = (0, 0);
+        self.reveal_para_code = None;
+        self.ed.set_cols(self.doc_cols());
+        self.needs_redraw = true;
+        if l.warnings.is_empty() {
+            self.message(format!("Opened “{}” from Google Docs", title));
+        } else {
+            self.message(format!("Opened “{}” from Google Docs — {}", title, l.warnings.join("; ")));
+        }
+    }
+
+    fn save_gdoc(&mut self) {
+        self.ed.commit();
+        let Some(g) = &self.gdoc else { return };
+        let reqs = match wp_gdoc::diff(&g.baseline, &self.ed.doc) {
+            Ok(r) => r,
+            Err(e) => return self.message(format!("Can't save this edit to Google Docs yet: {} — Save As .docx keeps a copy", e)),
+        };
+        if reqs.is_empty() {
+            self.ed.dirty = false;
+            self.remove_recovery();
+            self.message("No changes to save");
+            return;
+        }
+        let n = reqs.len();
+        let body = wp_gdoc::batch_update(&g.baseline, reqs);
+        let id = g.id.clone();
+        let client = self.google.as_mut().unwrap();
+        match client.batch_update(&id, &body) {
+            Ok(_) => {
+                // Re-read so the next save diffs against what Google now has.
+                match client.get_document(&id).and_then(|j| wp_gdoc::read(&j).map_err(anyhow::Error::msg)) {
+                    Ok(l) => self.adopt_baseline(&id, l),
+                    Err(e) => self.message(format!("Saved to Google Docs, but could not re-read it ({}); reopen before saving again", e)),
+                }
+                self.ed.dirty = false;
+                self.remove_recovery();
+                self.message(format!("Saved to Google Docs ({} change{})", n, if n == 1 { "" } else { "s" }));
+                if self.quit_after_save {
+                    self.quit = true;
+                }
+            }
+            Err(e) => {
+                let conflict = e.downcast_ref::<google::ApiError>().map_or(false, |a| a.is_conflict());
+                if conflict {
+                    self.message("Not saved: the document changed on Google Docs since you opened it. Save As .docx to keep your version, then reopen it.");
+                } else {
+                    self.message(format!("Save to Google Docs failed: {}", e));
+                }
+            }
+        }
+        self.quit_after_save = false;
+    }
+
+    /// After a successful save: keep the edited document (and its undo
+    /// history) when the re-read agrees with it in shape, else reload.
+    fn adopt_baseline(&mut self, id: &str, l: wp_gdoc::Loaded) {
+        let same_shape = self.gdoc.as_ref().map_or(false, |g| g.baseline.lists == l.baseline.lists && g.baseline.footnote_ids == l.baseline.footnote_ids) && l.doc.paragraphs.len() == self.ed.doc.paragraphs.len();
+        if same_shape {
+            if let Some(g) = &mut self.gdoc {
+                g.baseline = l.baseline;
+                g.title = g.baseline.title.clone();
+            }
+        } else {
+            let cursor = self.ed.cursor;
+            self.load_gdoc(id, l);
+            let c = self.ed.doc.clamp(cursor);
+            self.ed.move_to(c, false);
+        }
+    }
+
+    fn list_gdocs(&mut self, query: &str) {
+        match self.google.as_mut().unwrap().list_documents(query) {
+            Ok(docs) if docs.is_empty() => self.message(if query.trim().is_empty() { "No Google Docs found on your Drive".to_string() } else { format!("No Google Docs named like “{}”", query.trim()) }),
+            Ok(docs) => {
+                let items = docs.into_iter().map(|d| ListItem { label: d.name, detail: d.modified, value: d.id }).collect();
+                self.list("Google Drive", items, ListAction::OpenDrive);
+            }
+            Err(e) => self.message(format!("Could not list Google Drive: {}", e)),
+        }
     }
 
     /// The document as Markdown, hyperlink targets resolved through the
@@ -487,6 +709,10 @@ impl App {
     }
 
     pub fn save(&mut self) {
+        if self.format == Format::GoogleDoc && self.gdoc.is_some() {
+            self.queue(Pending::Save);
+            return;
+        }
         match self.path.clone() {
             Some(p) => {
                 let f = self.format;
@@ -500,7 +726,10 @@ impl App {
     }
 
     fn recovery_path(&self) -> PathBuf {
-        let key = self.path.as_ref().map(|p| p.canonicalize().unwrap_or(p.clone()).to_string_lossy().into_owned()).unwrap_or_else(|| "untitled".into());
+        let key = match &self.gdoc {
+            Some(g) => format!("gdoc:{}", g.id),
+            None => self.path.as_ref().map(|p| p.canonicalize().unwrap_or(p.clone()).to_string_lossy().into_owned()).unwrap_or_else(|| "untitled".into()),
+        };
         let mut h: u64 = 0xcbf29ce484222325;
         for b in key.bytes() {
             h ^= b as u64;
@@ -510,6 +739,7 @@ impl App {
             Format::Docx => "docx",
             Format::Text => "txt",
             Format::Markdown => "md",
+            Format::GoogleDoc => "gdoc.json",
         };
         state_dir().join("recovery").join(format!("{:016x}.{}", h, ext))
     }
@@ -528,6 +758,12 @@ impl App {
             Format::Docx => wp_docx::write(&self.ed.doc, self.package.as_ref(), &p).map_err(|e| e.to_string()),
             Format::Text => std::fs::write(&p, wp_core::text::to_text(&self.ed.doc, None)).map_err(|e| e.to_string()),
             Format::Markdown => std::fs::write(&p, self.markdown_export().text).map_err(|e| e.to_string()),
+            // The model itself, with the baseline, so nothing is lost and a
+            // recovered document can still be saved back as a diff.
+            Format::GoogleDoc => match &self.gdoc {
+                Some(g) => serde_json::to_string(&serde_json::json!({ "id": g.id, "title": g.title, "baseline": g.baseline, "doc": self.ed.doc })).map_err(|e| e.to_string()).and_then(|s| std::fs::write(&p, s).map_err(|e| e.to_string())),
+                None => Ok(()),
+            },
         };
         if let Err(e) = res {
             self.message(format!("Autosave failed: {}", e));
@@ -694,7 +930,19 @@ impl App {
             Cmd::Save => self.save(),
             Cmd::SaveAs => {
                 let init = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-                self.prompt(PromptKind::SaveAs(self.format), "Save as: ", &init);
+                let f = if self.format == Format::GoogleDoc { Format::Docx } else { self.format };
+                self.prompt(PromptKind::SaveAs(f), "Save as: ", &init);
+            }
+            Cmd::OpenFromDrive => {
+                self.prompt(PromptKind::DriveSearch, "Google Drive — name to search, or a Docs URL (Enter lists recent): ", "");
+            }
+            Cmd::GoogleSignOut => {
+                if let Some(c) = &mut self.google {
+                    c.sign_out();
+                } else {
+                    google::Client::new(self.cfg.google.clone()).sign_out();
+                }
+                self.message("Signed out of Google; the next Drive open or save signs in again");
             }
             Cmd::SaveAsDocx => {
                 let init = self.path.as_ref().map(|p| p.with_extension("docx").display().to_string()).unwrap_or_default();
@@ -1656,6 +1904,7 @@ impl App {
         self.ed.replace_document(Document::new());
         self.path = None;
         self.package = None;
+        self.gdoc = None;
         self.format = Format::Docx;
         self.warnings.clear();
         self.scroll = (0, 0);
@@ -2272,6 +2521,7 @@ impl App {
 
     fn pick_list(&mut self, action: ListAction, item: &ListItem) {
         match action {
+            ListAction::OpenDrive => self.queue(Pending::Open { id: item.value.clone(), force: false }),
             ListAction::ApplyStyle => {
                 let id = item.value.clone();
                 self.ed.set_style(&id);
@@ -2337,7 +2587,10 @@ impl App {
     fn confirm(&mut self, action: ConfirmAction, yes: bool) {
         match action {
             ConfirmAction::ExitSave => {
-                if yes {
+                if yes && self.format == Format::GoogleDoc && self.gdoc.is_some() {
+                    self.quit_after_save = true;
+                    self.queue(Pending::Save);
+                } else if yes {
                     match self.path.clone() {
                         Some(p) => {
                             let f = self.format;
@@ -2370,6 +2623,12 @@ impl App {
                     }
                 }
             }
+            ConfirmAction::OpenDriveDiscard(id) => {
+                if yes {
+                    self.remove_recovery();
+                    self.queue(Pending::Open { id, force: true });
+                }
+            }
             ConfirmAction::Recover(p) => {
                 if yes {
                     let ext = p.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
@@ -2382,6 +2641,17 @@ impl App {
                         })
                     } else if ext == "md" {
                         std::fs::read(&p).map(|b| self.ed.replace_document(wp_md::from_markdown(&decode_text(&b)))).map_err(|e| e.into())
+                    } else if ext == "json" {
+                        std::fs::read_to_string(&p).map_err(anyhow::Error::from).and_then(|s| {
+                            let v: serde_json::Value = serde_json::from_str(&s)?;
+                            let doc: Document = serde_json::from_value(v["doc"].clone())?;
+                            let baseline: wp_gdoc::Baseline = serde_json::from_value(v["baseline"].clone())?;
+                            let id = v["id"].as_str().unwrap_or("").to_string();
+                            let title = v["title"].as_str().unwrap_or("").to_string();
+                            self.ed.replace_document(doc);
+                            self.gdoc = Some(GdocState { id, title, baseline });
+                            Ok(())
+                        })
                     } else {
                         std::fs::read(&p).map(|b| self.ed.replace_document(wp_core::text::from_text(&decode_text(&b), false))).map_err(|e| e.into())
                     } {
@@ -2418,7 +2688,7 @@ impl App {
                         p.set_extension(match fmt {
                             Format::Text => "txt",
                             Format::Markdown => "md",
-                            Format::Docx => "docx",
+                            Format::Docx | Format::GoogleDoc => "docx",
                         });
                         fmt
                     }
@@ -2436,6 +2706,10 @@ impl App {
                 }
                 self.quit_after_save = false;
             }
+            PromptKind::DriveSearch => match google::parse_doc_ref(&v) {
+                Some(id) => self.queue(Pending::Open { id, force: false }),
+                None => self.queue(Pending::List(v)),
+            },
             PromptKind::Find { backward } => {
                 self.find.query = v.clone();
                 self.find.backward = backward;
@@ -2810,4 +3084,16 @@ fn parse_points(s: &str) -> Option<Twips> {
 
 pub fn cmd_title(c: Cmd) -> &'static str {
     info(c).title
+}
+
+/// While a sign-in blocks the main loop: has the user pressed Esc?
+fn cancel_pressed() -> bool {
+    while crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        if let Ok(crossterm::event::Event::Key(k)) = crossterm::event::read() {
+            if k.code == KeyCode::Esc {
+                return true;
+            }
+        }
+    }
+    false
 }

@@ -7,4 +7,5 @@ description = "Google Docs (Docs API JSON) reader and minimal-edit writer for wp
 
 [dependencies]
 wp-core.workspace = true
+serde.workspace = true
 serde_json.workspace = true

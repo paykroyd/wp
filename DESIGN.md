@@ -34,9 +34,10 @@ XML.
 
 | JSON | `serde_json` | The Google Docs API speaks JSON (§6a) |
 
-No network crate exists in the dependency tree yet. "No network access" (§8)
-is enforced by construction, not by policy; the Google Docs client (§6a.4)
-will add one on the open/save path only.
+| HTTPS | `ureq` (rustls) | Blocking; used only by the Google Docs client (§6a.4) on the open/save path |
+
+"No network access" (§8) holds by construction for everything but Google
+Docs, which the user opts into by opening one.
 
 ---
 
@@ -423,17 +424,31 @@ before a Drive-native document is written as `.docx`, Markdown or text;
 hyperlinks, footnotes and tracked changes are ordinary `.docx` shapes and
 stay.
 
-### 6a.4 Privacy and the binary (not yet built)
+### 6a.4 Privacy and the binary
 
 SPEC §8 says *no network access*. That stays true by default: nothing in
-`wp` opens a socket unless the user opens or saves a Google Doc, and the
-binary's Drive/Docs client will be a blocking `ureq` call on the open/save
-path only — no background sync, no token refresh on a timer. Authentication
-is OAuth 2.0 (loopback flow, scopes `documents` and `drive.file`) against a
-client id the user creates and puts in the config file; the refresh token is
-cached in the state directory. The commands (`Open from Drive`, `Save to
-Drive`, `wp gdoc:<id>` / a Docs URL) go in `commands.rs` like everything
-else.
+`wp` opens a socket unless the user opens or saves a Google Doc. The client
+(`google.rs`) is a blocking `ureq` call on the open / save / list path only
+— no background sync, no token refresh on a timer, no telemetry.
+Authentication is OAuth 2.0 with the loopback redirect (`wp` listens on a
+random `127.0.0.1` port for the one redirect, then closes it), scopes
+`documents` and `drive.readonly`, against a "Desktop app" client the user
+creates in the Google Cloud console and puts in `config.toml` under
+`[google]`. The refresh token is cached, mode 0600, in the state directory;
+`Sign Out of Google` deletes it.
+
+Network calls run from a small queue (`App::pending`) that the main loop
+drains *after* drawing, so the screen shows "Contacting Google…" or the
+sign-in URL while the call blocks; Esc cancels a sign-in. Opening is
+`Open from Google Drive…` (search by name, or paste a Docs URL), the
+`gdoc:<id>` / URL argument on the command line, and `--check` / `--text` /
+`--md` on a `gdoc:` reference for a read-only look. Saving is `Save`: the
+diff is posted, then the document is re-read so the next save diffs
+against what Google now has (the editor keeps its undo history when the
+re-read has the same shape). A revision conflict is reported, not merged;
+`Save As .docx` keeps the local version. Autosave for a Google Doc writes
+the model *and* the baseline as JSON to the recovery directory, so a
+recovered document can still be saved back as a diff.
 
 ---
 
@@ -578,11 +593,12 @@ the format.
 requests, tested against recorded fixtures (`tools/make_gdoc_fixtures.py`):
 typing, deleting, bolding, paragraph formatting, bullets, splitting and
 joining paragraphs, appending, table-cell and footnote edits, page breaks,
-UTF-16 surrogates, tabbed documents, suggestions. Not yet: the binary's
-OAuth client and Drive listing (needs a client id, §6a.4), and live
-verification against the API — the request shapes follow the reference, the
-newline/paragraph-style semantics in §6a.2 follow its documentation and
-have not been exercised on a real document yet.
+UTF-16 surrogates, tabbed documents, suggestions. The binary's OAuth
+client, Drive listing, open / save / recovery and `--check` (2026-08-29,
+§6a.4). Still to do: live verification against the API — the request
+shapes follow the reference and the newline / paragraph-style semantics in
+§6a.2 follow its documentation, but have not been exercised on a real
+document yet.
 
 **0.3 Documents, in progress — tables (2026-08-28).** The model of §3.7:
 `.docx` tables read into editable cells and write back verbatim (the full

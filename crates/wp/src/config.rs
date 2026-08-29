@@ -22,6 +22,22 @@ pub enum ThemeChoice {
     Classic,
 }
 
+/// Google Docs access (DESIGN.md §6a.4): an OAuth "Desktop app" client the
+/// user creates in the Google Cloud console. Nothing is contacted unless a
+/// Google Doc is opened or saved.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GoogleConfig {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+impl GoogleConfig {
+    pub fn is_set(&self) -> bool {
+        !self.client_id.trim().is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -47,6 +63,7 @@ pub struct Config {
     pub system_clipboard: bool,
     /// Extra bindings: key → command id, e.g. `"ctrl+shift+b" = "bold"`.
     pub bindings: BTreeMap<String, String>,
+    pub google: GoogleConfig,
 }
 
 impl Default for Config {
@@ -63,7 +80,7 @@ impl Default for Config {
             mouse: true,
             system_clipboard: true,
             bindings: BTreeMap::new(),
-
+            google: GoogleConfig::default(),
         }
     }
 }
@@ -110,7 +127,7 @@ impl Config {
             std::fs::create_dir_all(d)?;
         }
         let s = toml::to_string_pretty(self).unwrap_or_default();
-        let header = "# wp configuration. keymap = \"modern\" | \"classic\"; theme = \"default\" | \"classic\".\n# Rebind keys under [bindings], e.g. \"ctrl+shift+b\" = \"bold\".\n# Command ids: Ctrl+K in wp lists them.\n\n";
+        let header = "# wp configuration. keymap = \"modern\" | \"classic\"; theme = \"default\" | \"classic\".\n# Rebind keys under [bindings], e.g. \"ctrl+shift+b\" = \"bold\".\n# Command ids: Ctrl+K in wp lists them.\n# Google Docs: put an OAuth desktop client under [google] (client_id, client_secret).\n\n";
         std::fs::write(p, format!("{}{}", header, s))
     }
 }

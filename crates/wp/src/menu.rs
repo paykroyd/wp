@@ -26,6 +26,7 @@ pub static MENUS: &[Menu] = &[
         items: &[
             C(Cmd::New),
             C(Cmd::Open),
+            C(Cmd::OpenFromDrive),
             C(Cmd::Save),
             C(Cmd::SaveAs),
             Sep,
@@ -34,6 +35,7 @@ pub static MENUS: &[Menu] = &[
             C(Cmd::SaveAsText),
             Sep,
             C(Cmd::Warnings),
+            C(Cmd::GoogleSignOut),
             Sep,
             C(Cmd::Exit),
         ],

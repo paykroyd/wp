@@ -7,6 +7,8 @@ pub enum Cmd {
     // File
     New,
     Open,
+    OpenFromDrive,
+    GoogleSignOut,
     Save,
     SaveAs,
     SaveAsText,
@@ -210,6 +212,8 @@ macro_rules! cmd {
 pub static COMMANDS: &[Command] = &[
     cmd!(New, "new", "New Document", "File"),
     cmd!(Open, "open", "Open…", "File", "retrieve list files"),
+    cmd!(OpenFromDrive, "open-drive", "Open from Google Drive…", "File", "google docs cloud gdoc"),
+    cmd!(GoogleSignOut, "google-sign-out", "Sign Out of Google", "File", "drive docs token"),
     cmd!(Save, "save", "Save", "File"),
     cmd!(SaveAs, "save-as", "Save As…", "File"),
     cmd!(SaveAsDocx, "save-as-docx", "Save As Word Document (.docx)…", "File", "export"),
