@@ -1487,6 +1487,57 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             }
             f.render_widget(RParagraph::new(lines), Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2)));
         }
+        Overlay::Drive(d) => {
+            let rows = d.visible();
+            let w = area.width.saturating_sub(4).min(96).max(34);
+            let sel_i = d.selected.min(rows.len().saturating_sub(1));
+            // Lines carry the row they stand for; the divider stands for none.
+            let inner_w = w.saturating_sub(2) as usize;
+            let mut lines: Vec<(Option<usize>, Line)> = Vec::new();
+            for (i, (e, from_search)) in rows.iter().enumerate() {
+                if *from_search && (i == 0 || !rows[i - 1].1) {
+                    lines.push((None, Line::from(Span::styled("  — more from Drive —", Style::default().fg(th.dim)))));
+                }
+                let mut style = Style::default();
+                if i == sel_i {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                let folder = e.kind != crate::google::DriveKind::Doc;
+                let name = if folder { format!("{}/", e.name) } else { e.name.clone() };
+                let name = truncate(&name, inner_w.saturating_sub(e.detail.width() + 6));
+                let pad = inner_w.saturating_sub(2 + name.width() + e.detail.width() + 2);
+                let name_style = if folder && caps.colors { style.fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { style };
+                lines.push((Some(i), Line::from(vec![Span::styled(format!("  {}", name), name_style), Span::styled(" ".repeat(pad), style), Span::styled(format!("{}  ", e.detail), style.fg(th.dim))])));
+            }
+            if lines.is_empty() {
+                let text = match (&d.error, d.loading) {
+                    (Some(e), _) => format!("  Could not list Drive: {}", e),
+                    (None, true) => "  Loading…".to_string(),
+                    (None, false) if d.rows.is_empty() && d.mode == crate::app::DriveMode::Recent => "  No Google Docs found".to_string(),
+                    (None, false) => "  Nothing here matches".to_string(),
+                };
+                lines.push((None, Line::from(Span::styled(truncate(&text, inner_w), Style::default().fg(th.dim)))));
+            }
+            let n = lines.len().clamp(1, crate::app::BROWSE_ROWS) as u16;
+            let h = n + 4;
+            let x = (area.width.saturating_sub(w)) / 2;
+            let r = Rect::new(x, 1.min(area.height.saturating_sub(h)), w, h.min(area.height));
+            clear(f, r, &th);
+            f.render_widget(boxed(&tail(&d.title(), w.saturating_sub(4) as usize)), r);
+            let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
+            let prompt = Line::from(vec![Span::styled("name: ", Style::default().fg(th.dim)), Span::raw(d.filter.clone())]);
+            f.render_widget(RParagraph::new(prompt), Rect::new(inner.x, inner.y, inner.width, 1));
+            f.set_cursor_position((inner.x + 6 + d.filter.width() as u16, inner.y));
+            let hint = match d.mode {
+                crate::app::DriveMode::Recent => "Enter open · Tab folders · type to filter (a pause searches Drive) or paste a Docs URL",
+                crate::app::DriveMode::Folders => "Enter open · ←→ up/into · Tab recent",
+            };
+            f.render_widget(RParagraph::new(Line::from(Span::styled(truncate(hint, inner.width as usize), Style::default().fg(th.dim)))), Rect::new(inner.x, inner.y + 1, inner.width, 1));
+            let sel_line = lines.iter().position(|(i, _)| *i == Some(sel_i)).unwrap_or(0);
+            let first = sel_line.saturating_sub(crate::app::BROWSE_ROWS - 1);
+            let shown: Vec<Line> = lines.into_iter().skip(first).take(crate::app::BROWSE_ROWS).map(|(_, l)| l).collect();
+            f.render_widget(RParagraph::new(shown), Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2)));
+        }
         Overlay::Confirm { question, .. } => {
             let y = area.height.saturating_sub(2);
             let r = Rect::new(0, y, area.width, 1);

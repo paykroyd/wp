@@ -1,7 +1,8 @@
 //! The Google Docs / Drive client (DESIGN.md §6a.4): OAuth sign-in through
-//! a loopback redirect, a cached refresh token, and the three calls `wp`
-//! makes — fetch a document, post a `batchUpdate`, list documents. Every
-//! call is blocking and happens only on the open / save path.
+//! a loopback redirect, a cached refresh token, and the calls `wp` makes —
+//! fetch a document, post a `batchUpdate`, list Drive. Every call blocks;
+//! open and save run on the main thread, listings on a worker thread the
+//! Open from Drive dialog spawns (DESIGN.md §6a.4).
 
 use crate::config::{state_dir, GoogleConfig};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const SCOPES: &str = "https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive.readonly";
 const DOCS_URL: &str = "https://docs.googleapis.com/v1/documents";
 const DRIVE_FILES_URL: &str = "https://www.googleapis.com/drive/v3/files";
+const DRIVES_URL: &str = "https://www.googleapis.com/drive/v3/drives";
 /// How long the sign-in page may take before `wp` gives up waiting.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -27,13 +29,45 @@ struct Token {
     expires_at: u64,
 }
 
-/// A document listed from Drive.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DriveDoc {
+/// What a Drive row is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DriveKind {
+    Doc,
+    Folder,
+    /// The "Shared with me" pseudo-folder.
+    SharedWithMe,
+    /// The "Shared drives" pseudo-folder; its entries are drives.
+    SharedDrives,
+}
+
+/// A document, folder, or shared drive listed from Drive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriveEntry {
     pub id: String,
     pub name: String,
-    pub modified: String,
+    pub kind: DriveKind,
+    /// Modified date, shown greyed to the right; empty for folders.
+    pub detail: String,
 }
+
+/// One listing the dialog can ask for.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DriveQuery {
+    /// The three top-level places, listed locally.
+    Roots,
+    /// Google Docs by recency (last viewed, modified, or shared).
+    Recent,
+    /// Google Docs whose name contains the words.
+    Search(String),
+    /// Docs and folders inside a folder (`root` is My Drive; a shared
+    /// drive's id is its root folder).
+    Folder(String),
+    SharedWithMe,
+    SharedDrives,
+}
+
+const DOC_MIME: &str = "application/vnd.google-apps.document";
+const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 
 /// Why a request failed, as Google reported it.
 #[derive(Debug)]
@@ -68,6 +102,9 @@ pub struct SignIn {
     state: String,
 }
 
+/// Cloneable so a listing can run on a worker thread: the clone shares the
+/// HTTP agent, and a token it refreshes is written to the same file.
+#[derive(Clone)]
 pub struct Client {
     cfg: GoogleConfig,
     agent: ureq::Agent,
@@ -259,29 +296,73 @@ impl Client {
         self.call("POST", &format!("{}/{}:batchUpdate", DOCS_URL, urlencode(id)), Some(body))
     }
 
-    /// Google Docs on the user's Drive, most recently modified first;
-    /// `query` narrows by name.
-    pub fn list_documents(&mut self, query: &str) -> anyhow::Result<Vec<DriveDoc>> {
-        let mut q = String::from("mimeType='application/vnd.google-apps.document' and trashed=false");
-        let query = query.trim();
-        if !query.is_empty() {
-            q.push_str(&format!(" and name contains '{}'", query.replace('\\', "\\\\").replace('\'', "\\'")));
-        }
-        let url = format!("{}?q={}&orderBy=modifiedTime%20desc&pageSize=50&fields=files(id,name,modifiedTime)&supportsAllDrives=true&includeItemsFromAllDrives=true", DRIVE_FILES_URL, urlencode(&q));
+    /// One Drive listing. `Roots` never reaches the network.
+    pub fn list(&mut self, q: &DriveQuery) -> anyhow::Result<Vec<DriveEntry>> {
+        let docs_and_folders = format!("(mimeType='{}' or mimeType='{}')", DOC_MIME, FOLDER_MIME);
+        let (filter, order) = match q {
+            DriveQuery::Roots => return Ok(drive_roots()),
+            DriveQuery::Recent => (format!("mimeType='{}' and trashed=false", DOC_MIME), "recency desc"),
+            DriveQuery::Search(words) => (format!("mimeType='{}' and trashed=false and name contains '{}'", DOC_MIME, drive_quote(words.trim())), "modifiedTime desc"),
+            DriveQuery::Folder(id) => (format!("'{}' in parents and trashed=false and {}", drive_quote(id), docs_and_folders), "folder,name_natural"),
+            DriveQuery::SharedWithMe => (format!("sharedWithMe=true and trashed=false and {}", docs_and_folders), "folder,name_natural"),
+            DriveQuery::SharedDrives => {
+                let v = self.call("GET", &format!("{}?pageSize=100&fields=drives(id,name)", DRIVES_URL), None)?;
+                return Ok(json_list(&v, "drives")
+                    .map(|d| DriveEntry { id: json_str(d, "id"), name: json_str(d, "name"), kind: DriveKind::Folder, detail: String::new() })
+                    .collect());
+            }
+        };
+        let url = format!(
+            "{}?q={}&orderBy={}&pageSize=100&fields=files(id,name,mimeType,modifiedTime)&supportsAllDrives=true&includeItemsFromAllDrives=true",
+            DRIVE_FILES_URL,
+            urlencode(&filter),
+            urlencode(order)
+        );
         let v = self.call("GET", &url, None)?;
-        Ok(v.get("files")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .map(|f| DriveDoc {
-                        id: f.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-                        name: f.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-                        modified: f.get("modifiedTime").and_then(Value::as_str).unwrap_or("").chars().take(16).collect::<String>().replace('T', " "),
-                    })
-                    .collect()
+        Ok(json_list(&v, "files")
+            .map(|f| {
+                let folder = json_str(f, "mimeType") == FOLDER_MIME;
+                DriveEntry {
+                    id: json_str(f, "id"),
+                    name: json_str(f, "name"),
+                    kind: if folder { DriveKind::Folder } else { DriveKind::Doc },
+                    detail: if folder { String::new() } else { json_str(f, "modifiedTime").chars().take(16).collect::<String>().replace('T', " ") },
+                }
             })
-            .unwrap_or_default())
+            .collect())
     }
+}
+
+/// The top of the folder view.
+pub fn drive_roots() -> Vec<DriveEntry> {
+    vec![
+        DriveEntry { id: "root".into(), name: "My Drive".into(), kind: DriveKind::Folder, detail: String::new() },
+        DriveEntry { id: String::new(), name: "Shared with me".into(), kind: DriveKind::SharedWithMe, detail: String::new() },
+        DriveEntry { id: String::new(), name: "Shared drives".into(), kind: DriveKind::SharedDrives, detail: String::new() },
+    ]
+}
+
+/// The listing an entry opens onto, or None for a document.
+pub fn query_for(e: &DriveEntry) -> Option<DriveQuery> {
+    match e.kind {
+        DriveKind::Doc => None,
+        DriveKind::Folder => Some(DriveQuery::Folder(e.id.clone())),
+        DriveKind::SharedWithMe => Some(DriveQuery::SharedWithMe),
+        DriveKind::SharedDrives => Some(DriveQuery::SharedDrives),
+    }
+}
+
+/// A string literal inside a Drive `q` expression.
+fn drive_quote(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+fn json_list<'a>(v: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
+    v.get(key).and_then(Value::as_array).map(|a| a.iter()).into_iter().flatten()
+}
+
+fn json_str(v: &Value, key: &str) -> String {
+    v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
 /// A document id from `gdoc:<id>`, a Docs URL, or a bare id.
@@ -377,6 +458,37 @@ mod tests {
     fn url_coding() {
         assert_eq!(urlencode("a b/c"), "a%20b%2Fc");
         assert_eq!(urldecode("a%20b%2Fc+d"), "a b/c d");
+    }
+
+    #[test]
+    fn drive_quoting_and_roots() {
+        assert_eq!(drive_quote("it's a \\ test"), "it\\'s a \\\\ test");
+        let roots = drive_roots();
+        assert_eq!(roots.len(), 3);
+        assert_eq!(query_for(&roots[0]), Some(DriveQuery::Folder("root".into())));
+        assert_eq!(query_for(&roots[1]), Some(DriveQuery::SharedWithMe));
+        assert_eq!(query_for(&DriveEntry { id: "x".into(), name: "d".into(), kind: DriveKind::Doc, detail: String::new() }), None);
+    }
+
+    /// Against the real API with the user's cached token: `cargo test -p wp
+    /// live_listings -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_listings() {
+        let (cfg, _) = crate::config::Config::load();
+        let mut c = Client::new(cfg.google);
+        assert!(c.signed_in(), "not signed in");
+        for q in [DriveQuery::Recent, DriveQuery::Search("a".into()), DriveQuery::Folder("root".into()), DriveQuery::SharedWithMe, DriveQuery::SharedDrives] {
+            let t = Instant::now();
+            let rows = c.list(&q).unwrap_or_else(|e| panic!("{:?}: {}", q, e));
+            println!("{:?}: {} rows in {:?}; first: {:?}", q, rows.len(), t.elapsed(), rows.first().map(|r| (&r.name, r.kind, &r.detail)));
+            if let Some(f) = rows.iter().find(|r| r.kind == DriveKind::Folder) {
+                if matches!(q, DriveQuery::Folder(_)) {
+                    let sub = c.list(&DriveQuery::Folder(f.id.clone())).unwrap();
+                    println!("  {}/: {} rows", f.name, sub.len());
+                }
+            }
+        }
     }
 
     #[test]

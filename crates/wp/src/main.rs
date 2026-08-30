@@ -341,7 +341,13 @@ fn run(app: &mut App) -> anyhow::Result<()> {
             app.run_pending(p);
             continue;
         }
-        if event::poll(Duration::from_millis(250))? {
+        // Drive listings arrive on a channel; poll briefly while one is due.
+        app.drive_tick();
+        if app.needs_redraw {
+            continue;
+        }
+        let wait = if app.drive_active() { 40 } else { 250 };
+        if event::poll(Duration::from_millis(wait))? {
             match event::read()? {
                 Event::Key(k) => {
                     if k.kind == KeyEventKind::Release {

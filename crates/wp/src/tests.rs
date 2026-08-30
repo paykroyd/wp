@@ -19,6 +19,7 @@ impl Harness {
         cfg.keymap = keymap;
         cfg.show_hint = false;
         let mut app = App::new(cfg);
+        app.drive_cache_path = None;
         app.resize(80, 24);
         let term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         Harness { app, term }
@@ -892,4 +893,136 @@ fn sizes_show_as_wp51_attributes_and_the_style_in_the_status_line() {
     assert!(h.screen().lines().last().unwrap().contains("Heading 2"));
     h.app.ed.move_to(Pos::new(2, 0), false);
     assert!(!h.screen().lines().last().unwrap().contains("Heading 2"));
+}
+
+// ----------------------------------------------------------------------
+// Open from Google Drive
+// ----------------------------------------------------------------------
+
+fn drive_doc(id: &str, name: &str) -> crate::google::DriveEntry {
+    crate::google::DriveEntry { id: id.into(), name: name.into(), kind: crate::google::DriveKind::Doc, detail: "2026-08-29 10:00".into() }
+}
+
+fn drive_folder(id: &str, name: &str) -> crate::google::DriveEntry {
+    crate::google::DriveEntry { id: id.into(), name: name.into(), kind: crate::google::DriveKind::Folder, detail: String::new() }
+}
+
+#[test]
+fn drive_dialog_opens_empty_then_fills_and_filters() {
+    use crate::app::{DriveMode, Overlay};
+    use crate::google::DriveQuery;
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.open_drive();
+    let s = h.screen();
+    assert!(s.contains("Google Drive — Recent · loading…"), "{}", s);
+    assert!(s.contains("Loading…"), "{}", s);
+    assert!(h.app.drive_active());
+
+    // The recent listing lands: rows appear, in Drive's order.
+    let seq = h.app.drive_list_seq;
+    h.app.drive_reply(seq, DriveQuery::Recent, Ok(vec![drive_doc("a1", "Annual plan"), drive_doc("b2", "Budget 2026"), drive_doc("c3", "Cover letter")]));
+    let s = h.screen();
+    assert!(s.contains("Google Drive — Recent "), "{}", s);
+    assert!(!s.contains("loading"), "{}", s);
+    assert!(s.contains("Annual plan") && s.contains("Budget 2026") && s.contains("Cover letter"), "{}", s);
+    assert!(!h.app.drive_active());
+
+    // Typing narrows locally at once and arms the paused-typing search.
+    h.type_str("bud");
+    let s = h.screen();
+    assert!(s.contains("Budget 2026") && !s.contains("Annual plan"), "{}", s);
+    assert!(h.app.drive_search_due.is_some());
+    assert!(h.app.drive_active());
+
+    // Once the pause elapses the search fires; its hits that aren't already
+    // listed appear under a divider.
+    h.app.drive_tick_at(std::time::Instant::now() + std::time::Duration::from_secs(1));
+    assert!(matches!(&h.app.overlay, Overlay::Drive(d) if d.searching));
+    let seq = h.app.drive_search_seq;
+    h.app.drive_reply(seq, DriveQuery::Search("bud".into()), Ok(vec![drive_doc("b2", "Budget 2026"), drive_doc("d4", "Buddy list")]));
+    let s = h.screen();
+    assert!(s.contains("more from Drive"), "{}", s);
+    assert!(s.contains("Buddy list"), "{}", s);
+    assert_eq!(s.matches("Budget 2026").count(), 1, "{}", s);
+
+    // Down reaches the search hit; Enter asks to open it.
+    h.key(KeyCode::Down, NONE);
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(h.app.pending, Some(crate::app::Pending::Open { ref id, .. }) if id == "d4"));
+    assert!(matches!(h.app.overlay, Overlay::None));
+    let _ = DriveMode::Recent;
+}
+
+#[test]
+fn drive_dialog_stale_replies_and_urls() {
+    use crate::app::Overlay;
+    use crate::google::DriveQuery;
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.open_drive();
+    let first = h.app.drive_list_seq;
+    // A reply for an older request is not shown (but Esc closes cleanly).
+    h.app.drive_reply(first - 1, DriveQuery::Recent, Ok(vec![drive_doc("x", "Stale")]));
+    assert!(matches!(&h.app.overlay, Overlay::Drive(d) if d.loading && d.rows.is_empty()));
+    // An error is shown in the rows' place.
+    h.app.drive_reply(first, DriveQuery::Recent, Err("Google API 403: quota".into()));
+    let s = h.screen();
+    assert!(s.contains("Could not list Drive: Google API 403"), "{}", s);
+
+    // Pasting a Docs URL opens it directly, whatever is listed.
+    h.app.paste_text("https://docs.google.com/document/d/1AbC_d-e/edit");
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(h.app.pending, Some(crate::app::Pending::Open { ref id, .. }) if id == "1AbC_d-e"));
+}
+
+#[test]
+fn drive_dialog_browses_folders() {
+    use crate::app::{DriveMode, Overlay};
+    use crate::google::DriveQuery;
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.open_drive();
+    let seq = h.app.drive_list_seq;
+    h.app.drive_reply(seq, DriveQuery::Recent, Ok(vec![drive_doc("a1", "Annual plan")]));
+
+    // Tab switches to the folder view, whose top level needs no network.
+    h.key(KeyCode::Tab, NONE);
+    let s = h.screen();
+    assert!(s.contains("Google Drive — Drive "), "{}", s);
+    assert!(s.contains("My Drive/") && s.contains("Shared with me/") && s.contains("Shared drives/"), "{}", s);
+    assert!(!h.app.drive_active());
+
+    // Enter on My Drive lists it (root) once the worker answers.
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(&h.app.overlay, Overlay::Drive(d) if d.loading && d.query() == DriveQuery::Folder("root".into())));
+    assert!(h.screen().contains("Drive / My Drive · loading…"), "{}", h.screen());
+    let seq = h.app.drive_list_seq;
+    h.app.drive_reply(seq, DriveQuery::Folder("root".into()), Ok(vec![drive_folder("f1", "Projects"), drive_doc("d1", "Notes")]));
+    let s = h.screen();
+    assert!(s.contains("Projects/") && s.contains("Notes"), "{}", s);
+
+    // Right descends; the listing is fetched; Left comes back from the
+    // cache without another fetch.
+    h.key(KeyCode::Right, NONE);
+    assert!(h.screen().contains("My Drive / Projects · loading…"), "{}", h.screen());
+    let seq = h.app.drive_list_seq;
+    h.app.drive_reply(seq, DriveQuery::Folder("f1".into()), Ok(vec![drive_doc("p1", "Proposal")]));
+    assert!(h.screen().contains("Proposal"), "{}", h.screen());
+    h.key(KeyCode::Left, NONE);
+    let s = h.screen();
+    assert!(s.contains("Projects/") && !s.contains("loading"), "{}", s);
+    assert!(!h.app.drive_active());
+
+    // Typing filters a folder locally and never searches the server.
+    h.type_str("not");
+    let s = h.screen();
+    assert!(s.contains("Notes") && !s.contains("Projects/"), "{}", s);
+    assert!(h.app.drive_search_due.is_none());
+
+    // Backspace on an empty filter goes up; Tab returns to Recent from the cache.
+    h.key(KeyCode::Char('u'), CTRL);
+    h.key(KeyCode::Backspace, NONE);
+    assert!(h.screen().contains("Google Drive — Drive "), "{}", h.screen());
+    h.key(KeyCode::Tab, NONE);
+    let s = h.screen();
+    assert!(s.contains("Google Drive — Recent") && s.contains("Annual plan") && !s.contains("loading"), "{}", s);
+    assert!(matches!(&h.app.overlay, Overlay::Drive(d) if d.mode == DriveMode::Recent));
 }

@@ -451,9 +451,29 @@ creates in the Google Cloud console and puts in `config.toml` under
 Network calls run from a small queue (`App::pending`) that the main loop
 drains *after* drawing, so the screen shows "Contacting Google…" or the
 sign-in URL while the call blocks; Esc cancels a sign-in. Opening is
-`Open from Google Drive…` (search by name, or paste a Docs URL), the
-`gdoc:<id>` / URL argument on the command line, and `--check` / `--text` /
-`--md` on a `gdoc:` reference for a read-only look. Saving is `Save`: the
+`Open from Google Drive…`, the `gdoc:<id>` / URL argument on the command
+line, and `--check` / `--text` / `--md` on a `gdoc:` reference for a
+read-only look.
+
+`Open from Google Drive…` is a modal like the local Open dialog
+(`Overlay::Drive`), and it is the one place `wp` does network work off the
+main thread. It opens at once on **Recent** — Google Docs ordered by
+Drive's `recency` (last viewed, edited, or shared), the same list the Drive
+web app calls Recent — from a copy cached on disk (`drive-recent.json` in
+the state directory), while a worker thread fetches a fresh listing. Typing
+filters those rows locally, so the common case (a doc you had open lately)
+never waits on the network; a 300 ms pause in typing sends one
+`name contains` search to Drive and shows any hits not already listed
+under a "more from Drive" divider. Every fetch carries a sequence number
+and the dialog only takes the reply it is waiting for, so a slow answer to
+an earlier keystroke can't overwrite a later one. Tab switches to
+**Folders**: My Drive / Shared with me / Shared drives browsed as a tree,
+one `files.list` per folder (`'id' in parents`), cached for the session so
+going back is instant. Enter on a document opens it (blocking, as before);
+a pasted Docs URL opens directly. The main loop polls the terminal at 40 ms
+instead of 250 ms while a listing or search is outstanding. Listings are
+the *only* thing that runs on a worker: the worker gets a clone of the
+client, and a token it refreshes is written to the same file. Saving is `Save`: the
 diff is posted, then the document is re-read so the next save diffs
 against what Google now has (the editor keeps its undo history when the
 re-read has the same shape). A revision conflict is reported, not merged;
@@ -611,8 +631,10 @@ requests, tested against recorded fixtures (`tools/make_gdoc_fixtures.py`):
 typing, deleting, bolding, paragraph formatting, bullets, splitting and
 joining paragraphs, appending, table-cell and footnote edits, page breaks,
 UTF-16 surrogates, tabbed documents, suggestions. The binary's OAuth
-client, Drive listing, open / save / recovery and `--check` (2026-08-29,
-§6a.4). Still to do: live verification against the API — the request
+client, open / save / recovery and `--check` (2026-08-29, §6a.4); the Open
+from Drive modal — cached recents, type-to-filter with a paused-typing
+server search, and a folder view — with its listings on a worker thread
+(2026-08-30). Still to do: live verification against the API — the request
 shapes follow the reference and the newline / paragraph-style semantics in
 §6a.2 follow its documentation, but have not been exercised on a real
 document yet.

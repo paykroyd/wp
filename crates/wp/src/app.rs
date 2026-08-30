@@ -2,11 +2,13 @@
 
 use crate::commands::{info, Cmd, COMMANDS};
 use crate::config::{state_dir, Config, KeymapChoice, ThemeChoice};
-use crate::google;
+use crate::google::{self, DriveEntry, DriveKind, DriveQuery};
 use crate::keymap::{Key, Keymap};
 use crate::palette;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use wp_core::model::*;
 use wp_core::reveal::{self, ParaCode};
@@ -36,9 +38,16 @@ pub struct GdocState {
 pub enum Pending {
     Open { id: String, force: bool },
     Save,
-    List(String),
+    /// Show the Open from Drive dialog (after signing in).
+    Drive,
     SignIn { flow: google::SignIn, then: Box<Pending> },
 }
+
+/// A Drive listing that came back from a worker thread.
+pub type DriveReply = (u64, DriveQuery, Result<Vec<DriveEntry>, String>);
+
+/// How long typing must pause before the dialog asks Drive to search.
+pub const DRIVE_SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
@@ -65,8 +74,6 @@ pub enum PromptKind {
     TabSet,
     TableInsert,
     ColumnWidth,
-    /// Google Drive: a name to search for, or a document URL / `gdoc:<id>`.
-    DriveSearch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,7 +94,6 @@ pub enum ListAction {
     FontColor,
     HighlightColor,
     ListFormat,
-    OpenDrive,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +101,78 @@ pub struct ListItem {
     pub label: String,
     pub detail: String,
     pub value: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriveMode {
+    /// Google Docs by recency, filtered as you type; a pause asks Drive to
+    /// search by name too.
+    Recent,
+    /// My Drive / Shared with me / Shared drives as a directory tree.
+    Folders,
+}
+
+/// One step of the folder view's breadcrumb.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DriveFolder {
+    pub name: String,
+    pub query: DriveQuery,
+}
+
+/// The Open from Drive dialog. The rows shown are the listing for the
+/// current place (recents, or a folder's contents) narrowed by `filter`,
+/// then — in Recent mode — whatever a server-side name search added.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DriveDialog {
+    pub mode: DriveMode,
+    /// Folder mode's breadcrumb; `path[0]` is the roots listing.
+    pub path: Vec<DriveFolder>,
+    pub filter: String,
+    pub rows: Vec<DriveEntry>,
+    /// Search hits that aren't already in `rows`.
+    pub extra: Vec<DriveEntry>,
+    pub selected: usize,
+    /// The listing for `rows` is in flight.
+    pub loading: bool,
+    /// A name search is in flight.
+    pub searching: bool,
+    /// Why the listing failed, shown in place of the rows.
+    pub error: Option<String>,
+}
+
+impl DriveDialog {
+    fn new() -> DriveDialog {
+        DriveDialog { mode: DriveMode::Recent, path: vec![DriveFolder { name: "Drive".into(), query: DriveQuery::Roots }], filter: String::new(), rows: Vec::new(), extra: Vec::new(), selected: 0, loading: false, searching: false, error: None }
+    }
+
+    /// The listing this view shows.
+    pub fn query(&self) -> DriveQuery {
+        match self.mode {
+            DriveMode::Recent => DriveQuery::Recent,
+            DriveMode::Folders => self.path.last().map(|f| f.query.clone()).unwrap_or(DriveQuery::Roots),
+        }
+    }
+
+    /// The rows for the filter: local matches, then the search's extras
+    /// (flagged true).
+    pub fn visible(&self) -> Vec<(&DriveEntry, bool)> {
+        let mut v: Vec<(&DriveEntry, bool)> = self.rows.iter().filter(|e| palette::score(&self.filter, &e.name).is_some()).map(|e| (e, false)).collect();
+        v.extend(self.extra.iter().map(|e| (e, true)));
+        v
+    }
+
+    pub fn title(&self) -> String {
+        let mut t = match self.mode {
+            DriveMode::Recent => "Google Drive — Recent".to_string(),
+            DriveMode::Folders => format!("Google Drive — {}", self.path.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(" / ")),
+        };
+        if self.loading {
+            t.push_str(if self.rows.is_empty() { " · loading…" } else { " · updating…" });
+        } else if self.searching {
+            t.push_str(" · searching…");
+        }
+        t
+    }
 }
 
 /// One row in the Open dialog.
@@ -118,6 +196,8 @@ pub enum Overlay {
     /// as you type; typing a `/` navigates instead. `all` shows every file, not
     /// just the ones wp opens as documents.
     Browse { dir: PathBuf, entries: Vec<FileEntry>, selected: usize, filter: String, all: bool },
+    /// The Open from Google Drive dialog (DESIGN.md §6a.4).
+    Drive(DriveDialog),
     Confirm { question: String, action: ConfirmAction },
     Help,
     Message { title: String, lines: Vec<String> },
@@ -226,6 +306,22 @@ pub struct App {
     pub gdoc: Option<GdocState>,
     google: Option<google::Client>,
     pub pending: Option<Pending>,
+    /// Drive listings come back from worker threads on this channel.
+    drive_tx: mpsc::Sender<DriveReply>,
+    drive_rx: mpsc::Receiver<DriveReply>,
+    /// Sequence numbers: the next to hand out, and the ones whose replies
+    /// the dialog is still waiting for (anything else is stale).
+    drive_seq: u64,
+    pub(crate) drive_list_seq: u64,
+    pub(crate) drive_search_seq: u64,
+    /// When the paused-typing search fires.
+    pub(crate) drive_search_due: Option<Instant>,
+    /// The words the last search asked for, so a pause doesn't repeat it.
+    drive_search_sent: String,
+    /// Listings fetched this session; Recent is also kept on disk so the
+    /// dialog opens with rows before Drive answers.
+    drive_cache: HashMap<DriveQuery, Vec<DriveEntry>>,
+    pub drive_cache_path: Option<PathBuf>,
 }
 
 const UNTITLED: &str = "Untitled";
@@ -234,6 +330,7 @@ impl App {
     pub fn new(cfg: Config) -> App {
         let keymap = Keymap::build(&cfg);
         let hint = cfg.show_hint;
+        let (drive_tx, drive_rx) = mpsc::channel();
         App {
             ed: Editor::new(Document::new()),
             path: None,
@@ -267,6 +364,15 @@ impl App {
             gdoc: None,
             google: None,
             pending: None,
+            drive_tx,
+            drive_rx,
+            drive_seq: 0,
+            drive_list_seq: 0,
+            drive_search_seq: 0,
+            drive_search_due: None,
+            drive_search_sent: String::new(),
+            drive_cache: HashMap::new(),
+            drive_cache_path: Some(state_dir().join("drive-recent.json")),
         }
     }
 
@@ -295,7 +401,7 @@ impl App {
                 self.menu_mouse(menu, item, ev);
                 return;
             }
-            Overlay::Palette { .. } | Overlay::List { .. } | Overlay::ReplacePreview { .. } => {
+            Overlay::Palette { .. } | Overlay::List { .. } | Overlay::Drive(_) | Overlay::ReplacePreview { .. } => {
                 let code = match ev.kind {
                     MouseEventKind::ScrollUp => Some(KeyCode::Up),
                     MouseEventKind::ScrollDown => Some(KeyCode::Down),
@@ -360,6 +466,11 @@ impl App {
             Overlay::Palette { input, .. } => input.push_str(s.lines().next().unwrap_or("")),
             Overlay::List { filter, .. } => filter.push_str(s.lines().next().unwrap_or("")),
             Overlay::Browse { filter, .. } => filter.push_str(s.lines().next().unwrap_or("")),
+            Overlay::Drive(d) => {
+                d.filter.push_str(s.lines().next().unwrap_or(""));
+                d.selected = 0;
+                self.drive_filter_changed();
+            }
             _ => {}
         }
         self.browse_retarget();
@@ -529,7 +640,7 @@ impl App {
 
     /// Run `p` after the next draw.
     pub fn queue(&mut self, p: Pending) {
-        if !matches!(p, Pending::SignIn { .. }) {
+        if !matches!(p, Pending::SignIn { .. } | Pending::Drive) {
             self.message("Contacting Google…");
         }
         self.pending = Some(p);
@@ -539,12 +650,8 @@ impl App {
     /// The queued network action. Signs in first when there is no token,
     /// showing the URL while it waits for the browser to come back.
     pub fn run_pending(&mut self, p: Pending) {
-        if self.google.is_none() {
-            if !self.cfg.google.is_set() {
-                self.message(format!("Google Docs needs an OAuth desktop client: add [google] client_id and client_secret to {}", crate::config::config_path().display()));
-                return;
-            }
-            self.google = Some(google::Client::new(self.cfg.google.clone()));
+        if !self.ensure_google() {
+            return;
         }
         if let Pending::SignIn { flow, then } = p {
             let res = self.google.as_mut().unwrap().finish_sign_in(flow, cancel_pressed);
@@ -581,9 +688,22 @@ impl App {
         match p {
             Pending::Open { id, force } => self.open_gdoc(&id, force),
             Pending::Save => self.save_gdoc(),
-            Pending::List(q) => self.list_gdocs(&q),
+            Pending::Drive => self.open_drive(),
             Pending::SignIn { .. } => {}
         }
+    }
+
+    /// The client, created from config on first use. False (with a message)
+    /// when there is no OAuth client to create it from.
+    fn ensure_google(&mut self) -> bool {
+        if self.google.is_none() {
+            if !self.cfg.google.is_set() {
+                self.message(format!("Google Docs needs an OAuth desktop client: add [google] client_id and client_secret to {}", crate::config::config_path().display()));
+                return false;
+            }
+            self.google = Some(google::Client::new(self.cfg.google.clone()));
+        }
+        true
     }
 
     fn open_gdoc(&mut self, id: &str, force: bool) {
@@ -686,14 +806,183 @@ impl App {
         }
     }
 
-    fn list_gdocs(&mut self, query: &str) {
-        match self.google.as_mut().unwrap().list_documents(query) {
-            Ok(docs) if docs.is_empty() => self.message(if query.trim().is_empty() { "No Google Docs found on your Drive".to_string() } else { format!("No Google Docs named like “{}”", query.trim()) }),
-            Ok(docs) => {
-                let items = docs.into_iter().map(|d| ListItem { label: d.name, detail: d.modified, value: d.id }).collect();
-                self.list("Google Drive", items, ListAction::OpenDrive);
+    // ------------------------------------------------------------------
+    // Open from Drive (DESIGN.md §6a.4)
+    // ------------------------------------------------------------------
+
+    /// Show the Drive dialog on Recent, from the cached rows, and ask Drive
+    /// for a fresh listing.
+    pub fn open_drive(&mut self) {
+        if !self.drive_cache.contains_key(&DriveQuery::Recent) {
+            if let Some(rows) = self.drive_cache_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str::<Vec<DriveEntry>>(&s).ok()) {
+                self.drive_cache.insert(DriveQuery::Recent, rows);
             }
-            Err(e) => self.message(format!("Could not list Google Drive: {}", e)),
+        }
+        self.drive_show(DriveDialog::new(), true);
+    }
+
+    /// Put `d` up showing the listing for its current place: from the cache
+    /// when there is one (fetched again anyway if `refresh`), otherwise
+    /// empty while a worker fetches it.
+    fn drive_show(&mut self, mut d: DriveDialog, refresh: bool) {
+        let q = d.query();
+        d.extra.clear();
+        d.searching = false;
+        d.error = None;
+        d.selected = 0;
+        self.drive_search_due = None;
+        self.drive_search_sent.clear();
+        let cached = if q == DriveQuery::Roots { Some(google::drive_roots()) } else { self.drive_cache.get(&q).cloned() };
+        d.loading = false;
+        match cached {
+            Some(rows) => {
+                d.rows = rows;
+                if refresh && q != DriveQuery::Roots {
+                    d.loading = true;
+                    self.drive_list_seq = self.drive_fetch(q);
+                }
+            }
+            None => {
+                d.rows.clear();
+                d.loading = true;
+                self.drive_list_seq = self.drive_fetch(q);
+            }
+        }
+        self.overlay = Overlay::Drive(d);
+        self.needs_redraw = true;
+    }
+
+    /// Ask a worker thread for a listing; the reply carries the sequence
+    /// number returned. Without a client (headless tests) nothing runs and
+    /// the test answers through `drive_reply`.
+    fn drive_fetch(&mut self, q: DriveQuery) -> u64 {
+        self.drive_seq += 1;
+        let seq = self.drive_seq;
+        if let Some(client) = &self.google {
+            let mut client = client.clone();
+            let tx = self.drive_tx.clone();
+            std::thread::spawn(move || {
+                let r = client.list(&q).map_err(|e| e.to_string());
+                let _ = tx.send((seq, q, r));
+            });
+        }
+        seq
+    }
+
+    /// Descend into a folder-like entry.
+    fn drive_enter(&mut self, mut d: DriveDialog, e: &DriveEntry) {
+        let Some(q) = google::query_for(e) else { return self.overlay = Overlay::Drive(d) };
+        d.mode = DriveMode::Folders;
+        d.path.push(DriveFolder { name: e.name.clone(), query: q });
+        d.filter.clear();
+        self.drive_show(d, false);
+    }
+
+    /// Up one level in the folder view; at the top, or in Recent, nothing.
+    fn drive_up(&mut self, mut d: DriveDialog) {
+        if d.mode == DriveMode::Folders && d.path.len() > 1 {
+            d.path.pop();
+            d.filter.clear();
+            self.drive_show(d, false);
+        } else {
+            self.overlay = Overlay::Drive(d);
+        }
+    }
+
+    fn drive_toggle_mode(&mut self, mut d: DriveDialog) {
+        d.mode = match d.mode {
+            DriveMode::Recent => DriveMode::Folders,
+            DriveMode::Folders => DriveMode::Recent,
+        };
+        d.filter.clear();
+        self.drive_show(d, false);
+    }
+
+    /// The filter changed: in Recent mode, arm the paused-typing search (or
+    /// drop the search when the box is empty again).
+    fn drive_filter_changed(&mut self) {
+        let Overlay::Drive(d) = &mut self.overlay else { return };
+        if d.mode != DriveMode::Recent {
+            return;
+        }
+        if d.filter.trim().is_empty() {
+            d.extra.clear();
+            d.searching = false;
+            self.drive_search_due = None;
+            self.drive_search_sent.clear();
+            self.drive_search_seq = 0;
+        } else {
+            self.drive_search_due = Some(Instant::now() + DRIVE_SEARCH_DEBOUNCE);
+        }
+    }
+
+    /// Something the main loop should poll for quickly: a listing or search
+    /// in flight, or a search about to fire.
+    pub fn drive_active(&self) -> bool {
+        match &self.overlay {
+            Overlay::Drive(d) => d.loading || d.searching || self.drive_search_due.is_some(),
+            _ => false,
+        }
+    }
+
+    /// Called every pass of the main loop: take in worker replies and fire
+    /// a search once typing has paused.
+    pub fn drive_tick(&mut self) {
+        self.drive_tick_at(Instant::now());
+    }
+
+    pub fn drive_tick_at(&mut self, now: Instant) {
+        while let Ok((seq, q, r)) = self.drive_rx.try_recv() {
+            self.drive_reply(seq, q, r);
+        }
+        if self.drive_search_due.map_or(false, |due| now >= due) {
+            self.drive_search_due = None;
+            let Overlay::Drive(d) = &mut self.overlay else { return };
+            let words = d.filter.trim().to_string();
+            if d.mode == DriveMode::Recent && !words.is_empty() && google::parse_doc_ref(&words).is_none() && words != self.drive_search_sent {
+                d.searching = true;
+                self.needs_redraw = true;
+                self.drive_search_sent = words.clone();
+                self.drive_search_seq = self.drive_fetch(DriveQuery::Search(words));
+            }
+        }
+    }
+
+    /// A listing came back. Successful listings are cached whatever the
+    /// dialog is doing now; the dialog itself only takes the reply it is
+    /// waiting for.
+    pub fn drive_reply(&mut self, seq: u64, q: DriveQuery, r: Result<Vec<DriveEntry>, String>) {
+        if let Ok(rows) = &r {
+            if !matches!(q, DriveQuery::Search(_)) {
+                self.drive_cache.insert(q.clone(), rows.clone());
+                if q == DriveQuery::Recent {
+                    if let Some(p) = &self.drive_cache_path {
+                        if let Some(dir) = p.parent() {
+                            let _ = std::fs::create_dir_all(dir);
+                        }
+                        let _ = std::fs::write(p, serde_json::to_string(rows).unwrap_or_default());
+                    }
+                }
+            }
+        }
+        let Overlay::Drive(d) = &mut self.overlay else { return };
+        if seq == self.drive_list_seq && q == d.query() {
+            d.loading = false;
+            match r {
+                Ok(rows) => d.rows = rows,
+                Err(e) => d.error = Some(e),
+            }
+            self.needs_redraw = true;
+        } else if d.searching && seq == self.drive_search_seq && d.mode == DriveMode::Recent {
+            d.searching = false;
+            match r {
+                Ok(rows) => {
+                    let local = d.visible().iter().filter(|(_, x)| !*x).map(|(e, _)| e.id.clone()).collect::<Vec<_>>();
+                    d.extra = rows.into_iter().filter(|e| !local.contains(&e.id)).collect();
+                }
+                Err(e) => self.message(format!("Drive search failed: {}", e)),
+            }
+            self.needs_redraw = true;
         }
     }
 
@@ -934,7 +1223,13 @@ impl App {
                 self.prompt(PromptKind::SaveAs(f), "Save as: ", &init);
             }
             Cmd::OpenFromDrive => {
-                self.prompt(PromptKind::DriveSearch, "Google Drive — name to search, or a Docs URL (Enter lists recent): ", "");
+                if self.ensure_google() {
+                    if self.google.as_ref().unwrap().signed_in() {
+                        self.open_drive();
+                    } else {
+                        self.queue(Pending::Drive);
+                    }
+                }
             }
             Cmd::GoogleSignOut => {
                 if let Some(c) = &mut self.google {
@@ -2455,6 +2750,59 @@ impl App {
                     _ => self.overlay = Overlay::Browse { dir, entries, selected, filter, all },
                 }
             }
+            Overlay::Drive(mut d) => {
+                let n = d.visible().len();
+                let chosen = d.visible().get(d.selected.min(n.saturating_sub(1))).map(|(e, _)| (*e).clone());
+                match ev.code {
+                    KeyCode::Esc => self.drive_search_due = None,
+                    KeyCode::Enter => match google::parse_doc_ref(&d.filter) {
+                        Some(id) => self.queue(Pending::Open { id, force: false }),
+                        None => match chosen {
+                            Some(e) if e.kind == DriveKind::Doc => self.queue(Pending::Open { id: e.id, force: false }),
+                            Some(e) => self.drive_enter(d, &e),
+                            None => self.overlay = Overlay::Drive(d),
+                        },
+                    },
+                    KeyCode::Right => match chosen {
+                        Some(e) if e.kind != DriveKind::Doc => self.drive_enter(d, &e),
+                        _ => self.overlay = Overlay::Drive(d),
+                    },
+                    KeyCode::Left => self.drive_up(d),
+                    KeyCode::Backspace if d.filter.is_empty() => self.drive_up(d),
+                    KeyCode::Tab => self.drive_toggle_mode(d),
+                    KeyCode::Char('f') if key.alt => self.drive_toggle_mode(d),
+                    KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+                        d.selected = match ev.code {
+                            KeyCode::Up => d.selected.saturating_sub(1),
+                            KeyCode::Down => (d.selected + 1).min(n.saturating_sub(1)),
+                            KeyCode::PageUp => d.selected.saturating_sub(BROWSE_ROWS),
+                            KeyCode::PageDown => (d.selected + BROWSE_ROWS).min(n.saturating_sub(1)),
+                            KeyCode::Home => 0,
+                            _ => n.saturating_sub(1),
+                        };
+                        self.overlay = Overlay::Drive(d);
+                    }
+                    KeyCode::Backspace => {
+                        d.filter.pop();
+                        d.selected = 0;
+                        self.overlay = Overlay::Drive(d);
+                        self.drive_filter_changed();
+                    }
+                    KeyCode::Char('u') if key.ctrl => {
+                        d.filter.clear();
+                        d.selected = 0;
+                        self.overlay = Overlay::Drive(d);
+                        self.drive_filter_changed();
+                    }
+                    KeyCode::Char(c) if !key.ctrl && !key.alt && !key.sup => {
+                        d.filter.push(c);
+                        d.selected = 0;
+                        self.overlay = Overlay::Drive(d);
+                        self.drive_filter_changed();
+                    }
+                    _ => self.overlay = Overlay::Drive(d),
+                }
+            }
             Overlay::Confirm { question, action } => match ev.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm(action, true),
                 KeyCode::Char('n') | KeyCode::Char('N') => self.confirm(action, false),
@@ -2521,7 +2869,6 @@ impl App {
 
     fn pick_list(&mut self, action: ListAction, item: &ListItem) {
         match action {
-            ListAction::OpenDrive => self.queue(Pending::Open { id: item.value.clone(), force: false }),
             ListAction::ApplyStyle => {
                 let id = item.value.clone();
                 self.ed.set_style(&id);
@@ -2706,10 +3053,6 @@ impl App {
                 }
                 self.quit_after_save = false;
             }
-            PromptKind::DriveSearch => match google::parse_doc_ref(&v) {
-                Some(id) => self.queue(Pending::Open { id, force: false }),
-                None => self.queue(Pending::List(v)),
-            },
             PromptKind::Find { backward } => {
                 self.find.query = v.clone();
                 self.find.backward = backward;
