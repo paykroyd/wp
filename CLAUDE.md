@@ -76,4 +76,4 @@ built and why; §11 is the current status and gap list), `KEYBINDINGS.md`.
   `Ctrl+Shift+P` there (`Ctrl+K` in classic) — a deliberate spec deviation,
   see DESIGN.md §10a.
 - Commit messages end with the Co-Authored-By / Claude-Session trailers the
-  session provides. Don't push; there is no remote yet.
+  session provides. Don't push without being asked.
