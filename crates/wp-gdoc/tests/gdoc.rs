@@ -102,8 +102,14 @@ fn reads_lists_tables_footnotes_and_objects() {
     assert_eq!(lr.level, 0);
     assert!(d.numbering.is_bullet(lr.num_id, 0));
     assert_eq!(d.paragraphs[3].props.list, Some(lr));
-    assert_eq!(d.paragraphs[2].props.indent_left, Some(720));
-    assert_eq!(d.paragraphs[2].props.hanging, Some(360));
+    // The list's indent lives on the level, not the paragraph.
+    assert_eq!(d.paragraphs[2].props.indent_left, None);
+    assert_eq!(d.paragraphs[2].props.hanging, None);
+    let lvl = d.numbering.level(lr.num_id, 0).unwrap();
+    assert_eq!(lvl.para.indent_left, Some(720));
+    assert_eq!(lvl.para.hanging, Some(360));
+    assert_eq!(lvl.text, "●");
+    assert_eq!(d.numbering.level(lr.num_id, 1).unwrap().para.indent_left, Some(1440));
     // Table: 2×2, cells tagged, grid from column widths.
     let cells: Vec<(String, CellRef)> = (5..9).map(|i| (para_text(d, i), d.paragraphs[i].props.cell.unwrap())).collect();
     assert_eq!(cells[0].0, "A1");
@@ -145,7 +151,11 @@ fn reads_numbered_lists_and_suggestions() {
     let d = &l.doc;
     let lr = d.paragraphs[1].props.list.unwrap();
     assert!(!d.numbering.is_bullet(lr.num_id, 0));
+    assert_eq!(d.numbering.level(lr.num_id, 0).unwrap().text, "%1.");
+    assert_eq!(d.numbering.level(lr.num_id, 1).unwrap().text, "%2.");
+    assert_eq!(d.numbering.level(lr.num_id, 1).unwrap().fmt, wp_core::numbering::NumFmt::LowerLetter);
     assert_eq!(d.paragraphs[2].props.list.unwrap().level, 1);
+    assert_eq!(d.paragraphs[2].props.indent_left, None);
     assert_eq!(d.paragraphs[3].props.list, Some(lr));
     // Suggestions become protected tracked-change wrappers.
     let ins = d.paragraphs[4].items.iter().find_map(|it| match it {
@@ -287,19 +297,21 @@ fn removing_and_adding_bullets() {
     let mut d = l.doc.clone();
     d.paragraphs[3].props.list = None;
     let reqs = diff(&l.baseline, &d).unwrap();
-    assert_eq!(kinds(&reqs), vec!["deleteParagraphBullets"]);
-    assert_eq!(range(&reqs[0]["deleteParagraphBullets"]), (58, 59));
+    assert_eq!(kinds(&reqs), vec!["updateParagraphStyle", "deleteParagraphBullets"]);
+    assert_eq!(range(&reqs[1]["deleteParagraphBullets"]), (58, 59));
     let mut d = l.doc.clone();
     let lr = d.paragraphs[2].props.list;
     d.paragraphs[4].props.list = lr;
     let reqs = diff(&l.baseline, &d).unwrap();
-    assert_eq!(kinds(&reqs), vec!["createParagraphBullets"]);
-    assert_eq!(reqs[0]["createParagraphBullets"]["bulletPreset"], "BULLET_DISC_CIRCLE_SQUARE");
+    // The joining paragraph takes the level's indent, then its bullet.
+    assert_eq!(kinds(&reqs), vec!["updateParagraphStyle", "createParagraphBullets"]);
+    assert_eq!(reqs[0]["updateParagraphStyle"]["paragraphStyle"]["indentStart"]["magnitude"], 36.0);
+    assert_eq!(reqs[1]["createParagraphBullets"]["bulletPreset"], "BULLET_DISC_CIRCLE_SQUARE");
     let l = load("numbered.json");
     let mut d = l.doc.clone();
     d.paragraphs[6].props.list = d.paragraphs[1].props.list;
     let reqs = diff(&l.baseline, &d).unwrap();
-    assert_eq!(reqs[0]["createParagraphBullets"]["bulletPreset"], "NUMBERED_DECIMAL_ALPHA_ROMAN");
+    assert_eq!(reqs[1]["createParagraphBullets"]["bulletPreset"], "NUMBERED_DECIMAL_ALPHA_ROMAN");
 }
 
 #[test]
@@ -530,4 +542,45 @@ fn detach_strips_what_only_docs_can_hold() {
     assert!(!d.paragraphs.iter().any(|p| p.items.iter().any(|it| matches!(it, Item::Code(Code::Opaque(o)) if o.xml.starts_with('{')))));
     // Hyperlinks, footnotes and tracked changes are ordinary `.docx` shapes and stay.
     assert!(d.paragraphs[1].items.iter().any(|it| matches!(it, Item::Code(Code::Opaque(o)) if o.xml.starts_with("<w:hyperlink"))));
+}
+
+#[test]
+fn leaving_a_list_resets_its_indent() {
+    let l = load("report.json");
+    let mut d = l.doc.clone();
+    // Enter twice in wp: the paragraph leaves the list and keeps no indent.
+    d.paragraphs[3].props.list = None;
+    let reqs = diff(&l.baseline, &d).unwrap();
+    assert_eq!(kinds(&reqs), vec!["updateParagraphStyle", "deleteParagraphBullets"]);
+    let u = &reqs[0]["updateParagraphStyle"];
+    assert_eq!(u["fields"], "indentStart,indentFirstLine");
+    assert!(u["paragraphStyle"].get("indentStart").is_none());
+}
+
+#[test]
+fn changing_list_level_changes_the_indent_not_the_list() {
+    let l = load("numbered.json");
+    let mut d = l.doc.clone();
+    // Tab on "Second": level 0 → 1 within the same list.
+    d.paragraphs[3].props.list.as_mut().unwrap().level = 1;
+    let reqs = diff(&l.baseline, &d).unwrap();
+    assert_eq!(kinds(&reqs), vec!["updateParagraphStyle"]);
+    let u = &reqs[0]["updateParagraphStyle"];
+    assert_eq!(u["fields"], "indentStart,indentFirstLine");
+    assert_eq!(u["paragraphStyle"]["indentStart"]["magnitude"], 72.0);
+    assert_eq!(u["paragraphStyle"]["indentFirstLine"]["magnitude"], 54.0);
+}
+
+#[test]
+fn a_new_nested_bullet_is_created_with_leading_tabs() {
+    let l = load("report.json");
+    let mut d = l.doc.clone();
+    let mut lr = d.paragraphs[2].props.list.unwrap();
+    lr.level = 1;
+    d.paragraphs[4].props.list = Some(lr);
+    let reqs = diff(&l.baseline, &d).unwrap();
+    assert_eq!(kinds(&reqs), vec!["updateParagraphStyle", "insertText", "createParagraphBullets"]);
+    assert_eq!(reqs[1]["insertText"]["text"], "\t");
+    assert_eq!(reqs[1]["insertText"]["location"]["index"], 69);
+    assert_eq!(range(&reqs[2]["createParagraphBullets"]), (69, 70));
 }

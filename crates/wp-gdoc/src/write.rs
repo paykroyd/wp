@@ -38,7 +38,7 @@ const UNSUPPORTED_TABLES: &str = "adding, removing or reshaping a table is not s
 /// The requests that turn the document Docs has (the baseline) into `doc`.
 /// Empty when nothing changed.
 pub fn diff(base: &Baseline, doc: &Document) -> Result<Vec<Value>, String> {
-    let mut w = Writer { doc, ctx: Ctx { rels: &doc.extra_rels, footnote_ids: &base.footnote_ids }, tab_id: base.tab_id.as_deref(), groups: Vec::new(), referenced: BTreeSet::new() };
+    let mut w = Writer { doc, ctx: Ctx { numbering: &doc.numbering, rels: &doc.extra_rels, footnote_ids: &base.footnote_ids }, tab_id: base.tab_id.as_deref(), groups: Vec::new(), referenced: BTreeSet::new() };
     // Body.
     let body = base.segments.first().ok_or("baseline has no body")?;
     let mblocks = model_blocks(&doc.paragraphs);
@@ -407,12 +407,22 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
+    /// Bullet requests for a paragraph that has `cur` and should have `want`.
+    /// Within one list the nesting level follows the indent, which the
+    /// paragraph-style request already set; a new list's level is set by
+    /// leading tabs, which `createParagraphBullets` counts and removes.
     fn bullets(&self, reqs: &mut Vec<Value>, seg: Option<&str>, index: i64, cur: Option<ListRef>, want: Option<ListRef>) {
         let range = self.range(seg, index, index + 1);
-        match want {
-            Some(l) if cur != want => reqs.push(json!({ "createParagraphBullets": { "range": range, "bulletPreset": bullet_preset(self.doc, l) } })),
-            None if cur.is_some() => reqs.push(json!({ "deleteParagraphBullets": { "range": range } })),
-            _ => {}
+        match (cur, want) {
+            (Some(c), Some(w)) if c.num_id == w.num_id => {}
+            (_, Some(w)) => {
+                if w.level > 0 {
+                    reqs.push(json!({ "insertText": { "location": self.loc(seg, index), "text": "\t".repeat(w.level as usize) } }));
+                }
+                reqs.push(json!({ "createParagraphBullets": { "range": range, "bulletPreset": bullet_preset(self.doc, w) } }));
+            }
+            (Some(_), None) => reqs.push(json!({ "deleteParagraphBullets": { "range": range } })),
+            (None, None) => {}
         }
     }
 }

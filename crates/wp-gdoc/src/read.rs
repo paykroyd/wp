@@ -6,7 +6,7 @@ use crate::project::ListMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wp_core::model::*;
-use wp_core::numbering::ListKind;
+use wp_core::numbering::{Level, ListKind, NumFmt};
 use wp_core::style::Style;
 use wp_core::Document;
 
@@ -343,7 +343,18 @@ impl Reader {
         if let Some(b) = p.get("bullet") {
             if let Some(list_id) = str_of(b, "listId") {
                 let num_id = self.list_num(list_id);
-                props.list = Some(ListRef { num_id, level: i64_of(b, "nestingLevel").unwrap_or(0).clamp(0, 8) as u8 });
+                let level = i64_of(b, "nestingLevel").unwrap_or(0).clamp(0, 8) as u8;
+                props.list = Some(ListRef { num_id, level });
+                // Docs stores the list's indent on every paragraph; wp keeps
+                // it on the level, so a paragraph that leaves the list or
+                // changes level takes the right indent with it.
+                if let Some(l) = self.doc.numbering.level(num_id, level) {
+                    if props.indent_left == l.para.indent_left && props.first_line_offset() == l.para.first_line_offset() {
+                        props.indent_left = None;
+                        props.first_line = None;
+                        props.hanging = None;
+                    }
+                }
             }
         }
         props.touch();
@@ -489,6 +500,42 @@ impl Reader {
             },
         };
         let n = self.doc.numbering.add_list(kind);
+        // Each level's format and indent as Docs defines them.
+        if let Some(levels) = self.lists_json.get(list_id).and_then(|l| l.get("listProperties")).and_then(|p| p.get("nestingLevels")).and_then(Value::as_array) {
+            let abstract_id = self.doc.numbering.num(n).map(|i| i.abstract_id);
+            if let Some(a) = abstract_id.and_then(|id| self.doc.numbering.abstract_nums.iter_mut().find(|a| a.id == id)) {
+                for (i, lv) in levels.iter().enumerate().take(9) {
+                    let ilvl = i as u8;
+                    let (fmt, text) = match str_of(lv, "glyphType") {
+                        Some("DECIMAL") => (NumFmt::Decimal, docs_glyph_format(lv, ilvl)),
+                        Some("ZERO_DECIMAL") => (NumFmt::DecimalZero, docs_glyph_format(lv, ilvl)),
+                        Some("ALPHA") => (NumFmt::LowerLetter, docs_glyph_format(lv, ilvl)),
+                        Some("UPPER_ALPHA") => (NumFmt::UpperLetter, docs_glyph_format(lv, ilvl)),
+                        Some("ROMAN") => (NumFmt::LowerRoman, docs_glyph_format(lv, ilvl)),
+                        Some("UPPER_ROMAN") => (NumFmt::UpperRoman, docs_glyph_format(lv, ilvl)),
+                        Some(_) => (NumFmt::Decimal, docs_glyph_format(lv, ilvl)),
+                        None => (NumFmt::Bullet, str_of(lv, "glyphSymbol").unwrap_or("•").to_string()),
+                    };
+                    let mut level = Level::new(fmt, &text, ilvl);
+                    if let Some(start) = dim_twips(lv.get("indentStart")) {
+                        level.para.indent_left = Some(start);
+                        if let Some(first) = dim_twips(lv.get("indentFirstLine")) {
+                            let delta = first - start;
+                            level.para.first_line = (delta > 0).then_some(delta);
+                            level.para.hanging = (delta < 0).then_some(-delta);
+                        }
+                    }
+                    if let Some(st) = i64_of(lv, "startNumber") {
+                        level.start = st as i32;
+                    }
+                    if let Some(slot) = a.levels.get_mut(i) {
+                        *slot = level;
+                    } else {
+                        a.levels.push(level);
+                    }
+                }
+            }
+        }
         self.lists.insert(list_id.to_string(), n);
         n
     }
@@ -596,4 +643,26 @@ pub fn para_style_into(ps: &Value, p: &mut ParaProps) {
             })
             .collect();
     }
+}
+
+/// Docs' `glyphFormat` (`%0.`, `%1)`) as a `w:lvlText` (`%1.`, `%2)`): Docs
+/// counts levels from 0, Word from 1.
+fn docs_glyph_format(lv: &Value, ilvl: u8) -> String {
+    let f = str_of(lv, "glyphFormat").unwrap_or("");
+    if f.is_empty() {
+        return format!("%{}.", ilvl + 1);
+    }
+    let mut out = String::new();
+    let mut chars = f.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            if let Some(d) = chars.peek().and_then(|d| d.to_digit(10)) {
+                chars.next();
+                out.push_str(&format!("%{}", d + 1));
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
 }

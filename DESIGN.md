@@ -354,8 +354,11 @@ offset); a `link` becomes the same hyperlink wrapper a Markdown import makes
 ordinary hyperlink. Paragraph style fields become `ParaProps`; `namedStyleType`
 becomes the style id (`HEADING_2` → `Heading2`); `namedStyles` fill the style
 sheet so layout has real sizes; `documentStyle` sets the page. A `bullet`
-becomes a `ListRef` on a numbering definition created per Docs list id from
-its level-0 glyph. Footnote references become `<w:footnoteReference>` items
+becomes a `ListRef` on a numbering definition created per Docs list id,
+its levels' formats and indents taken from the list's `nestingLevels`; the
+indent Docs also stores on each list paragraph is dropped when it is the
+level's own, so in `wp` the indent lives on the level and follows the
+paragraph out of the list or to another level, as it does for `.docx`. Footnote references become `<w:footnoteReference>` items
 numbered in document order, with the bodies read into `Document::footnotes`.
 Tables with no spans become cell-tagged paragraphs (§3.7) with the grid from
 `tableColumnProperties`; a table with spans, a nested table, a table of
@@ -394,8 +397,13 @@ delete / insert hunks; then its characters are compared unit by unit and
 `updateTextStyle` is sent only for the ranges and fields that differ
 (inserted text gets every modelled field, since Docs gives it its
 neighbour's). Paragraph formatting is an `updateParagraphStyle` with a
-field mask of what changed; bullets are `createParagraphBullets` /
-`deleteParagraphBullets`.
+field mask of what changed, the indent being the *effective* one (the list
+level's unless set directly), because Docs keeps a list paragraph's indent
+on the paragraph and derives its nesting level from it. So a level change
+within a list is just an indent change; a paragraph joining a list gets
+`createParagraphBullets` after leading tabs for its level (which the
+request counts and removes); leaving one gets `deleteParagraphBullets`
+plus the indent reset.
 
 Two Docs rules shape the edit script. A container's final newline cannot be
 deleted, so deleting the last paragraph deletes from the previous

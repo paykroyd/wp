@@ -215,16 +215,22 @@ pub struct PSty {
 pub const P_ALL: &str = "namedStyleType,alignment,indentStart,indentEnd,indentFirstLine,spaceAbove,spaceBelow,lineSpacing,keepLinesTogether,keepWithNext,avoidWidowAndOrphan,pageBreakBefore,shading.backgroundColor";
 
 impl PSty {
-    pub fn from_props(p: &ParaProps) -> PSty {
-        let indent_first = if p.first_line.is_some() || p.hanging.is_some() {
-            Some(p.indent_left.unwrap_or(0) + p.first_line_offset())
+    /// The paragraph's formatting as Docs holds it. A list paragraph's
+    /// indent is the list level's unless set directly, because Docs keeps
+    /// it on the paragraph and derives the nesting level from it.
+    pub fn from_props(p: &ParaProps, numbering: &wp_core::Numbering) -> PSty {
+        let level = p.list.and_then(|l| numbering.level(l.num_id, l.level)).map(|l| l.para).unwrap_or_default();
+        let indent_left = p.indent_left.or(level.indent_left);
+        let (first_line, hanging) = if p.first_line.is_some() || p.hanging.is_some() { (p.first_line, p.hanging) } else { (level.first_line, level.hanging) };
+        let indent_first = if first_line.is_some() || hanging.is_some() {
+            Some(indent_left.unwrap_or(0) + hanging.map(|h| -h).unwrap_or(first_line.unwrap_or(0)))
         } else {
             None
         };
         PSty {
             named: p.style.clone(),
             align: p.align,
-            indent_start: p.indent_left,
+            indent_start: indent_left,
             indent_end: p.indent_right,
             indent_first,
             space_above: p.space_before,
@@ -330,6 +336,7 @@ impl Proj {
 
 /// Context for projecting the current document.
 pub struct Ctx<'a> {
+    pub numbering: &'a wp_core::Numbering,
     pub rels: &'a [ExtraRel],
     /// Model footnote id (1-based) → Docs footnote id.
     pub footnote_ids: &'a [String],
@@ -338,7 +345,7 @@ pub struct Ctx<'a> {
 /// Project a paragraph. Errors name what the paragraph holds that has no
 /// place in a Docs document (a footnote created in `wp`, for instance).
 pub fn project(ctx: &Ctx, p: &Paragraph) -> Result<Proj, String> {
-    let para = PSty::from_props(&p.props);
+    let para = PSty::from_props(&p.props, ctx.numbering);
     if p.props.raw_block {
         let raw = p.items.iter().find_map(|i| match i {
             Item::Code(Code::Opaque(o)) => Some(o),
