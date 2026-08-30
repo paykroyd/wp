@@ -834,17 +834,62 @@ fn classic_theme_paints_the_blue_screen() {
     assert_eq!((h.cell(3, 2).fg, h.cell(3, 2).bg), (BLUE, GREY), "the selected item is reversed");
     assert_eq!((h.cell(3, 3).fg, h.cell(3, 3).bg), (GREY, BLUE), "other items are grey on blue");
     // Document colours never reach the classic screen: a Word heading in the
-    // template's dark blue reads as bold white, not blue-on-blue.
+    // template's dark blue reads as bold white (or WP 5.1's size colour for
+    // a Very Large one), not blue-on-blue.
     h.key(KeyCode::Esc, NONE);
     h.app.open_path(&corpus("gen-report.docx")).unwrap();
     let s = h.screen();
     let row = s.lines().position(|l| l.contains("Quarterly")).expect(&s) as u16;
     let col = s.lines().nth(row as usize).unwrap().find("Quarterly").unwrap() as u16;
     let c = h.cell(col, row);
-    assert!(c.fg == WHITE || c.fg == GREY, "heading colour on the classic screen: {:?}", c.fg);
+    const YELLOW: Option<Color> = Some(Color::Rgb(0xFF, 0xFF, 0x55));
+    assert!(c.fg == WHITE || c.fg == GREY || c.fg == YELLOW, "heading colour on the classic screen: {:?}", c.fg);
     assert_eq!(c.bg, BLUE);
     // Without truecolor the nearest ANSI colours stand in.
     let caps = ui::Caps { ascii: false, colors: true, truecolor: false };
     h.term.draw(|f| ui::draw(f, &mut h.app, caps)).unwrap();
     assert_eq!(h.term.backend().buffer()[(0, 5)].style().bg, Some(Color::Blue));
+}
+
+#[test]
+fn sizes_show_as_wp51_attributes_and_the_style_in_the_status_line() {
+    use ratatui::style::{Color, Modifier};
+    use wp_core::model::*;
+    use wp_core::style::Style as WpStyle;
+    use wp_core::Document;
+    let mut h = Harness::new(KeymapChoice::Modern);
+    let mut doc = Document::new();
+    let mut title = WpStyle::para("Title", "Title");
+    title.run.size = Some(52); // 26pt against an 11pt body: Very Large
+    doc.styles.upsert(title);
+    let mut h2 = WpStyle::para("Heading2", "heading 2");
+    h2.run.size = Some(32); // 16pt: Large
+    doc.styles.upsert(h2);
+    let mut p0 = Paragraph::from_text("Title line");
+    p0.props.style = Some("Title".into());
+    let mut p1 = Paragraph::from_text("Heading line");
+    p1.props.style = Some("Heading2".into());
+    let p2 = Paragraph::from_text("Body line");
+    let mut p3 = Paragraph { props: ParaProps::default(), items: vec![Item::Code(Code::On(Attr::Size(16)))] };
+    p3.items.extend("fine".chars().map(Item::Char));
+    p3.items.push(Item::Code(Code::Off(AttrKind::Size)));
+    doc.paragraphs = vec![p0, p1, p2, p3];
+    h.app.ed.replace_document(doc);
+    let s = h.screen();
+    let row = |t: &str| s.lines().position(|l| l.contains(t)).expect(t) as u16;
+    let very = h.cell(1, row("Title line"));
+    assert!(very.add_modifier.contains(Modifier::BOLD), "very large is bold");
+    assert_eq!(very.fg, Some(Color::Cyan), "very large takes the size colour");
+    let large = h.cell(1, row("Heading line"));
+    assert!(large.add_modifier.contains(Modifier::BOLD), "large is bold");
+    assert_ne!(large.fg, Some(Color::Cyan));
+    let body = h.cell(1, row("Body line"));
+    assert!(!body.add_modifier.contains(Modifier::BOLD));
+    assert!(h.cell(1, row("fine")).add_modifier.contains(Modifier::DIM), "fine is dim");
+    // The style name sits in the status line for the cursor's paragraph.
+    assert!(h.screen().lines().last().unwrap().contains("Title"));
+    h.app.ed.move_to(Pos::new(1, 0), false);
+    assert!(h.screen().lines().last().unwrap().contains("Heading 2"));
+    h.app.ed.move_to(Pos::new(2, 0), false);
+    assert!(!h.screen().lines().last().unwrap().contains("Heading 2"));
 }

@@ -59,6 +59,7 @@ fn cga(caps: Caps, idx: u8) -> Color {
     }
 }
 const CGA_BLUE: u8 = 1;
+const CGA_YELLOW: u8 = 14;
 const CGA_CYAN: u8 = 3;
 const CGA_RED: u8 = 4;
 const CGA_GRAY: u8 = 7;
@@ -112,6 +113,9 @@ pub struct Theme {
     pub dim: Color,
     /// Bold runs (classic brightens them; default leaves the modifier alone).
     pub bold_fg: Option<Color>,
+    /// Text at "Very Large" or above (≥ 150 % of the body size), WP 5.1's
+    /// way of showing a size the screen cannot: a colour.
+    pub size_fg: Option<Color>,
     pub status: Style,
     /// The transient message / indicators in the middle of the status line.
     pub status_mid: Style,
@@ -139,6 +143,7 @@ pub fn theme(app: &App, caps: Caps) -> Theme {
             base: Style::default(),
             dim: Color::Reset,
             bold_fg: None,
+            size_fg: None,
             status: rev,
             status_mid: Style::default(),
             bar: rev,
@@ -160,6 +165,7 @@ pub fn theme(app: &App, caps: Caps) -> Theme {
             base: Style::default(),
             dim: Color::DarkGray,
             bold_fg: None,
+            size_fg: Some(Color::Cyan),
             status: Style::default().add_modifier(Modifier::REVERSED),
             status_mid: Style::default().fg(Color::Yellow),
             bar: Style::default().add_modifier(Modifier::REVERSED),
@@ -186,6 +192,7 @@ pub fn theme(app: &App, caps: Caps) -> Theme {
                 base: ground,
                 dim: cga(caps, CGA_CYAN),
                 bold_fg: Some(white),
+                size_fg: Some(cga(caps, CGA_YELLOW)),
                 status: bright,
                 status_mid: bright,
                 bar: bright,
@@ -269,6 +276,11 @@ fn next_row_start(app: &App, row_start: usize) -> usize {
     i
 }
 
+/// The body text size a document's sizes are read against.
+pub fn body_size_hp(doc: &wp_core::Document) -> u16 {
+    doc.styles.resolve_para_style_run(None).size_hp()
+}
+
 fn rgb(c: Rgb) -> Color {
     Color::Rgb(c.0, c.1, c.2)
 }
@@ -295,13 +307,48 @@ fn highlight_color(h: Highlight) -> Color {
     }
 }
 
-fn style_for(props: &RunProps, caps: Caps, th: &Theme) -> Style {
+/// Size classes relative to the body text, as WordPerfect 5.1 named them.
+/// A terminal cannot show a size, so each class gets an attribute instead —
+/// Large is bold, Very Large and above add the theme's size colour, Fine
+/// and Small are dim — and Reveal Codes shows the real points.
+fn size_class(props: &RunProps, base_hp: u16) -> Option<&'static str> {
+    let ratio = props.size_hp() as u32 * 100 / base_hp.max(1) as u32;
+    if ratio >= 150 {
+        Some("very-large")
+    } else if ratio >= 120 {
+        Some("large")
+    } else if ratio <= 85 {
+        Some("small")
+    } else {
+        None
+    }
+}
+
+fn style_for(props: &RunProps, base_hp: u16, caps: Caps, th: &Theme) -> Style {
     let mut s = Style::default();
     if props.is_bold() {
         s = s.add_modifier(Modifier::BOLD);
         if let Some(c) = th.bold_fg {
             s = s.fg(c);
         }
+    }
+    match size_class(props, base_hp) {
+        Some("very-large") => {
+            s = s.add_modifier(Modifier::BOLD);
+            if let Some(c) = th.size_fg {
+                s = s.fg(c);
+            } else if let Some(c) = th.bold_fg {
+                s = s.fg(c);
+            }
+        }
+        Some("large") => {
+            s = s.add_modifier(Modifier::BOLD);
+            if let Some(c) = th.bold_fg {
+                s = s.fg(c);
+            }
+        }
+        Some(_) => s = s.add_modifier(Modifier::DIM),
+        None => {}
     }
     if props.is_italic() {
         s = s.add_modifier(Modifier::ITALIC);
@@ -898,6 +945,7 @@ fn render_screen_line(app: &mut App, pi: usize, line: usize, width: u16, caps: C
     };
     let mut spans: Vec<Span> = Vec::new();
     let x: u16 = sl.indent + align_off;
+    let base_hp = body_size_hp(&app.ed.doc);
     match label {
         Some(l) if !l.text.is_empty() => {
             let first = layout::screen_first_indent(&pp, cols);
@@ -908,7 +956,7 @@ fn render_screen_line(app: &mut App, pi: usize, line: usize, width: u16, caps: C
             }
             let props = app.ed.doc.base_run_props(pi).merge(&l.run);
             spans.push(Span::raw(" ".repeat(lx.min(x) as usize)));
-            spans.push(Span::styled(text.clone(), style_for(&props, caps, &th)));
+            spans.push(Span::styled(text.clone(), style_for(&props, base_hp, caps, &th)));
             spans.push(Span::raw(" ".repeat((x as usize).saturating_sub(lx as usize + text.width()))));
         }
         _ => spans.push(Span::raw(" ".repeat(x as usize))),
@@ -932,7 +980,7 @@ fn render_screen_line(app: &mut App, pi: usize, line: usize, width: u16, caps: C
         if pos == cursor && cursor_x.is_none() {
             cursor_x = Some(x + rel_x);
         }
-        let mut st = style_for(&runs[ri].props, caps, &th);
+        let mut st = style_for(&runs[ri].props, base_hp, caps, &th);
         if sel.map_or(false, |r| r.contains(pos)) {
             st = st.add_modifier(Modifier::REVERSED);
         }
@@ -1077,6 +1125,13 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect, caps: Caps) {
     }
     if let Some(c) = app.ed.current_cell() {
         indicators.push(format!("Cell {}", c.name()));
+    }
+    // The paragraph style at the cursor, when it is not the default one.
+    if let Some(id) = app.ed.doc.paragraphs.get(app.ed.cursor.para).and_then(|p| p.props.style.as_deref()) {
+        let name = app.ed.doc.styles.get(id).map(|s| s.name.as_str()).unwrap_or(id);
+        let mut cs = name.chars();
+        let shown: String = cs.next().map(|c| c.to_uppercase().collect::<String>() + cs.as_str()).unwrap_or_default();
+        indicators.insert(0, shown);
     }
     let msg = app.status_text().unwrap_or_default();
     let right = format!("Doc 1  Pg {}/{}  Ln {:.2}\"  Pos {:.2}\"", pg, pages, ln as f64 / 1440.0, pos as f64 / 1440.0);

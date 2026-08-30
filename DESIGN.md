@@ -494,8 +494,14 @@ file mapping key strings to command ids.
 
 The document region is drawn from the screen layout with visible attributes
 (bold, italic, underline, colour) mapped to terminal attributes and everything
-else — font, size, spacing — rendered honestly as nothing, since a terminal
-can't show it. Reveal Codes is the place those are seen.
+else — font, spacing — rendered honestly as nothing, since a terminal can't
+show it. Size gets WordPerfect 5.1's treatment: WP couldn't show sizes either,
+so its display setup mapped each size attribute to a screen attribute. `wp`
+classes a run's size against the body text — Large (≥ 120 %) is bold, Very
+Large and above (≥ 150 %) bold in the theme's size colour, Fine / Small
+(≤ 85 %) dim — so a Google Docs title, heading and body read as three tiers
+even though none of them is bold. The status line names the paragraph style
+at the cursor. Reveal Codes is the place the real points and fonts are seen.
 
 Box drawing degrades to ASCII and colours to the 16-colour palette when
 `TERM`/`COLORTERM` indicate a basic terminal (§8, "works anywhere").
