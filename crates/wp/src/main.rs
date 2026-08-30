@@ -29,7 +29,7 @@ fn usage() {
     println!("       wp --text FILE.docx        dump a .docx as plain text and exit");
     println!("       wp --md FILE.docx          dump a .docx as Markdown and exit");
     println!("       wp --check FILE.docx       report unsupported content and page count, then exit");
-    println!("       wp --check gdoc:<id>       the same for a Google Doc (also --text, --md); never writes");
+    println!("       wp --check gdoc:<id>       the same for a Google Doc (also --text, --md, --json); never writes");
     println!("       wp --probe-keys            show what your terminal sends for each key, then Esc Esc Esc");
     println!("       wp --version");
 }
@@ -56,6 +56,7 @@ fn main() {
             "--md" => mode = "md",
             "--probe-keys" => mode = "probe",
             "--check" => mode = "check",
+            "--json" => mode = "json",
             _ => match google::parse_doc_ref(a) {
                 Some(id) => gdoc = Some(id),
                 None => file = Some(PathBuf::from(a)),
@@ -176,6 +177,10 @@ fn check_gdoc(cfg: &Config, id: &str, mode: &str) -> anyhow::Result<()> {
         eprintln!("Signed in.");
     }
     let json = client.get_document(id)?;
+    if mode == "json" {
+        println!("{}", json);
+        return Ok(());
+    }
     let l = wp_gdoc::read(&json).map_err(anyhow::Error::msg)?;
     if mode == "text" {
         print!("{}", wp_core::text::to_text(&l.doc, None));

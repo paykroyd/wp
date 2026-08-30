@@ -398,14 +398,15 @@ fn appending_a_paragraph_at_the_end() {
     ed.newline();
     ed.insert_str("Fin");
     let reqs = diff(&l.baseline, &ed.doc).unwrap();
-    assert_eq!(kinds(&reqs), vec!["insertText", "updateTextStyle", "updateParagraphStyle"]);
+    // Paragraph style before text style: a named style resets the latter.
+    assert_eq!(kinds(&reqs), vec!["insertText", "updateParagraphStyle", "updateTextStyle"]);
     assert_eq!(reqs[0]["insertText"]["location"]["index"], 144);
     assert_eq!(reqs[0]["insertText"]["text"], "\nFin");
-    assert_eq!(range(&reqs[1]["updateTextStyle"]), (145, 148));
-    assert_eq!(range(&reqs[2]["updateParagraphStyle"]), (145, 146));
+    assert_eq!(range(&reqs[2]["updateTextStyle"]), (145, 148));
+    assert_eq!(range(&reqs[1]["updateParagraphStyle"]), (145, 146));
     // Enter copies the paragraph's properties, so the new one is set in full.
-    assert_eq!(reqs[2]["updateParagraphStyle"]["fields"], wp_gdoc::project::P_ALL);
-    let ps = &reqs[2]["updateParagraphStyle"]["paragraphStyle"];
+    assert_eq!(reqs[1]["updateParagraphStyle"]["fields"], wp_gdoc::project::P_ALL);
+    let ps = &reqs[1]["updateParagraphStyle"]["paragraphStyle"];
     assert_eq!(ps["spaceAbove"]["magnitude"], 12.0);
     assert_eq!(ps["namedStyleType"], "NORMAL_TEXT");
 }
@@ -419,8 +420,8 @@ fn inserting_a_paragraph_at_the_start() {
     assert_eq!(kind(&reqs[0]).0, "insertText");
     assert_eq!(reqs[0]["insertText"]["location"]["index"], 1);
     assert_eq!(reqs[0]["insertText"]["text"], "Preface\n");
-    assert_eq!(range(&reqs[1]["updateTextStyle"]), (1, 8));
-    assert_eq!(range(&reqs[2]["updateParagraphStyle"]), (1, 2));
+    assert_eq!(range(&reqs[2]["updateTextStyle"]), (1, 8));
+    assert_eq!(range(&reqs[1]["updateParagraphStyle"]), (1, 2));
 }
 
 #[test]
@@ -583,4 +584,28 @@ fn a_new_nested_bullet_is_created_with_leading_tabs() {
     assert_eq!(reqs[1]["insertText"]["text"], "\t");
     assert_eq!(reqs[1]["insertText"]["location"]["index"], 69);
     assert_eq!(range(&reqs[2]["createParagraphBullets"]), (69, 70));
+}
+
+#[test]
+fn bold_typed_into_a_new_paragraph_survives_the_paragraph_style() {
+    let l = load("report.json");
+    let mut ed = Editor::new(l.doc.clone());
+    ed.move_to(l.doc.end_pos(), false);
+    ed.newline();
+    ed.toggle_attr(Attr::Bold(true));
+    ed.insert_str("NEW BOLD");
+    let reqs = diff(&l.baseline, &ed.doc).unwrap();
+    let k = kinds(&reqs);
+    let ps = k.iter().position(|x| x == "updateParagraphStyle").unwrap();
+    let ts = k.iter().position(|x| x == "updateTextStyle").unwrap();
+    assert!(ps < ts, "{:?}", k);
+    assert_eq!(reqs[ts]["updateTextStyle"]["textStyle"]["bold"], true);
+    // And in an existing paragraph whose style also changes.
+    let mut ed = Editor::new(l.doc.clone());
+    ed.move_to(Pos::new(0, 0), false);
+    ed.move_to(Pos::new(0, 9), true);
+    ed.toggle_attr(Attr::Bold(true));
+    ed.doc.paragraphs[0].props.style = Some("Heading2".into());
+    let reqs = diff(&l.baseline, &ed.doc).unwrap();
+    assert_eq!(kinds(&reqs), vec!["updateParagraphStyle", "updateTextStyle"]);
 }

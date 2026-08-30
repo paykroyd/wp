@@ -413,8 +413,11 @@ in full. And a newline inserted into a paragraph creates a paragraph with
 that paragraph's style and bullets, so every inserted paragraph is set in
 full. Requests are generated in groups keyed by baseline index and emitted
 in descending order, so no request shifts the indexes of the ones after it;
-within a paragraph, text operations come before style operations, whose
-ranges are in the paragraph's post-edit coordinates.
+within a paragraph, text operations come first (style ranges are in the
+paragraph's post-edit coordinates), then the paragraph style and bullets,
+then character styles — in that order because applying a named style to a
+paragraph resets its character formatting, verified live: text styles sent
+before the paragraph style were silently undone.
 
 The `batchUpdate` body carries `writeControl.requiredRevisionId` from the
 read, so a save over someone else's concurrent edit is refused by Google

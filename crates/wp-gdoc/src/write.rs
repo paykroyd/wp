@@ -307,12 +307,14 @@ impl<'a> Writer<'a> {
             let mut start = if leading { index + 1 } else { index };
             for &mi in mis {
                 let p = &mp[mi];
-                for (off, len, sty) in style_runs(&p.units) {
-                    reqs.push(json!({ "updateTextStyle": { "range": self.range(seg, start + off, start + off + len), "textStyle": sty.to_json(F_ALL), "fields": field_mask(F_ALL) } }));
-                }
+                // Paragraph style first: applying a named style resets the
+                // paragraph's character formatting, so text styles go after.
                 let (ps, fields) = p.para.to_json(None).unwrap_or((json!({}), P_ALL.into()));
                 reqs.push(json!({ "updateParagraphStyle": { "range": self.range(seg, start, start + 1), "paragraphStyle": ps, "fields": fields } }));
                 self.bullets(&mut reqs, seg, start, src_list, p.list);
+                for (off, len, sty) in style_runs(&p.units) {
+                    reqs.push(json!({ "updateTextStyle": { "range": self.range(seg, start + off, start + off + len), "textStyle": sty.to_json(F_ALL), "fields": field_mask(F_ALL) } }));
+                }
                 start += p.text_len() + 1;
             }
             self.group(key, 1).extend(reqs);
@@ -326,6 +328,7 @@ impl<'a> Writer<'a> {
             }
             let base = b[bi].start;
             let mut reqs = Vec::new();
+            let mut text_styles: Vec<Value> = Vec::new();
             let mut mapped: Vec<Option<usize>> = vec![None; mpp.units.len()];
             if bpp.units != mpp.units {
                 // Text: align on unit kinds, ignoring style.
@@ -390,16 +393,18 @@ impl<'a> Writer<'a> {
                     off += u.len;
                 }
                 for (off, len, need, sty) in runs {
-                    reqs.push(json!({ "updateTextStyle": { "range": self.range(seg, base + off, base + off + len), "textStyle": sty.to_json(need), "fields": field_mask(need) } }));
+                    text_styles.push(json!({ "updateTextStyle": { "range": self.range(seg, base + off, base + off + len), "textStyle": sty.to_json(need), "fields": field_mask(need) } }));
                 }
             }
-            // Paragraph formatting and bullets.
+            // Paragraph formatting and bullets, then character formatting:
+            // a named style applied to the paragraph resets the latter.
             let have = if restyle[bi] { None } else { Some(&bpp.para) };
             if let Some((ps, fields)) = mpp.para.to_json(have) {
                 reqs.push(json!({ "updateParagraphStyle": { "range": self.range(seg, base, base + 1), "paragraphStyle": ps, "fields": fields } }));
             }
             let cur = if restyle[bi] { bp[last].list } else { bpp.list };
             self.bullets(&mut reqs, seg, base, cur, mpp.list);
+            reqs.extend(text_styles);
             if !reqs.is_empty() {
                 self.group(base, 2).extend(reqs);
             }
