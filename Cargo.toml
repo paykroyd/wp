@@ -6,7 +6,7 @@ members = ["crates/wp-core", "crates/wp-docx", "crates/wp-md", "crates/wp-gdoc",
 version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/aykroyd/wp"
+repository = "https://github.com/paykroyd/wp"
 
 [workspace.dependencies]
 wp-core = { path = "crates/wp-core" }

@@ -94,6 +94,47 @@ bottom right — or `theme = "classic"` in the config.
 
 Everything is rebindable in `~/.config/wp/config.toml`.
 
+## Google Docs
+
+`wp` opens and saves Google Docs directly — *File ▸ Open from Google Drive…*
+(recents, search-as-you-type, folders), or from the shell:
+
+```
+wp gdoc:<id>                       open a Google Doc
+wp https://docs.google.com/...     the same, from a URL
+wp --check gdoc:<id>               inspect it (also --text, --md, --json); never writes
+```
+
+Saves are diffs: only the ranges you changed go back, guarded by the revision
+you opened, so a concurrent edit in the browser is caught rather than
+overwritten. An edit the API can't express is reported by name and the
+document stays saveable as `.docx`.
+
+There is no shared app credential — you register your own once, which takes
+about five minutes:
+
+1. In [Google Cloud Console](https://console.cloud.google.com/) create a
+   project (or pick one), then under **APIs & Services ▸ Library** enable the
+   **Google Docs API** and the **Google Drive API**.
+2. **APIs & Services ▸ OAuth consent screen**: External, add yourself as a
+   test user. The app can stay in "Testing" — it never needs verification for
+   your own use.
+3. **APIs & Services ▸ Credentials ▸ Create credentials ▸ OAuth client ID**,
+   application type **Desktop app**. Copy the client ID and secret into
+   `~/.config/wp/config.toml`:
+
+   ```toml
+   [google]
+   client_id = "1234567890-abc.apps.googleusercontent.com"
+   client_secret = "GOCSPX-..."
+   ```
+
+The first Docs command opens your browser to sign in; `wp` listens on a
+loopback port for the redirect. It asks for the `documents` and
+`drive.readonly` scopes only. The refresh token is cached, mode 0600, in
+`~/.local/state/wp/`; *File ▸ Sign Out of Google* deletes it. Nothing runs in
+the background and nothing else is sent anywhere.
+
 ## Find and replace
 
 The find box takes plain text (smart case), or:
