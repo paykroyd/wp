@@ -316,7 +316,10 @@ fn style_for(props: &RunProps, caps: Caps, th: &Theme) -> Style {
     // the classic screen a dark-blue heading would vanish into the ground.
     // Colour and highlight stay visible in Reveal Codes.
     if caps.colors && !th.classic {
-        if let Some(c) = props.color {
+        // A document's black is "the text colour", not a colour: forcing
+        // #000000 makes the text vanish on a dark terminal (Google Docs
+        // sets it explicitly on Normal text).
+        if let Some(c) = props.color.filter(|c| *c != Rgb(0, 0, 0)) {
             s = s.fg(rgb(c));
         }
         if let Some(h) = props.highlight() {
