@@ -1,0 +1,16 @@
+#!/bin/bash
+# wp.app launcher: opens wp in a terminal. Prefers Ghostty when installed,
+# falls back to Terminal.app. On first run, seeds ~/.config/wp/config.toml
+# from the bundled template (never overwrites an existing config).
+set -e
+RES="$(cd "$(dirname "$0")/../Resources" && pwd)"
+CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wp"
+if [ ! -f "$CFG_DIR/config.toml" ] && [ -f "$RES/config.toml" ]; then
+  mkdir -p "$CFG_DIR"
+  cp "$RES/config.toml" "$CFG_DIR/config.toml"
+fi
+if [ -d "/Applications/Ghostty.app" ] || [ -d "$HOME/Applications/Ghostty.app" ]; then
+  exec open -na Ghostty --args --fullscreen -e "$RES/wp"
+else
+  exec open -a Terminal "$RES/wp"
+fi
