@@ -114,7 +114,15 @@ fn place_label(doc: &Document, para: usize, pp: &ParaProps, label: &ListLabel) -
     let props = doc.base_run_props(para).merge(&label.run);
     let width: Twips = label.text.chars().map(|c| metrics::advance(&props, c)).sum();
     let base_x = pp.indent_left();
-    let x = (base_x + pp.first_line_offset()).max(0);
+    // The label starts at the first-line position; a right-aligned level
+    // (`lvlJc="right"`, Word's legal-style numbers) ends there instead,
+    // and a centred one straddles it.
+    let anchor = (base_x + pp.first_line_offset()).max(0);
+    let x = match label.align {
+        Align::Right => (anchor - width).max(0),
+        Align::Center => (anchor - width / 2).max(0),
+        _ => anchor,
+    };
     let end = x + width;
     let text_x = match label.suffix {
         Suffix::Tab => {

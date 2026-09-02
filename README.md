@@ -17,18 +17,22 @@ command palette so nothing has to be memorised.
  Q3-REPORT.DOCX *                      Doc 1  Pg 4/12  Ln 2.70"  Pos 3.40"
 ```
 
-**Status: 0.2 Round-trip.** Take a `.docx` someone sent you, edit it, and send
-it back: what `wp` doesn't edit yet (comments, tracked changes, fields,
-images, nested tables) is shown as a labelled placeholder and preserved
-byte-for-byte — down to Word's revision ids — across a 62-file test corpus.
-Tables are editable (the first piece of 0.3): insert one from the palette,
-Tab between cells, add and remove rows and columns, and Word gets back exactly
-the table it sent. Lists are real Word lists
-with their numbering, find and replace does regular expressions, formatting
-("find bold text in Heading 2") and codes ("find the next page break") with a
-preview before replacing, and Markdown opens and saves with one honest line
-about what it can't carry. See [SPEC.md](SPEC.md) for the product spec and
-[DESIGN.md](DESIGN.md) for how it's built.
+**Status: 0.3 Documents.** Produce a real structured document: tables
+(insert, Tab between cells, rows and columns, merge and split, lines and
+shading, sort, `SUM(ABOVE)` formulas, header rows that repeat on each page),
+sections with their own paper, margins and columns, headers and footers with
+page numbers (edited on their own screen, as WordPerfect did), and a page
+view that draws the page — margins, header, footer and columns in place —
+with the page number correct in both views. Take a `.docx` someone sent you,
+edit it, and send it back: what `wp` doesn't edit yet (comments, tracked
+changes, images, footnotes, nested tables) is shown as a labelled placeholder
+and preserved byte-for-byte — down to Word's revision ids — across a 62-file
+test corpus. Lists are real Word lists with their numbering, find and replace
+does regular expressions, formatting ("find bold text in Heading 2") and codes
+("find the next page break") with a preview before replacing, and Markdown
+opens and saves with one honest line about what it can't carry. See
+[SPEC.md](SPEC.md) for the product spec and [DESIGN.md](DESIGN.md) for how
+it's built.
 
 ## Install
 

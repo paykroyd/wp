@@ -88,7 +88,9 @@ different directions:
 pub struct Document {
     pub paragraphs: Vec<Paragraph>,
     pub styles: StyleSheet,
-    pub section: SectionProps,       // page size, margins, orientation (v0.1: one section)
+    pub section: SectionProps,       // page setup of the final section (§3.8)
+    pub headers: BTreeMap<String, HeaderFooter>,   // header/footer bodies by id
+    pub tables: BTreeMap<u32, Table>,              // grids (§3.7)
     pub defaults: RunProps,          // document defaults (docDefaults in .docx)
 }
 
@@ -205,6 +207,54 @@ control wrapping rows, an unknown element between cells — falls back to a
 single preserved block, exactly the 0.2 behaviour, so nothing is ever
 rewritten into a shape the reader did not understand.
 
+The grid also carries what the user can set: the table's lines
+(`TableBorders`, `w:tblBorders`) and each cell's lines and shading
+(`CellBorders`, `w:tcBorders`, `w:shd`), row height (`w:trHeight`, at least
+or exact), `cantSplit` and the header-row flag. A verbatim `tblPr` / `tcPr`
+is kept as read; when one of these changes, only that child is replaced in
+it (`patch_child`), so `tblLook`, `tblW`, `vAlign` and whatever else Word
+wrote come back untouched. Merging cells is a structural edit like the
+others — spans and `vMerge` on the grid, the merged cells' paragraphs moved
+under the top-left cell — and sorting rows is remove-and-reinsert of the
+data rows' paragraphs. Formulas are ordinary fields: `=SUM(ABOVE)` is a
+`w:fldSimple` wrapper (a paired opaque code) around its result's characters,
+evaluated by `table::evaluate_formula` and refreshed by Recalculate.
+
+### 3.8 Sections and headers
+
+A section ends at a paragraph whose `props.sect_break` holds a
+`SectionProps` (the `.docx` convention: `w:sectPr` inside the last
+paragraph's `w:pPr`); the paragraphs after the last break belong to
+`Document::section`. Nothing else is stored per paragraph, so
+`section::Sections` builds the paragraph → section map in one pass and the
+editor caches it beside the list labels, rebuilding it whenever the
+structure changes. Each paragraph is laid out against its own section's
+column width, and the pager starts pages the way a section's `start` says
+(next page, continuous, odd or even — with a blank page where parity
+demands). A `SectionProps` keeps every `w:sectPr` child verbatim and
+regenerates only the ones that changed (geometry, `w:type`, `w:titlePg`,
+`w:pgNumType`, header and footer references), so a section read from a file
+writes back token-identical unless the user touched it. Inserting a section
+break splits the paragraph and gives the head a copy of the governing
+properties — Word's convention — so the new section inherits the setup and
+headers of the old one; deleting the break code in Reveal Codes merges the
+sections (the earlier text takes the later section's setup, as in Word).
+Enter at the end of a section's last paragraph leaves the break on the new
+last paragraph.
+
+Headers and footers are `HeaderFooter` bodies in `Document::headers`, keyed
+by the relationship id the sections refer to (`HfRef { kind, pages, id }`);
+a body is its own paragraph list with the document's styles, kept as the
+part's raw XML until edited, and written back as a new or regenerated part
+(with its relationship and content type) when it is. The application edits
+a header on its own screen, as WordPerfect 5.1 did (decision E10): the
+header's paragraphs become a scratch document in `App::ed` while the main
+editor waits in `App::hf_edit`, Exit returns, and saving while a header is
+open saves the main document with the header synced. Page-number fields
+(`PAGE`, `NUMPAGES`) are simple fields the page view substitutes on each
+page; a first-page header needs the section's `title_page`, an even-page one
+the document's `even_odd_headers` (the `w:evenAndOddHeaders` setting).
+
 ---
 
 ## 4. Editing and undo
@@ -247,10 +297,19 @@ formatted; paste-plain strips codes.
 Draft view draws the screen layout and overlays page boundaries from the print
 layout: the pagination pass records the `(paragraph, item)` position at which
 each page begins, and draft view draws the `─── Page N ───` rule above the
-screen line containing that position. Page view draws the print layout
-directly, one character cell per… nothing in particular — cells are placed by
-rounding each glyph's twip x-position to a column, which is why page view is
-ragged, and honest (spec §6.4's stated limitation).
+screen line containing that position (and a dotted `┄ Column 2 ┄` rule where
+a text column begins). Page view (`pageview.rs`) draws the print layout
+directly: each page is a box as wide as the paper at `hunit` twips per
+column (the body font's average glyph width, or more when the widest page
+would not fit the terminal) and `vunit` twips per row (the body font's line
+height); the header sits `header_distance` from the top, the footer
+`footer_distance` from the bottom, and every printed line lands on the row
+its top twip falls in — bumped down a row when the previous line of the
+same flow already took it. Glyphs are placed by rounding each one's twip
+x-position to a column and never overwriting the previous glyph, which is
+why page view is ragged, and honest (spec §6.4's stated limitation). The
+view follows the cursor only when the cursor moves, so the wheel can scroll
+to a footer; clicking maps back through the same glyph placement.
 
 ### 5.2 Font metrics
 
@@ -279,10 +338,18 @@ Each paragraph caches its print lines keyed on a content version and the
 available width. An edit bumps one paragraph's version. Re-pagination walks all
 paragraphs summing cached line heights — ~10 k paragraphs for a 500-page
 document, sub-millisecond — so v0.1 does it synchronously on every keystroke.
-The interface (`Layout::paginate(&Document) -> Pagination`) is pure so it can
-move to a background thread when a profile says it must, without changing
-callers. Keep-with-next, keep-lines, widow/orphan, and page-break-before are
-handled in the pagination pass by pulling lines back to the next page.
+The interface (`layout::paginate_with(&Document, layouts, &Sections,
+furniture)`) is pure so it can move to a background thread when a profile
+says it must, without changing callers; `furniture` answers, per section and
+page kind, how much the header and footer take beyond the margins (the
+editor lays out each header body once and caches it). Keep-with-next,
+keep-lines, widow/orphan, and page-break-before are handled in the
+pagination pass by pulling lines back to the next page. A section with
+`w:cols` is filled column by column: the page is full when its last column
+is, and each placed line records its column. Table rows are placed as
+units; a row may run on past the page bottom unless `cantSplit`, and a
+table's header rows are placed again at the top of every page it continues
+onto (`Pagination::repeated_headers`).
 
 ---
 
@@ -550,7 +617,7 @@ clean save or exit.
 |---|---|
 | **0.1 Preview** | Model, editing, undo, character/paragraph formatting, styles, draft view with true page boundaries, `.docx` write, basic `.docx` read, plain text, both keymaps, palette, Reveal Codes (the model makes it nearly free, so it comes early) |
 | **0.2 Round-trip** | Corpus of 62 files with a stricter gate and the fixes it forced; lists from `numbering.xml` with real labels and list commands; regex / format / code search with replace preview; Markdown in and out; mouse; OSC 52 clipboard |
-| 0.3 Documents | Tables, sections, headers/footers, page view |
+| **0.3 Documents** | Tables as cell-tagged paragraphs (§3.7) with every P0-17 operation; sections (§3.8) with per-section page setup, text columns and column breaks; headers and footers edited on their own screen, page-number fields; page view (§5.1); pagination that follows Word's rules for rows, header space and section starts |
 | 1.0 | Footnotes, TOC, cross-refs, captions, index, images, spelling, macros, tutor |
 
 ---
@@ -568,6 +635,9 @@ clean save or exit.
 | E7 | Twips as `i32` | Points as `f32` | Lossless with the file format; no accumulated drift over a long document |
 | E9 | Google Docs as a native format via the Docs API, written as a minimal diff of `batchUpdate` operations (§6a) | Drive's `.docx` export/import; or delete-all-and-reinsert via the API | Both run everything through a converter or a rebuild and lose what `wp` does not model; a diff touches only what the user changed |
 | E8 | Table cells as tagged paragraphs in the flat stream, grid as a property (§3.7) | Nested `Block::Table { rows: Vec<Vec<Vec<Paragraph>>> }` with a path-shaped cursor | Keeps `Pos`, undo, search and the writer unchanged; matches both WordPerfect's stream and `.docx`'s serialisation; structural edits reduce to existing ops |
+| E10 | Headers and footers edited on their own screen, as a document of their own (§3.8) | Editing them in place in page view | WordPerfect 5.1's model, and it keeps `Pos`, undo and every command working unchanged inside a header; page view still shows them in position |
+| E11 | A section break is a paragraph property holding the whole `SectionProps` (§3.8) | A `[Sect]` code in the stream | It is where `.docx` keeps it, so a file's sections write back verbatim; Reveal Codes still shows and deletes it as a code |
+| E12 | A file that puts WordprocessingML in the default namespace (no `w:` prefix) stays preserved blocks | Rewriting it to prefixed form on read | Its attributes would have no namespace either, so Word itself would not open it; guessing what it meant is the one thing principle 1 forbids |
 
 ---
 
@@ -601,9 +671,58 @@ A Cmd/Super layer rides on top of the modern map for terminals that deliver
 it via the kitty keyboard protocol; every Cmd binding has a Ctrl or F-key
 twin, so nothing depends on it.
 
-## 11. Status (2026-08-28)
+## 11. Status (2026-09-02)
 
-**0.2 Round-trip is implemented.** On top of 0.1:
+**0.3 Documents is implemented.** On top of 0.2:
+
+- Tables (§3.7): every P0-17 operation — insert, Tab, rows and columns,
+  merge and split, column width and row height, lines (all / none / outside
+  / inside, per cell), shading, sort by column (numeric or alphabetic,
+  header rows stay), `SUM` / `AVERAGE` / `COUNT` / `MAX` / `MIN` / `PRODUCT`
+  formulas as fields with Recalculate, header rows repeating on each page,
+  rows that split across pages unless `cantSplit`, a literal tab in a cell.
+  A verbatim `tblPr` / `trPr` / `tcPr` has only the changed child replaced.
+- Sections (§3.8): section breaks (new page, continuous, odd, even), page
+  setup per section, text columns (one / two / three) with column breaks,
+  `Sec n/m` in the status line, `[Sect Brk:…]` in Reveal Codes.
+- Headers and footers (§3.8): read and written as parts, edited on their
+  own screen for every page, the first page or even pages, removed per
+  section, `PAGE` / `NUMPAGES` fields, header space taken off the page.
+- Page view (§5.1): the page as a box with margins, header, footer,
+  columns, cell edges, repeated header rows and page numbers; editing,
+  selection and clicking work on it; the wheel scrolls it.
+- Reveal Codes names a list's format (`[List:Decimal "%1." Lvl 1]`) rather
+  than its instance id; right-aligned list labels (`lvlJc="right"`) end at
+  the first-line position.
+
+Measured on the 84-page `gen-long.docx`: page view first render 20 ms,
+0.7 ms per keystroke and render at the end of the document (release).
+
+**Not yet (by milestone):**
+
+- 1.0: footnotes (bodies are read for Markdown export; not laid out),
+  TOC, cross-references, captions, index, images (placeholders only),
+  spelling, macros, tutorial. Also: page view does not draw horizontal
+  table rules or paragraph borders; the Google Docs client does not read a
+  Doc's headers; Markdown images become links.
+- A file that declares WordprocessingML as the default namespace opens as
+  preserved blocks by decision (E12).
+
+**Google Docs, in progress (2026-08-28).** `wp-gdoc` (§6a) reads
+`documents.get` JSON into the model and turns edits into `batchUpdate`
+requests, tested against recorded fixtures (`tools/make_gdoc_fixtures.py`):
+typing, deleting, bolding, paragraph formatting, bullets, splitting and
+joining paragraphs, appending, table-cell and footnote edits, page breaks,
+UTF-16 surrogates, tabbed documents, suggestions. The binary's OAuth
+client, open / save / recovery and `--check` (2026-08-29, §6a.4); the Open
+from Drive modal — cached recents, type-to-filter with a paused-typing
+server search, and a folder view — with its listings on a worker thread
+(2026-08-30). Still to do: live verification against the API — the request
+shapes follow the reference and the newline / paragraph-style semantics in
+§6a.2 follow its documentation, but have not been exercised on a real
+document yet.
+
+**0.2 Round-trip** provided:
 
 - `wp-docx`: the fidelity work in §6.1/§6.3 (element levels, start-tag
   attributes, hints, bookmark ids, verbatim fallbacks), `numbering.xml` read
@@ -623,42 +742,6 @@ twin, so nothing depends on it.
   list), find prompt option toggles (Alt+R/C/W), palette find commands,
   replace preview with one-at-a-time mode, `.md` open/save, `--md`, mouse
   (click, drag, double-click, wheel), bracketed paste, OSC 52 copy.
-
-Known gaps carried into 0.3: a document that declares WordprocessingML as the
-*default* namespace (no `w:` prefix) opens as preserved blocks only; Markdown
-images become links; right-aligned list labels (`lvlJc="right"`) are placed
-left-aligned; `[List:…]` in Reveal Codes shows the instance id rather than
-the format.
-
-**Google Docs, in progress (2026-08-28).** `wp-gdoc` (§6a) reads
-`documents.get` JSON into the model and turns edits into `batchUpdate`
-requests, tested against recorded fixtures (`tools/make_gdoc_fixtures.py`):
-typing, deleting, bolding, paragraph formatting, bullets, splitting and
-joining paragraphs, appending, table-cell and footnote edits, page breaks,
-UTF-16 surrogates, tabbed documents, suggestions. The binary's OAuth
-client, open / save / recovery and `--check` (2026-08-29, §6a.4); the Open
-from Drive modal — cached recents, type-to-filter with a paused-typing
-server search, and a folder view — with its listings on a worker thread
-(2026-08-30). Still to do: live verification against the API — the request
-shapes follow the reference and the newline / paragraph-style semantics in
-§6a.2 follow its documentation, but have not been exercised on a real
-document yet.
-
-**0.3 Documents, in progress — tables (2026-08-28).** The model of §3.7:
-`.docx` tables read into editable cells and write back verbatim (the full
-corpus gate passes with every table fixture parsed, not preserved); insert a
-table (`Table: Insert…`, Alt+F7 in classic), Tab / Shift+Tab between cells
-(Tab at the last cell adds a row), ↑/↓ across rows by column, insert and
-delete rows and columns, delete table, convert to tab-separated text (also
-what deleting `[Tbl Def]` does), column width, header-row flag; draft view
-draws the grid with spans and vertical merges; Reveal Codes shows the
-structure; the status line shows the cell; Markdown tables import as real
-tables and export from them. Still to do for P0-17: merge and split cells
-(spans and merges are preserved and drawn, not created), borders and shading
-as editable properties, sort by column, `SUM`/`AVERAGE` formulas, header rows
-actually repeating in pagination, `cantSplit`, and row heights; a literal tab
-inside a cell (Tab navigates; insert one from the palette outside a cell and
-paste it); page view.
 
 **0.1 Preview** provided:
 
@@ -693,13 +776,6 @@ paste it); page view.
 
 Measured on a 330-page, 142 k-word `.docx`: cold open with full pagination
 70 ms; ~0.2 ms per keystroke including repagination and render; 80 MB RSS.
-
-**Not yet (by milestone):**
-
-- 0.3: page view (the command exists and toggles a status indicator only),
-  the rest of tables (above), headers/footers, multiple sections.
-- 1.0: footnotes, TOC, cross-references, captions, index, images, spelling,
-  macros, tutorial.
 
 The 0.1 fidelity gaps (dropped rsids and paragraph ids, dropped
 `lastRenderedPageBreak` / `proofErr`, body-level bookmarks moved into the next

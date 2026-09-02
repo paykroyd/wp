@@ -148,6 +148,18 @@ pub fn para_codes_at(doc: &crate::Document, para: usize) -> Vec<(ParaCode, Strin
         }
     }
     v.extend(para_codes(&doc.paragraphs[para].props));
+    // The list code names the numbering format, not the instance id.
+    if let Some(l) = doc.paragraphs[para].props.list {
+        if let Some(level) = doc.numbering.level(l.num_id, l.level) {
+            let fmt = format!("{:?}", level.fmt);
+            let label = if level.text.trim().is_empty() || fmt == "Bullet" { format!("[List:{} Lvl {}]", fmt, l.level + 1) } else { format!("[List:{} \"{}\" Lvl {}]", fmt, level.text, l.level + 1) };
+            for entry in v.iter_mut() {
+                if entry.0 == ParaCode::List {
+                    entry.1 = label.clone();
+                }
+            }
+        }
+    }
     v
 }
 
