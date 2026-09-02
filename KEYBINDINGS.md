@@ -232,6 +232,8 @@ Commands with no default key in either map:
 - Columns: Three
 - Columns: Two
 - Continue Previous List
+- Different First Page Header/Footer (toggle)
+- Different Odd and Even Headers/Footers (toggle)
 - F-Key Legend (keyboard template)
 - Find Bold Text
 - Find Code…
@@ -248,10 +250,21 @@ Commands with no default key in either map:
 - Find with Regular Expression…
 - First Line Indent…
 - Font Size…
+- Footer: Edit (every page)
+- Footer: Edit Even-Page Footer
+- Footer: Edit First-Page Footer
+- Footer: Remove from This Section
 - Go to Bookmark…
 - Go to Heading…
+- Header/Footer: Return to Document
+- Header: Edit (every page)
+- Header: Edit Even-Page Header
+- Header: Edit First-Page Header
+- Header: Remove from This Section
 - Highlight…
 - Increase List Level (Demote)
+- Insert Page Count (NUMPAGES)
+- Insert Page Number
 - Insert Section Break (Continuous)
 - Insert Section Break (Even Page)
 - Insert Section Break (New Page)

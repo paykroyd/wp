@@ -1083,6 +1083,27 @@ mod tests {
     }
 
     #[test]
+    fn a_tall_header_shortens_the_page() {
+        use crate::editor::Editor;
+        let text = "line\n".repeat(200);
+        let mut e = Editor::new(crate::text::from_text(text.trim(), false));
+        let before = e.page_count();
+        let mut hf = HeaderFooter::default();
+        hf.kind = Some(HfKind::Header);
+        hf.paragraphs = "h\n".repeat(12).trim().split('\n').map(Paragraph::from_text).collect();
+        e.doc.headers.insert("rId9".into(), hf);
+        e.doc.section.hf.push(HfRef { kind: HfKind::Header, pages: HfPages::Default, id: "rId9".into() });
+        e.invalidate_headers();
+        let after = e.page_count();
+        assert!(after > before, "{} vs {}", before, after);
+        assert!(e.layout.pagination.page_text_height[0] < e.doc.section.text_height());
+        // A short header fits inside the margin and changes nothing.
+        e.doc.headers.get_mut("rId9").unwrap().paragraphs.truncate(1);
+        e.invalidate_headers();
+        assert_eq!(e.page_count(), before);
+    }
+
+    #[test]
     fn table_rows_split_unless_told_not_to_and_headers_repeat() {
         use crate::editor::Editor;
         let mut e = Editor::new(crate::text::from_text("x\ny", false));

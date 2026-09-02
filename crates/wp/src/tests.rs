@@ -227,6 +227,126 @@ fn section_break_scopes_page_setup_and_saves() {
 }
 
 #[test]
+fn headers_read_edit_and_write() {
+    let p = corpus("word-headers-footers.docx");
+    if !p.exists() {
+        return;
+    }
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.open_path(&p).unwrap();
+    let d = &h.app.ed.doc;
+    assert_eq!(d.headers.len(), 2, "{:?}", d.headers.keys());
+    assert_eq!(d.section.hf.len(), 3);
+    assert!(d.section.title_page);
+    assert_eq!(d.section.page_start, Some(3));
+    assert_eq!(d.headers["rId8"].paragraphs[0].text(), "Confidential draft");
+    assert!(d.headers["rId8"].raw.is_some());
+    // Open the header, change it, return.
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("header edit every");
+    h.key(KeyCode::Enter, NONE);
+    assert!(h.app.hf_edit.is_some());
+    let s = h.screen();
+    assert!(s.contains("Confidential draft"), "{}", s);
+    h.app.status = None;
+    h.app.resize(120, 24);
+    h.term = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    let s = h.screen();
+    assert!(s.contains("Header (every page)"), "{}", s);
+    h.key(KeyCode::End, NONE);
+    h.type_str(" v2");
+    h.key(KeyCode::F(7), NONE); // Exit returns to the document
+    assert!(h.app.hf_edit.is_none());
+    assert_eq!(h.app.ed.doc.headers["rId8"].paragraphs[0].text(), "Confidential draft v2");
+    assert!(h.app.ed.doc.headers["rId8"].raw.is_none());
+    assert!(h.app.ed.dirty);
+    let s = h.screen();
+    assert!(s.contains("Paragraph 0."), "back in the document: {}", s);
+    // Saved: the header part is regenerated, the footer part untouched.
+    let dir = std::env::temp_dir().join(format!("wp-hf-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let docx = dir.join("h.docx");
+    let original_footer = wp_docx::read(&p).unwrap().package.get("word/footer1.xml").unwrap().data.clone();
+    h.app.save_to(&docx, crate::app::Format::Docx).unwrap();
+    let l = wp_docx::read(&docx).unwrap();
+    assert_eq!(l.doc.headers["rId8"].paragraphs[0].text(), "Confidential draft v2");
+    assert!(l.package.get_str("word/header1.xml").unwrap().contains("<w:pStyle w:val=\"Header\"/>"));
+    assert_eq!(l.package.get("word/footer1.xml").unwrap().data, original_footer);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn new_footer_with_page_number_saves_and_paginates() {
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("Body text.");
+    // Create a footer with a page number field.
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("footer edit every");
+    h.key(KeyCode::Enter, NONE);
+    assert!(h.app.hf_edit.is_some());
+    h.type_str("Page ");
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("insert page number");
+    h.key(KeyCode::Enter, NONE);
+    h.key(KeyCode::F(3), ALT);
+    let s = h.screen();
+    assert!(s.contains("[Page Num]1[page num]"), "{}", s);
+    h.key(KeyCode::F(3), ALT);
+    // Table insert is refused in a header.
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("Table: Insert…");
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(h.app.overlay, Overlay::None));
+    let s = h.screen();
+    assert!(s.contains("Return to the document first"), "{}", s);
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("return to document");
+    h.key(KeyCode::Enter, NONE);
+    assert!(h.app.hf_edit.is_none());
+    assert_eq!(h.app.ed.doc.headers.len(), 1);
+    assert_eq!(h.app.ed.doc.section.hf.len(), 1);
+    assert_eq!(h.app.ed.doc.section.hf[0].kind, wp_core::HfKind::Footer);
+    // Different first page: a first-page footer is created on request.
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("footer edit first");
+    h.key(KeyCode::Enter, NONE);
+    assert!(h.app.ed.doc.section.title_page);
+    h.type_str("first");
+    h.key(KeyCode::F(7), NONE);
+    assert_eq!(h.app.ed.doc.headers.len(), 2);
+    // Saved as .docx: parts, relationships and content types are all there.
+    let dir = std::env::temp_dir().join(format!("wp-footer-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let docx = dir.join("f.docx");
+    h.app.save_to(&docx, crate::app::Format::Docx).unwrap();
+    let l = wp_docx::read(&docx).unwrap();
+    assert_eq!(l.doc.headers.len(), 2, "{:?}", l.doc.headers.keys());
+    assert_eq!(l.doc.section.hf.len(), 2);
+    assert!(l.doc.section.title_page);
+    let ft = l.doc.headers.values().find(|f| f.paragraphs[0].text() == "Page 1").expect("default footer");
+    assert_eq!(ft.kind, Some(wp_core::HfKind::Footer));
+    assert!(ft.part.as_deref().unwrap().starts_with("word/footer"));
+    let xml = l.package.get_str("word/document.xml").unwrap();
+    assert!(xml.contains("<w:footerReference w:type=\"default\""), "{}", xml);
+    assert!(xml.contains("<w:titlePg/>"), "{}", xml);
+    let ct = l.package.get_str("[Content_Types].xml").unwrap();
+    assert!(ct.contains("footer+xml"), "{}", ct);
+    let part = l.package.get_str(ft.part.as_deref().unwrap()).unwrap();
+    assert!(part.contains("<w:fldSimple w:instr=\"PAGE\">"), "{}", part);
+    assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+    // Reopened, the field still reads as a page number.
+    let mut h2 = Harness::new(KeymapChoice::Modern);
+    h2.app.open_path(&docx).unwrap();
+    h2.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h2.type_str("footer edit every");
+    h2.key(KeyCode::Enter, NONE);
+    h2.key(KeyCode::F(3), ALT);
+    let s = h2.screen();
+    assert!(s.contains("[Page Num]"), "{}", s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn protected_content_refuses_edits() {
     let p = corpus("path-mixed.docx");
     if !p.exists() {

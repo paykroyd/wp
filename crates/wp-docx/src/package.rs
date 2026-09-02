@@ -21,6 +21,7 @@ pub struct DocxPackage {
     pub styles_part: Option<String>,
     pub numbering_part: Option<String>,
     pub footnotes_part: Option<String>,
+    pub settings_part: Option<String>,
     /// Text before the root element of the main part (XML declaration).
     pub prolog: String,
     /// The `w:document` start tag verbatim (namespace declarations).
@@ -101,6 +102,7 @@ impl DocxPackage {
         self.styles_part = find_rel_target(&doc_rels, "/styles", &dir).filter(|t| self.has(t));
         self.numbering_part = find_rel_target(&doc_rels, "/numbering", &dir).filter(|t| self.has(t));
         self.footnotes_part = find_rel_target(&doc_rels, "/footnotes", &dir).filter(|t| self.has(t));
+        self.settings_part = find_rel_target(&doc_rels, "/settings", &dir).filter(|t| self.has(t));
         self.main_part = main;
         Ok(())
     }
@@ -112,6 +114,33 @@ impl DocxPackage {
             format!("_rels/{}.rels", file)
         } else {
             format!("{}/_rels/{}.rels", dir, file)
+        }
+    }
+
+    /// The package name of a part the main part refers to by relationship
+    /// id (a header part, an image).
+    pub fn part_for_rel(&self, id: &str) -> Option<String> {
+        let target = self.rel_target(id)?;
+        let dir = self.main_part.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+        let t = target.trim_start_matches('/');
+        let name = if dir.is_empty() || target.starts_with('/') { t.to_string() } else { format!("{}/{}", dir, t) };
+        if self.has(&name) {
+            Some(name)
+        } else {
+            None
+        }
+    }
+
+    /// A part name of the form `word/<stem><n>.xml` not yet in the package.
+    pub fn free_part_name(&self, stem: &str) -> String {
+        let dir = self.main_part.rsplit_once('/').map(|(d, _)| format!("{}/", d)).unwrap_or_default();
+        let mut n = 1;
+        loop {
+            let name = format!("{}{}{}.xml", dir, stem, n);
+            if !self.has(&name) {
+                return name;
+            }
+            n += 1;
         }
     }
 

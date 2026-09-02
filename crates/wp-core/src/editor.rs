@@ -346,6 +346,7 @@ impl Editor {
     /// Header and footer bodies changed: lay them out again and repaginate.
     pub fn invalidate_headers(&mut self) {
         self.layout.hf.clear();
+        self.layout.labels_dirty = true; // the section map names the headers
         self.layout.pagination_dirty = true;
     }
 
@@ -1068,6 +1069,61 @@ impl Editor {
         self.goal_x = None;
     }
 
+    /// The next free wrapper id for a paired opaque code in this paragraph.
+    fn next_wrapper_id(&self, para: usize) -> u32 {
+        self.doc.paragraphs[para]
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Code(Code::Opaque(o)) => match o.kind {
+                    OpaqueKind::Open(id) | OpaqueKind::Close(id) => Some(id),
+                    OpaqueKind::Element => None,
+                },
+                _ => None,
+            })
+            .max()
+            .map_or(1_000_000, |m| m + 1)
+    }
+
+    /// Insert a simple field (`PAGE`, `NUMPAGES`, `=SUM(ABOVE)`) with its
+    /// current result as text: a paired field wrapper around the result's
+    /// characters, which is how `.docx` fields read back.
+    pub fn insert_field(&mut self, instr: &str, result: &str) {
+        self.commit();
+        if self.has_selection() {
+            self.delete_selection();
+        }
+        let at = self.cursor;
+        let id = self.next_wrapper_id(at.para);
+        let label = field_label(instr);
+        let mut items: Vec<Item> = Vec::with_capacity(result.chars().count() + 2);
+        items.push(Item::Code(Code::Opaque(OpaqueXml {
+            xml: format!("<w:fldSimple w:instr=\"{}\">", instr.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;")),
+            label: label.clone(),
+            kind: OpaqueKind::Open(id),
+            protected: false,
+            deleted: false,
+            hint: false,
+            level: OpaqueLevel::Para,
+        })));
+        items.extend(result.chars().map(Item::Char));
+        items.push(Item::Code(Code::Opaque(OpaqueXml {
+            xml: "</w:fldSimple>".into(),
+            label: label.to_lowercase(),
+            kind: OpaqueKind::Close(id),
+            protected: false,
+            deleted: false,
+            hint: false,
+            level: OpaqueLevel::Para,
+        })));
+        let n = items.len();
+        self.apply(Op::Insert { at, items });
+        self.cursor.idx += n;
+        self.commit();
+        self.anchor = None;
+        self.goal_x = None;
+    }
+
     pub fn insert_str(&mut self, s: &str) {
         self.commit();
         if self.has_selection() {
@@ -1705,6 +1761,29 @@ impl Editor {
         self.dirty = false;
     }
 
+}
+
+/// The Reveal Codes label of a field by its instruction.
+pub fn field_label(instr: &str) -> String {
+    let first = instr.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+    match first.as_str() {
+        "PAGE" => "Page Num".into(),
+        "NUMPAGES" => "Page Count".into(),
+        "DATE" => "Date".into(),
+        s if s.starts_with('=') => format!("Formula:{}", instr.trim()),
+        _ => "Field".into(),
+    }
+}
+
+/// The instruction of a field wrapper opened by this opaque, if it is one.
+pub fn field_instr(o: &OpaqueXml) -> Option<String> {
+    if !matches!(o.kind, OpaqueKind::Open(_)) || !o.xml.starts_with("<w:fldSimple") {
+        return None;
+    }
+    let i = o.xml.find("w:instr=\"")? + 9;
+    let rest = &o.xml[i..];
+    let j = rest.find('"')?;
+    Some(rest[..j].replace("&quot;", "\"").replace("&lt;", "<").replace("&amp;", "&").trim().to_string())
 }
 
 #[cfg(test)]

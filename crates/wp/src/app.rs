@@ -26,6 +26,19 @@ pub enum Format {
     GoogleDoc,
 }
 
+/// A header or footer being edited in its own screen (WordPerfect's way):
+/// `App::ed` holds the header's paragraphs as a document of their own while
+/// the main document's editor waits in `main`.
+pub struct HfEdit {
+    pub id: String,
+    pub kind: HfKind,
+    pub pages: HfPages,
+    /// 1-based number of the section the header was opened from.
+    pub section: usize,
+    pub main: Editor,
+    pub main_scroll: (usize, usize),
+}
+
 /// The Google Doc the editor holds, and the baseline its edits are diffed against.
 pub struct GdocState {
     pub id: String,
@@ -304,6 +317,7 @@ pub struct App {
     mouse_down: bool,
     last_click: Option<(Pos, Instant)>,
     pub gdoc: Option<GdocState>,
+    pub hf_edit: Option<HfEdit>,
     google: Option<google::Client>,
     pub pending: Option<Pending>,
     /// Drive listings come back from worker threads on this channel.
@@ -362,6 +376,7 @@ impl App {
             mouse_down: false,
             last_click: None,
             gdoc: None,
+            hf_edit: None,
             google: None,
             pending: None,
             drive_tx,
@@ -585,6 +600,19 @@ impl App {
     }
 
     pub fn save_to(&mut self, path: &Path, format: Format) -> anyhow::Result<()> {
+        if self.hf_edit.is_some() {
+            // Saving while a header is open: the header's edits go into the
+            // main document first, and the main document is what is saved.
+            self.hf_sync();
+            self.hf_swap();
+            let r = self.save_to_main(path, format);
+            self.hf_swap();
+            return r;
+        }
+        self.save_to_main(path, format)
+    }
+
+    fn save_to_main(&mut self, path: &Path, format: Format) -> anyhow::Result<()> {
         self.ed.commit();
         if format == Format::GoogleDoc {
             self.queue(Pending::Save);
@@ -1034,6 +1062,17 @@ impl App {
     }
 
     pub fn autosave_tick(&mut self) {
+        if self.hf_edit.is_some() {
+            let dirty = self.ed.dirty || self.hf_edit.as_ref().map_or(false, |h| h.main.dirty);
+            if !dirty || self.last_autosave.elapsed() < Duration::from_secs(self.cfg.autosave_seconds.max(5)) {
+                return;
+            }
+            self.hf_sync();
+            self.hf_swap();
+            self.autosave_tick();
+            self.hf_swap();
+            return;
+        }
         if !self.ed.dirty || self.last_autosave.elapsed() < Duration::from_secs(self.cfg.autosave_seconds.max(5)) {
             return;
         }
@@ -1204,6 +1243,47 @@ impl App {
     pub fn exec(&mut self, cmd: Cmd) {
         let sel = self.block_mode;
         let codes = self.reveal;
+        if self.hf_edit.is_some() {
+            match cmd {
+                // Leaving the header screen first, as WordPerfect's F7 did.
+                Cmd::Exit | Cmd::HeaderFooterDone => {
+                    self.hf_close();
+                    return;
+                }
+                Cmd::New | Cmd::Open | Cmd::OpenFromDrive => self.hf_close(),
+                Cmd::TableInsert
+                | Cmd::SectionBreakNextPage
+                | Cmd::SectionBreakContinuous
+                | Cmd::SectionBreakOddPage
+                | Cmd::SectionBreakEvenPage
+                | Cmd::ColumnsOne
+                | Cmd::ColumnsTwo
+                | Cmd::ColumnsThree
+                | Cmd::HeaderEdit
+                | Cmd::HeaderEditFirst
+                | Cmd::HeaderEditEven
+                | Cmd::FooterEdit
+                | Cmd::FooterEditFirst
+                | Cmd::FooterEditEven
+                | Cmd::HeaderRemove
+                | Cmd::FooterRemove
+                | Cmd::TitlePage
+                | Cmd::EvenOddHeaders
+                | Cmd::PageSetup
+                | Cmd::Margins
+                | Cmd::PaperLetter
+                | Cmd::PaperA4
+                | Cmd::Portrait
+                | Cmd::Landscape
+                | Cmd::GoToPage
+                | Cmd::NextPage
+                | Cmd::PrevPage => {
+                    self.message("Return to the document first (Header/Footer: Return to Document, or Exit)");
+                    return;
+                }
+                _ => {}
+            }
+        }
         match cmd {
             Cmd::New => {
                 if self.ed.dirty {
@@ -1715,6 +1795,42 @@ impl App {
                 let label = if total > 1 { format!("Margins for section {} in inches — top bottom left right: ", n) } else { "Margins in inches — top bottom left right: ".to_string() };
                 self.prompt(PromptKind::Margins, &label, &cur);
             }
+            Cmd::HeaderEdit => self.hf_open(HfKind::Header, HfPages::Default),
+            Cmd::HeaderEditFirst => self.hf_open(HfKind::Header, HfPages::First),
+            Cmd::HeaderEditEven => self.hf_open(HfKind::Header, HfPages::Even),
+            Cmd::FooterEdit => self.hf_open(HfKind::Footer, HfPages::Default),
+            Cmd::FooterEditFirst => self.hf_open(HfKind::Footer, HfPages::First),
+            Cmd::FooterEditEven => self.hf_open(HfKind::Footer, HfPages::Even),
+            Cmd::HeaderFooterDone => self.message("Not editing a header or footer"),
+            Cmd::HeaderRemove => self.hf_remove(HfKind::Header),
+            Cmd::FooterRemove => self.hf_remove(HfKind::Footer),
+            Cmd::TitlePage => {
+                let on = !self.ed.section_at(self.ed.cursor.para).title_page;
+                self.section(move |s| s.title_page = on);
+                self.message(if on { "This section's first page has its own header and footer (Header: Edit First-Page Header)" } else { "This section's first page uses the same header and footer as the rest" });
+            }
+            Cmd::EvenOddHeaders => {
+                self.ed.doc.even_odd_headers = !self.ed.doc.even_odd_headers;
+                self.ed.dirty = true;
+                self.ed.invalidate_headers();
+                self.message(if self.ed.doc.even_odd_headers { "Odd and even pages have different headers and footers (Header: Edit Even-Page Header)" } else { "Odd and even pages share headers and footers" });
+            }
+            Cmd::InsertPageNumber => {
+                if self.guard_edit() {
+                    let (pg, _, _) = self.ed.cursor_page_ln_pos();
+                    let n = if self.hf_edit.is_some() { 1 } else { pg };
+                    self.ed.insert_field("PAGE", &n.to_string());
+                }
+            }
+            Cmd::InsertPageCount => {
+                if self.guard_edit() {
+                    let n = match &self.hf_edit {
+                        Some(h) => h.main.layout.pagination.page_count(),
+                        None => self.ed.page_count(),
+                    };
+                    self.ed.insert_field("NUMPAGES", &n.to_string());
+                }
+            }
             Cmd::SectionBreakNextPage => self.section_break(SectionStart::NextPage),
             Cmd::SectionBreakContinuous => self.section_break(SectionStart::Continuous),
             Cmd::SectionBreakOddPage => self.section_break(SectionStart::OddPage),
@@ -2202,6 +2318,136 @@ impl App {
         }
         self.block_mode = false;
         self.reveal_para_code = None;
+    }
+
+    // ------------------------------------------------------------------
+    // Headers and footers (edited on their own screen, as in WordPerfect)
+    // ------------------------------------------------------------------
+
+    /// An id for a new header/footer body: unused in the document and not a
+    /// relationship the package already has.
+    fn new_hf_id(&self) -> String {
+        let mut n = 1;
+        loop {
+            let id = format!("rIdWpHf{}", n);
+            let taken = self.ed.doc.headers.contains_key(&id) || self.package.as_ref().map_or(false, |p| p.rel_target(&id).is_some());
+            if !taken {
+                return id;
+            }
+            n += 1;
+        }
+    }
+
+    /// Open the header or footer of the cursor's section for editing,
+    /// creating it first when the section has none of that kind.
+    fn hf_open(&mut self, kind: HfKind, pages: HfPages) {
+        if !self.guard_edit() {
+            return;
+        }
+        let para = self.ed.cursor.para;
+        let mut sect = self.ed.section_at(para);
+        let (sec_n, secs) = self.ed.cursor_section();
+        let mut created = false;
+        let id = match sect.hf_id(kind, pages) {
+            Some(id) => id.to_string(),
+            None => {
+                let id = self.new_hf_id();
+                let style = match kind {
+                    HfKind::Header => "Header",
+                    HfKind::Footer => "Footer",
+                };
+                let mut p = Paragraph::new();
+                p.props.style = Some(style.into());
+                self.ed.doc.headers.insert(id.clone(), HeaderFooter { kind: Some(kind), paragraphs: vec![p], raw: None, root_tag: None, part: None });
+                sect.hf.push(HfRef { kind, pages, id: id.clone() });
+                if pages == HfPages::First {
+                    sect.title_page = true;
+                }
+                self.ed.set_section_at(para, sect.clone());
+                self.ed.dirty = true;
+                created = true;
+                id
+            }
+        };
+        if pages == HfPages::Even && !self.ed.doc.even_odd_headers {
+            self.ed.doc.even_odd_headers = true;
+            self.ed.dirty = true;
+        }
+        self.ed.invalidate_headers();
+        let hf = self.ed.doc.headers.get(&id).cloned().unwrap_or_default();
+        let mut scratch = wp_core::section::scratch_doc(&self.ed.doc, &hf.paragraphs);
+        scratch.section = sect;
+        scratch.section.columns = 1;
+        scratch.section.hf.clear();
+        let mut sub = Editor::new(scratch);
+        sub.dirty = false;
+        let main = std::mem::replace(&mut self.ed, sub);
+        self.hf_edit = Some(HfEdit { id, kind, pages, section: sec_n, main, main_scroll: self.scroll });
+        self.scroll = (0, 0);
+        self.block_mode = false;
+        self.reveal_para_code = None;
+        self.sync_editor_layout();
+        let which = if secs > 1 { format!("{} for section {} ({})", kind.title(), sec_n, pages.title()) } else { format!("{} ({})", kind.title(), pages.title()) };
+        self.message(if created {
+            format!("New {} — type it here; Exit (F7) returns to the document", which.to_lowercase())
+        } else {
+            format!("Editing the {} — Exit (F7) returns to the document", which.to_lowercase())
+        });
+    }
+
+    /// Copy the header being edited back into the main document.
+    fn hf_sync(&mut self) {
+        let Some(h) = &mut self.hf_edit else { return };
+        if !self.ed.dirty {
+            return;
+        }
+        self.ed.commit();
+        if let Some(hf) = h.main.doc.headers.get_mut(&h.id) {
+            hf.paragraphs = self.ed.doc.paragraphs.clone();
+            hf.raw = None;
+        }
+        h.main.dirty = true;
+        h.main.invalidate_headers();
+        self.ed.dirty = false;
+    }
+
+    /// Swap the header editor and the main editor.
+    fn hf_swap(&mut self) {
+        if let Some(h) = &mut self.hf_edit {
+            std::mem::swap(&mut self.ed, &mut h.main);
+        }
+    }
+
+    /// Leave the header screen.
+    fn hf_close(&mut self) {
+        self.hf_sync();
+        if let Some(h) = self.hf_edit.take() {
+            self.ed = h.main;
+            self.scroll = h.main_scroll;
+            self.block_mode = false;
+            self.reveal_para_code = None;
+            self.sync_editor_layout();
+            self.message("Back in the document");
+        }
+    }
+
+    /// Remove every header (or footer) reference from the cursor's section.
+    fn hf_remove(&mut self, kind: HfKind) {
+        if !self.guard_edit() {
+            return;
+        }
+        let para = self.ed.cursor.para;
+        let mut sect = self.ed.section_at(para);
+        let before = sect.hf.len();
+        sect.hf.retain(|r| r.kind != kind);
+        if sect.hf.len() == before {
+            self.message(format!("This section has no {}", kind.title().to_lowercase()));
+            return;
+        }
+        self.ed.set_section_at(para, sect);
+        self.ed.invalidate_headers();
+        let (n, secs) = self.ed.cursor_section();
+        self.message(if secs > 1 { format!("{} removed from section {} (Undo restores it)", kind.title(), n) } else { format!("{} removed (Undo restores it)", kind.title()) });
     }
 
     fn apply_style_named(&mut self, id: &str) {

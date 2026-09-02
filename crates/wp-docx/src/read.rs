@@ -118,6 +118,31 @@ pub fn read_bytes(bytes: &[u8]) -> Result<Loaded> {
     if let Some(xml) = package.footnotes_part.as_deref().and_then(|p| package.get_str(p)) {
         doc.footnotes = parse_footnotes(&xml, &mut ctx);
     }
+    // Header and footer bodies, one per relationship id any section refers to.
+    let mut ids: Vec<HfRef> = doc.section.hf.clone();
+    for p in &doc.paragraphs {
+        if let Some(s) = &p.props.sect_break {
+            ids.extend(s.hf.iter().cloned());
+        }
+    }
+    for r in ids {
+        if doc.headers.contains_key(&r.id) {
+            continue;
+        }
+        let Some(part) = package.part_for_rel(&r.id) else { continue };
+        let Some(xml) = package.get_str(&part) else { continue };
+        match parse_header_part(&xml, &mut ctx) {
+            Ok(mut hf) => {
+                hf.kind = Some(r.kind);
+                hf.part = Some(part);
+                doc.headers.insert(r.id.clone(), hf);
+            }
+            Err(_) => ctx.warn("header or footer"),
+        }
+    }
+    if let Some(xml) = package.settings_part.as_deref().and_then(|p| package.get_str(p)) {
+        doc.even_odd_headers = children_of(&xml).iter().any(|c| c.tag == "w:evenAndOddHeaders" && start_tag(&c.xml).map_or(true, |t| attr_bool(&t, "w:val")));
+    }
 
 
 
@@ -312,6 +337,96 @@ fn parse_document(xml: &str, ctx: &mut Ctx) -> Result<ParsedDoc> {
     Ok((paragraphs, section, prolog, root_tag, pre_body, had_sectpr, tables))
 }
 
+/// Parse a header or footer part (`w:hdr` / `w:ftr`): paragraphs become
+/// paragraphs, anything else (a table, a content control) a preserved block.
+pub fn parse_header_part(xml: &str, ctx: &mut Ctx) -> Result<HeaderFooter> {
+    let bom = if xml.starts_with('\u{feff}') { "\u{feff}" } else { "" };
+    let xml = &xml[bom.len()..];
+    let mut reader = Reader::from_str(xml);
+    let mut hf = HeaderFooter::default();
+    let mut in_root = false;
+    let mut pending: Vec<Item> = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                let n = name.as_ref().to_vec();
+                if !in_root {
+                    if matches!(local(&n), b"hdr" | b"ftr") {
+                        hf.root_tag = Some(xml[before..reader.buffer_position() as usize].to_string());
+                        in_root = true;
+                    } else {
+                        let _ = reader.read_to_end(name);
+                    }
+                    continue;
+                }
+                let _ = reader.read_to_end(name);
+                let after = reader.buffer_position() as usize;
+                let raw = &xml[before..after];
+                match n.as_slice() {
+                    b"w:p" => {
+                        let mut p = parse_paragraph(raw, ctx)?;
+                        if !pending.is_empty() {
+                            let mut items = std::mem::take(&mut pending);
+                            items.append(&mut p.items);
+                            p.items = items;
+                        }
+                        hf.paragraphs.push(p);
+                    }
+                    _ => {
+                        let label = block_label(&n, raw);
+                        ctx.warn(&format!("{} in a header or footer", warning_label_for_block(&n)));
+                        hf.paragraphs.push(raw_block(raw, &label));
+                    }
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if !in_root {
+                    continue;
+                }
+                let after = reader.buffer_position() as usize;
+                let n = e.name().as_ref().to_vec();
+                match n.as_slice() {
+                    b"w:p" => {
+                        let attrs = tag_attrs(&e);
+                        let props = ParaProps { p_attrs: if attrs.is_empty() { None } else { Some(attrs) }, ..Default::default() };
+                        let items = std::mem::take(&mut pending);
+                        hf.paragraphs.push(Paragraph { props, items });
+                    }
+                    b"w:bookmarkStart" | b"w:bookmarkEnd" => pending.push(bookmark_item(&e, &xml[before..after], ctx, OpaqueLevel::Body)),
+                    _ => {
+                        let label = element_label(&n, ctx);
+                        pending.push(Item::Code(Code::Opaque(OpaqueXml::element(&xml[before..after], label).at(OpaqueLevel::Body))));
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                if matches!(local(e.name().as_ref()), b"hdr" | b"ftr") {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(anyhow!("XML error in header: {}", e)),
+            _ => {}
+        }
+    }
+    if !in_root {
+        return Err(anyhow!("not a header or footer part"));
+    }
+    if !pending.is_empty() {
+        match hf.paragraphs.last_mut() {
+            Some(p) => p.items.append(&mut pending),
+            None => hf.paragraphs.push(Paragraph { props: ParaProps::default(), items: pending }),
+        }
+    }
+    if hf.paragraphs.is_empty() {
+        hf.paragraphs.push(Paragraph::new());
+    }
+    hf.raw = Some(format!("{}{}", bom, xml));
+    Ok(hf)
+}
+
 pub(crate) fn raw_block(raw: &str, label: &str) -> Paragraph {
     Paragraph {
         props: ParaProps { raw_block: true, ..Default::default() },
@@ -486,34 +601,40 @@ fn parse_para_content(
                     | b"w:fldSimple" | b"w:dir" | b"w:bdo" => {
                         let id = ctx.wrapper_id();
                         let after_start = reader.buffer_position() as usize;
-                        let (label, protected, deleted) = match n.as_slice() {
-                            b"w:hyperlink" => ("Hyperlink", false, false),
+                        let (label, protected, deleted): (String, bool, bool) = match n.as_slice() {
+                            b"w:hyperlink" => ("Hyperlink".into(), false, false),
                             b"w:ins" => {
                                 ctx.warn("tracked change");
-                                ("Inserted Text", true, false)
+                                ("Inserted Text".into(), true, false)
                             }
                             b"w:del" => {
                                 ctx.warn("tracked change");
-                                ("Deleted Text", true, true)
+                                ("Deleted Text".into(), true, true)
                             }
                             b"w:moveFrom" => {
                                 ctx.warn("tracked change");
-                                ("Moved Text (from)", true, true)
+                                ("Moved Text (from)".into(), true, true)
                             }
                             b"w:moveTo" => {
                                 ctx.warn("tracked change");
-                                ("Moved Text (to)", true, false)
+                                ("Moved Text (to)".into(), true, false)
                             }
                             b"w:fldSimple" => {
-                                ctx.warn("field");
-                                ("Field", false, false)
+                                // Page numbers and formulas are wp's own; anything
+                                // else is preserved and reported.
+                                let instr = attr(&e, "w:instr").unwrap_or_default();
+                                let known = wp_core::editor::field_label(&instr);
+                                if known == "Field" {
+                                    ctx.warn("field");
+                                }
+                                (known, false, false)
                             }
-                            _ => ("Tagged Text", false, false),
+                            _ => ("Tagged Text".into(), false, false),
                         };
                         let inherited_deleted = wrappers.last().map(|w| w.1).unwrap_or(false);
                         para.items.push(Item::Code(Code::Opaque(OpaqueXml {
                             xml: xml[before..after_start].to_string(),
-                            label: label.into(),
+                            label: label.clone(),
                             kind: OpaqueKind::Open(id),
                             protected,
                             deleted: deleted || inherited_deleted,

@@ -69,6 +69,7 @@ pub fn write_bytes(doc: &Document, pkg: Option<&DocxPackage>) -> Result<Vec<u8>>
         register_part(&mut pkg, &part, "footnotes", "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml");
         pkg.footnotes_part = Some(part);
     }
+    write_headers(doc, &mut pkg, &ctx);
     if doc.numbering.dirty {
         let part = pkg.numbering_part.clone().unwrap_or_else(|| {
             let dir = pkg.main_part.rsplit_once('/').map(|(d, _)| format!("{}/", d)).unwrap_or_default();
@@ -80,6 +81,105 @@ pub fn write_bytes(doc: &Document, pkg: Option<&DocxPackage>) -> Result<Vec<u8>>
     }
     pkg.to_bytes()
 
+}
+
+const HDR_ROOT: &str = concat!(
+    "<w:hdr xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",
+    "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" ",
+    "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" ",
+    "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\">"
+);
+
+/// Write every header and footer body: untouched ones are already in the
+/// package verbatim; edited or new ones are rendered into their part (a
+/// new part is created and related for a body that has none yet). The
+/// odd/even setting goes into the settings part.
+fn write_headers(doc: &Document, pkg: &mut DocxPackage, ctx: &Ctx) {
+    for (id, hf) in &doc.headers {
+        let kind = hf.kind.unwrap_or(HfKind::Header);
+        let (stem, rel, ct) = match kind {
+            HfKind::Header => ("header", "header", "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"),
+            HfKind::Footer => ("footer", "footer", "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"),
+        };
+        let part = match &hf.part {
+            Some(p) => p.clone(),
+            None => pkg.free_part_name(stem),
+        };
+        if hf.raw.is_some() && pkg.has(&part) {
+            continue;
+        }
+        let scratch = wp_core::section::scratch_doc(doc, &hf.paragraphs);
+        let mut out = String::new();
+        out.push_str(XML_DECL);
+        match &hf.root_tag {
+            Some(t) => out.push_str(t),
+            None => out.push_str(&HDR_ROOT.replace("w:hdr", if kind == HfKind::Footer { "w:ftr" } else { "w:hdr" })),
+        }
+        let mut ids = BookmarkIds::new(&pkg.bookmark_ids);
+        for i in 0..scratch.paragraphs.len() {
+            render_paragraph(&scratch, i, &mut out, ctx, &mut ids);
+        }
+        out.push_str(if kind == HfKind::Footer { "</w:ftr>" } else { "</w:hdr>" });
+        pkg.put(&part, out.into_bytes());
+        ensure_content_type(pkg, &part, ct);
+        let dir = pkg.main_part.rsplit_once('/').map(|(d, _)| format!("{}/", d)).unwrap_or_default();
+        let target = part.strip_prefix(&dir).unwrap_or(&part).to_string();
+        add_relationship(pkg, id, rel, &target, false);
+    }
+    // Odd/even headers: a document setting.
+    if let Some(part) = pkg.settings_part.clone().or_else(|| if pkg.has("word/settings.xml") { Some("word/settings.xml".into()) } else { None }) {
+        if let Some(xml) = pkg.get_str(&part) {
+            let has = children_of(&xml).iter().any(|c| c.tag == "w:evenAndOddHeaders" && start_tag(&c.xml).map_or(true, |t| attr_bool(&t, "w:val")));
+            if has != doc.even_odd_headers {
+                let mut children = children_of(&xml);
+                children.retain(|c| c.tag != "w:evenAndOddHeaders");
+                if doc.even_odd_headers {
+                    let at = children.iter().position(|c| SETTINGS_AFTER_EVEN_ODD.contains(&c.tag.as_str())).unwrap_or(children.len());
+                    children.insert(at, RawChild { tag: "w:evenAndOddHeaders".into(), xml: "<w:evenAndOddHeaders/>".into() });
+                }
+                let root_start = xml.find("<w:settings").unwrap_or(0);
+                let root_end = xml[root_start..].find('>').map(|i| root_start + i + 1).unwrap_or(root_start);
+                let mut new = String::new();
+                new.push_str(&xml[..root_end]);
+                for c in children {
+                    new.push_str(&c.xml);
+                }
+                new.push_str("</w:settings>");
+                pkg.put(&part, new.into_bytes());
+            }
+        }
+    }
+}
+
+/// Settings children that come after `w:evenAndOddHeaders` in CT_Settings.
+const SETTINGS_AFTER_EVEN_ODD: &[&str] = &[
+    "w:bookFoldRevPrinting", "w:bookFoldPrinting", "w:bookFoldPrintingSheets", "w:drawingGridHorizontalSpacing",
+    "w:drawingGridVerticalSpacing", "w:displayHorizontalDrawingGridEvery", "w:displayVerticalDrawingGridEvery",
+    "w:doNotUseMarginsForDrawingGridOrigin", "w:drawingGridHorizontalOrigin", "w:drawingGridVerticalOrigin",
+    "w:doNotShadeFormData", "w:noPunctuationKerning", "w:characterSpacingControl", "w:printTwoOnOne",
+    "w:strictFirstAndLastChars", "w:noLineBreaksAfter", "w:noLineBreaksBefore", "w:savePreviewPicture",
+    "w:doNotValidateAgainstSchema", "w:saveInvalidXml", "w:ignoreMixedContent", "w:alwaysShowPlaceholderText",
+    "w:doNotDemarcateInvalidXml", "w:saveXmlDataOnly", "w:useXSLTWhenSaving", "w:saveThroughXslt",
+    "w:showXMLTags", "w:alwaysMergeEmptyNamespace", "w:updateFields", "w:hdrShapeDefaults", "w:footnotePr",
+    "w:endnotePr", "w:compat", "w:docVars", "w:rsids", "m:mathPr", "w:attachedSchema", "w:themeFontLang",
+    "w:clrSchemeMapping", "w:doNotIncludeSubdocsInStats", "w:doNotAutoCompressPictures", "w:forceUpgrade",
+    "w:captions", "w:readModeInkLockDown", "w:smartTagType", "sl:schemaLibrary", "w:shapeDefaults",
+    "w:doNotEmbedSmartTags", "w:decimalSymbol", "w:listSeparator",
+];
+
+/// Make sure the content types part names `part`'s type.
+pub fn ensure_content_type(pkg: &mut DocxPackage, part: &str, content_type: &str) {
+    let ct_name = "[Content_Types].xml";
+    let ct = pkg.get_str(ct_name).unwrap_or_else(|| format!("{}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"></Types>", XML_DECL));
+    let part_name = format!("/{}", part);
+    if !ct.contains(&format!("PartName=\"{}\"", part_name)) {
+        let ov = format!("<Override PartName=\"{}\" ContentType=\"{}\"/>", part_name, content_type);
+        let new = match ct.rfind("</Types>") {
+            Some(i) => format!("{}{}{}", &ct[..i], ov, &ct[i..]),
+            None => ct,
+        };
+        pkg.put(ct_name, new.into_bytes());
+    }
 }
 
 /// Add a relationship of the main part if no relationship with that id exists.

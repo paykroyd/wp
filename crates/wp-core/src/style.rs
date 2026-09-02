@@ -154,6 +154,19 @@ impl StyleSheet {
         ns.para.line_spacing = Some(LineSpacing::Auto(240));
         s.styles.push(ns);
 
+        // Word's Header and Footer: no spacing, a centre tab and a right tab.
+        for (id, name) in [("Header", "header"), ("Footer", "footer")] {
+            let mut st = Style::para(id, name);
+            st.based_on = Some("Normal".into());
+            st.para.space_after = Some(0);
+            st.para.line_spacing = Some(LineSpacing::Auto(240));
+            st.para.tabs = vec![
+                TabStop { pos: 4680, kind: TabKind::Center, leader: TabLeader::None, clear: false },
+                TabStop { pos: 9360, kind: TabKind::Right, leader: TabLeader::None, clear: false },
+            ];
+            s.styles.push(st);
+        }
+
         let mut strong = Style::character("Strong", "Strong");
         strong.run.bold = Some(true);
         s.styles.push(strong);

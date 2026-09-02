@@ -227,8 +227,11 @@ pub fn to_markdown(doc: &Document, rels: &dyn Fn(&str) -> Option<String>) -> Exp
     let mut out = String::new();
     let mut losses = Losses::default();
     let labels = doc.list_labels();
-    if doc.section != SectionProps::default() {
+    if doc.section != SectionProps::default() || doc.paragraphs.iter().any(|p| p.props.sect_break.is_some()) {
         losses.flag("page setup");
+    }
+    if !doc.headers.is_empty() {
+        losses.flag("headers and footers");
     }
     let mut prev_code_block = false;
     let mut i = 0;
