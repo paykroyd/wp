@@ -698,13 +698,7 @@ pub fn pos_at(app: &mut App, x: u16, y: u16) -> Option<Pos> {
             let pp = app.ed.doc.para_props(para);
             let sl = app.ed.screen_lines(para)[line].clone();
             let width = app.size.0.saturating_sub(2);
-            let slack = width.saturating_sub(sl.indent).saturating_sub(sl.width);
-            let align_off = match pp.align() {
-                Align::Center => slack / 2,
-                Align::Right => slack,
-                _ => 0,
-            };
-            let x0 = 1 + sl.indent + align_off;
+            let x0 = 1 + sl.indent + layout::align_offset(&pp, &sl, width);
             let _ = cols;
             let p = &app.ed.doc.paragraphs[para];
             let idx = layout::screen_idx_at_x(p, &pp, &sl, x.saturating_sub(x0));
@@ -935,14 +929,7 @@ fn render_screen_line(app: &mut App, pi: usize, line: usize, width: u16, caps: C
     let runs = app.ed.doc.runs(pi);
     let p = &app.ed.doc.paragraphs[pi];
     let mut cursor_x: Option<u16> = None;
-    // Alignment offset.
-    let avail = width.saturating_sub(sl.indent);
-    let slack = avail.saturating_sub(sl.width);
-    let align_off = match pp.align() {
-        Align::Center => slack / 2,
-        Align::Right => slack,
-        _ => 0,
-    };
+    let align_off = layout::align_offset(&pp, &sl, width);
     let mut spans: Vec<Span> = Vec::new();
     let x: u16 = sl.indent + align_off;
     let base_hp = body_size_hp(&app.ed.doc);

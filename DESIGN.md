@@ -236,8 +236,13 @@ formatted; paste-plain strips codes.
   metrics, in twips. This is the source of page numbers, `Ln`, and `Pos`. It
   exists whether or not the user is looking at it (spec §6.4: "computes real
   pagination whether or not it's drawing the page").
-- **Screen layout** — lines wrapped to the terminal's column count for draft
-  view.
+- **Screen layout** — the rows draft view draws. By default
+  (`WrapMode::Page`) each printed line is one row, so a page on screen is as
+  tall as a page on paper — WordPerfect 5.1's editing screen; a printed line
+  wider than the terminal continues onto extra rows
+  (`screen_lines_from_print`). `WrapMode::Terminal` (config
+  `draft_wrap = "terminal"`) re-wraps to the column count instead
+  (`wrap_screen`). Both share one wrapping routine over an item range.
 
 Draft view draws the screen layout and overlays page boundaries from the print
 layout: the pagination pass records the `(paragraph, item)` position at which
@@ -669,7 +674,7 @@ paste it); page view.
   only what changed. The corpus gate test passes on three fixtures (a
   python-docx document, an empty document, and a hand-built pathological one
   with `w:ins`/`w:del`, comments, fields, hyperlinks, SDTs, and a table).
-- `wp`: draft view with true page rules and paragraph-spacing gaps, status
+- `wp`: draft view with page-wrapped rows (one per printed line), true page rules and paragraph-spacing gaps, status
   block, Reveal Codes pane with editable codes and paragraph pseudo-codes,
   command palette with `> @ # / ?` modes and key labels, WordPerfect-style
   pull-down menus (`F10` / `Alt+=`; the bar is on by default and View ▸ Menu

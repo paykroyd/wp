@@ -1,7 +1,7 @@
 //! Application state and command execution.
 
 use crate::commands::{info, Cmd, COMMANDS};
-use crate::config::{state_dir, Config, KeymapChoice, ThemeChoice};
+use crate::config::{state_dir, Config, KeymapChoice, ThemeChoice, WrapChoice};
 use crate::google::{self, DriveEntry, DriveKind, DriveQuery};
 use crate::keymap::{Key, Keymap};
 use crate::palette;
@@ -535,7 +535,7 @@ impl App {
         self.scroll = (0, 0);
         self.reveal_para_code = None;
         self.needs_redraw = true;
-        self.ed.set_cols(self.doc_cols());
+        self.sync_editor_layout();
         Ok(())
     }
 
@@ -737,7 +737,7 @@ impl App {
         self.gdoc = Some(GdocState { id: id.to_string(), title: title.clone(), baseline: l.baseline });
         self.scroll = (0, 0);
         self.reveal_para_code = None;
-        self.ed.set_cols(self.doc_cols());
+        self.sync_editor_layout();
         self.needs_redraw = true;
         if l.warnings.is_empty() {
             self.message(format!("Opened “{}” from Google Docs", title));
@@ -1089,7 +1089,7 @@ impl App {
 
     pub fn resize(&mut self, w: u16, h: u16) {
         self.size = (w, h);
-        self.ed.set_cols(self.doc_cols());
+        self.sync_editor_layout();
         self.needs_redraw = true;
     }
 
@@ -1373,6 +1373,16 @@ impl App {
                     self.ed.commit();
                 }
             }
+            Cmd::DeleteWordBack => {
+                if self.guard_edit() {
+                    let c = self.ed.cursor;
+                    self.ed.word_left(false);
+                    let s = self.ed.cursor;
+                    self.ed.commit();
+                    self.ed.delete_range(Range::new(s, c));
+                    self.ed.commit();
+                }
+            }
             Cmd::DeleteToEndOfLine => {
                 if self.guard_edit() {
                     let c = self.ed.cursor;
@@ -1485,6 +1495,12 @@ impl App {
                     p.indent_right = Some(r);
                 });
             }
+            Cmd::ClearIndent => self.para(|p| {
+                p.indent_left = None;
+                p.indent_right = None;
+                p.first_line = None;
+                p.hanging = None;
+            }),
             Cmd::HangingIndent => {
                 let pp = self.ed.doc.para_props(self.ed.cursor.para);
                 let on = pp.hanging.unwrap_or(0) > 0;
@@ -1726,7 +1742,7 @@ impl App {
             Cmd::RevealCodes => {
                 self.reveal = !self.reveal;
                 self.reveal_para_code = None;
-                self.ed.set_cols(self.doc_cols());
+                self.sync_editor_layout();
             }
             Cmd::RevealAllCodes => {
                 self.reveal_all = !self.reveal_all;
@@ -1741,6 +1757,18 @@ impl App {
             Cmd::FkeyLegend => {
                 self.cfg.fkey_legend = !self.cfg.fkey_legend;
                 let _ = self.cfg.save();
+            }
+            Cmd::ToggleWrap => {
+                self.cfg.draft_wrap = match self.cfg.draft_wrap {
+                    WrapChoice::Page => WrapChoice::Terminal,
+                    WrapChoice::Terminal => WrapChoice::Page,
+                };
+                let _ = self.cfg.save();
+                self.sync_editor_layout();
+                self.message(match self.cfg.draft_wrap {
+                    WrapChoice::Page => "Lines wrap where they do on the page",
+                    WrapChoice::Terminal => "Lines wrap to the terminal width",
+                });
             }
             Cmd::WordCount => {
                 let words = self.ed.doc.word_count();
@@ -2138,6 +2166,13 @@ impl App {
         self.ed.update_para_props(f);
     }
 
+    /// Give the editor the draft-view geometry: the text column count and
+    /// how lines wrap (`draft_wrap` in config).
+    pub fn sync_editor_layout(&mut self) {
+        self.ed.set_cols(self.doc_cols());
+        self.ed.set_wrap(self.cfg.draft_wrap.mode());
+    }
+
     fn section(&mut self, f: impl Fn(&mut SectionProps)) {
         let mut s = self.ed.doc.section.clone();
         f(&mut s);
@@ -2204,7 +2239,7 @@ impl App {
         self.warnings.clear();
         self.scroll = (0, 0);
         self.sticky_status = None;
-        self.ed.set_cols(self.doc_cols());
+        self.sync_editor_layout();
     }
 
     // ------------------------------------------------------------------
@@ -2510,8 +2545,9 @@ impl App {
                     let hay = format!("{} {} {}", c.title, c.category, c.aliases);
                     if let Some(s) = palette::score(q, &hay) {
                         let title_bonus = palette::score(q, c.title).unwrap_or(-50);
+                        let repeat_bonus = 15 * palette::extra_occurrences(q, &hay);
                         let key = self.keymap.label_for(c.id).unwrap_or_default();
-                        rows.push((s + title_bonus, PaletteRow { label: c.title.to_string(), detail: c.category.to_string(), key, action: PaletteAction::Cmd(c.id) }));
+                        rows.push((s + title_bonus + repeat_bonus, PaletteRow { label: c.title.to_string(), detail: c.category.to_string(), key, action: PaletteAction::Cmd(c.id) }));
                     }
                 }
                 if q.is_empty() {
@@ -3006,7 +3042,7 @@ impl App {
                             self.path = keep_path;
                             self.format = keep_format;
                             self.ed.dirty = true;
-                            self.ed.set_cols(self.doc_cols());
+                            self.sync_editor_layout();
                             self.message("Recovered unsaved changes — save to keep them");
                         }
                         Err(e) => self.message(format!("Recovery failed: {}", e)),

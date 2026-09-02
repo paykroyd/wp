@@ -561,6 +561,19 @@ pub fn twips_to_cells(t: Twips) -> i32 {
     (t * CELLS_PER_INCH + TWIPS_PER_INCH / 2) / TWIPS_PER_INCH
 }
 
+/// How draft view breaks lines on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WrapMode {
+    /// One screen row per printed line (WordPerfect 5.1's editing screen):
+    /// lines break where they break on paper, so a page looks like a page.
+    /// A printed line wider than the terminal continues on the next row.
+    #[default]
+    Page,
+    /// Continuous text re-wrapped to the terminal's width; only the page
+    /// rules come from the print layout.
+    Terminal,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScreenLine {
     pub start: usize,
@@ -569,6 +582,20 @@ pub struct ScreenLine {
     pub indent: u16,
     /// Content width in cells (excluding trailing spaces).
     pub width: u16,
+    /// The row width centring and right alignment measure against: the
+    /// terminal's columns, or in page wrap the printed line's width in
+    /// cells, so flush-right text ends where the left-aligned lines do.
+    pub align_width: u16,
+}
+
+/// Cells to shift a screen line right for its paragraph's alignment.
+pub fn align_offset(pp: &ParaProps, line: &ScreenLine, width: u16) -> u16 {
+    let slack = line.align_width.min(width).saturating_sub(line.indent).saturating_sub(line.width);
+    match pp.align() {
+        Align::Center => slack / 2,
+        Align::Right => slack,
+        _ => 0,
+    }
 }
 
 pub fn cell_width(c: char) -> u16 {
@@ -612,6 +639,39 @@ pub fn screen_first_indent(pp: &ParaProps, cols: u16) -> u16 {
 /// width of a list label drawn at the first-line position; the text starts
 /// after it (at the left indent when the label fits in the hanging space).
 pub fn wrap_screen(p: &Paragraph, pp: &ParaProps, cols: u16, label_cells: u16) -> Vec<ScreenLine> {
+    wrap_screen_range(p, pp, cols, label_cells, 0, p.items.len(), true, true)
+}
+
+/// Twips one screen cell stands for in page wrap: the average advance of
+/// ordinary English text in the document's body font. One figure for the
+/// whole document, so the right margin is the same column on every line.
+pub fn twips_per_cell(body: &RunProps) -> Twips {
+    let sample = "the quick brown fox jumps over the lazy dog, and then some more words. ";
+    (sample.chars().map(|c| metrics::advance(body, c)).sum::<Twips>() / sample.chars().count() as Twips).max(1)
+}
+
+/// Screen lines that follow the printed line breaks (`WrapMode::Page`):
+/// each line of `print` becomes one screen line, or several when it is
+/// wider than the terminal. `tpc` is [`twips_per_cell`] for the document.
+pub fn screen_lines_from_print(p: &Paragraph, pp: &ParaProps, tpc: Twips, cols: u16, label_cells: u16, print: &ParaLayout) -> Vec<ScreenLine> {
+    let tpc = tpc.max(1);
+    let mut out = Vec::with_capacity(print.lines.len());
+    for (li, l) in print.lines.iter().enumerate() {
+        let rows = wrap_screen_range(p, pp, cols, label_cells, l.start, l.end, li == 0, false);
+        let indent = rows.first().map(|r| r.indent).unwrap_or(0) as i32;
+        let align_width = (l.avail / tpc + indent).clamp(0, cols as i32) as u16;
+        out.extend(rows.into_iter().map(|mut r| {
+            r.align_width = align_width;
+            r
+        }));
+    }
+    out
+}
+
+/// Wrap items `[start, end)` of a paragraph. `first` marks the paragraph's
+/// first line (first-line indent and list label apply); `whole` says the
+/// range is the entire paragraph.
+fn wrap_screen_range(p: &Paragraph, pp: &ParaProps, cols: u16, label_cells: u16, range_start: usize, range_end: usize, first: bool, whole: bool) -> Vec<ScreenLine> {
     let cols = cols.max(3);
     let left = twips_to_cells(pp.indent_left()).clamp(0, cols as i32 / 2) as u16;
     let right = twips_to_cells(pp.indent_right()).clamp(0, cols as i32 / 4) as u16;
@@ -621,19 +681,19 @@ pub fn wrap_screen(p: &Paragraph, pp: &ParaProps, cols: u16, label_cells: u16) -
     }
 
     let mut lines: Vec<ScreenLine> = Vec::new();
-    let mut start = 0usize;
+    let mut start = range_start;
     let mut x: u16 = 0;
     let mut width_nonspace: u16 = 0;
     let mut last_break: Option<(usize, u16)> = None;
-    let n = p.items.len();
-    let mut i = 0;
+    let n = range_end.min(p.items.len());
+    let mut i = range_start;
     let mut had_glyph = false;
     while i < n {
-        let indent = if lines.is_empty() { first_indent } else { left };
+        let indent = if first && lines.is_empty() { first_indent } else { left };
         let avail = cols.saturating_sub(indent + right).max(3);
         let it = &p.items[i];
         if matches!(it, Item::Code(Code::LineBreak) | Item::Code(Code::PageBreak)) {
-            lines.push(ScreenLine { start, end: i + 1, indent, width: width_nonspace });
+            lines.push(ScreenLine { start, end: i + 1, indent, width: width_nonspace, align_width: cols });
             start = i + 1;
             x = 0;
             width_nonspace = 0;
@@ -647,7 +707,7 @@ pub fn wrap_screen(p: &Paragraph, pp: &ParaProps, cols: u16, label_cells: u16) -
         if !is_space && adv > 0 && x + adv > avail && had_glyph {
             if let Some((at, w)) = last_break {
                 if at > start {
-                    lines.push(ScreenLine { start, end: at, indent, width: w });
+                    lines.push(ScreenLine { start, end: at, indent, width: w, align_width: cols });
                     start = at;
                     i = at;
                     x = 0;
@@ -657,7 +717,7 @@ pub fn wrap_screen(p: &Paragraph, pp: &ParaProps, cols: u16, label_cells: u16) -
                     continue;
                 }
             }
-            lines.push(ScreenLine { start, end: i, indent, width: width_nonspace });
+            lines.push(ScreenLine { start, end: i, indent, width: width_nonspace, align_width: cols });
             start = i;
             x = 0;
             width_nonspace = 0;
@@ -678,8 +738,13 @@ pub fn wrap_screen(p: &Paragraph, pp: &ParaProps, cols: u16, label_cells: u16) -
         }
         i += 1;
     }
-    let indent = if lines.is_empty() { first_indent } else { left };
-    lines.push(ScreenLine { start, end: n, indent, width: width_nonspace });
+    // The final line: always one for a whole paragraph (so an empty
+    // paragraph, or one ending in a break, still has a row), but a printed
+    // line that ends in a forced break has already been pushed.
+    if start < n || lines.is_empty() || whole {
+        let indent = if first && lines.is_empty() { first_indent } else { left };
+        lines.push(ScreenLine { start, end: n, indent, width: width_nonspace, align_width: cols });
+    }
     lines
 }
 
@@ -742,6 +807,48 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].width, 19);
         assert_eq!(p.text()[lines[1].start..lines[1].end], *"jumps over the lazy ");
+    }
+
+    #[test]
+    fn page_wrap_follows_printed_lines_and_continues_when_narrow() {
+        let text = "word ".repeat(400);
+        let mut doc = Document::new();
+        doc.paragraphs[0] = Paragraph::from_text(text.trim());
+        let pp = doc.para_props(0);
+        let print = layout_paragraph(&doc, 0, None);
+        assert!(print.lines.len() > 5);
+        // Wide terminal: one screen line per printed line, same boundaries.
+        let wide = screen_lines_from_print(&doc.paragraphs[0], &pp, twips_per_cell(&doc.base_run_props(0)), 300, 0, &print);
+        assert_eq!(wide.len(), print.lines.len());
+        for (s, l) in wide.iter().zip(&print.lines) {
+            assert_eq!((s.start, s.end), (l.start, l.end));
+        }
+        // Narrow terminal: printed lines continue onto extra rows, and the
+        // rows still tile the paragraph exactly.
+        let narrow = screen_lines_from_print(&doc.paragraphs[0], &pp, twips_per_cell(&doc.base_run_props(0)), 40, 0, &print);
+        assert!(narrow.len() > wide.len());
+        assert_eq!(narrow[0].start, 0);
+        assert_eq!(narrow.last().unwrap().end, doc.paragraphs[0].items.len());
+        for w in narrow.windows(2) {
+            assert_eq!(w[0].end, w[1].start);
+            assert!(w[0].width <= 40);
+        }
+        // A line break inside the paragraph doesn't produce a phantom row.
+        let mut p2 = Paragraph::from_text("ab");
+        p2.items.insert(1, Item::Code(Code::LineBreak));
+        doc.paragraphs[0] = p2;
+        let print = layout_paragraph(&doc, 0, None);
+        let rows = screen_lines_from_print(&doc.paragraphs[0], &pp, twips_per_cell(&doc.base_run_props(0)), 80, 0, &print);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), print.lines.len());
+        // …while a trailing break still gets its empty row, as on paper.
+        let mut p3 = Paragraph::from_text("ab");
+        p3.items.push(Item::Code(Code::LineBreak));
+        doc.paragraphs[0] = p3;
+        let print = layout_paragraph(&doc, 0, None);
+        let rows = screen_lines_from_print(&doc.paragraphs[0], &pp, twips_per_cell(&doc.base_run_props(0)), 80, 0, &print);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(wrap_screen(&doc.paragraphs[0], &pp, 80, 0).len(), 2);
     }
 
     #[test]

@@ -247,9 +247,12 @@ product's differentiator, not as a power-user affordance.
 
 ### 6.4 Two ways to see the page
 
-**Draft view** (default) is continuous text wrapped to the terminal — comfortable
-for writing. Page boundaries appear as a labelled rule so you always know where
-you are:
+**Draft view** (default) is continuous text, left-flush with no page frame —
+comfortable for writing. Lines break where they break on paper, one screen row
+per printed line, as WordPerfect 5.1's editing screen did: a full page looks
+full, and the page boundary appears as a labelled rule so you always know where
+you are. (A printed line wider than the terminal continues on the next row; the
+`draft_wrap = "terminal"` setting re-wraps to the window instead.)
 
 ```
    the committee will reconvene in the spring to review the

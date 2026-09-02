@@ -12,6 +12,25 @@ pub enum KeymapChoice {
     Classic,
 }
 
+/// How draft view breaks lines: at the printed line breaks (one screen row
+/// per line on paper, as WordPerfect 5.1 did) or at the terminal's width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WrapChoice {
+    #[default]
+    Page,
+    Terminal,
+}
+
+impl WrapChoice {
+    pub fn mode(self) -> wp_core::layout::WrapMode {
+        match self {
+            WrapChoice::Page => wp_core::layout::WrapMode::Page,
+            WrapChoice::Terminal => wp_core::layout::WrapMode::Terminal,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeChoice {
@@ -55,6 +74,9 @@ pub struct Config {
     pub show_hint: bool,
     /// Draw a blank row between paragraphs that have paragraph spacing.
     pub draft_spacing: bool,
+    /// Draft view line breaks: "page" (where they fall on paper) or
+    /// "terminal" (re-wrapped to the window).
+    pub draft_wrap: WrapChoice,
     /// Click to place the cursor, drag to select, wheel to scroll. Off means
     /// the terminal keeps the mouse (for its own copy/paste).
     pub mouse: bool,
@@ -77,6 +99,7 @@ impl Default for Config {
             text_wrap: 0,
             show_hint: true,
             draft_spacing: true,
+            draft_wrap: WrapChoice::Page,
             mouse: true,
             system_clipboard: true,
             bindings: BTreeMap::new(),

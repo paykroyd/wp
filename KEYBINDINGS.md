@@ -37,9 +37,11 @@ Modified F-keys need a terminal that reports them (most do; the kitty keyboard p
 | `Shift+PgUp` | Select Screen Up | Edit |
 | `Shift+PgDn` | Select Screen Down | Edit |
 | `Backspace` | Backspace | Edit |
-| `Ctrl+Backspace` | Delete Word | Edit |
-| `Alt+Backspace` | Delete Word | Edit |
+| `Ctrl+Backspace` | Delete Previous Word | Edit |
+| `Alt+Backspace` | Delete Previous Word | Edit |
 | `Del` | Delete | Edit |
+| `Ctrl+Del` | Delete Next Word | Edit |
+| `Alt+Del` | Delete Next Word | Edit |
 | `Enter` | New Paragraph | Edit |
 | `Tab` | Insert Tab | Insert |
 | `Shift+Tab` | Decrease List Level (Promote) | Format ▸ List |
@@ -123,7 +125,7 @@ Selected with `keymap = "modern"` (the default). Movement and deletion follow em
 | `Ctrl+H` | Backspace | Edit |
 | `Ctrl+K` | Delete to End of Line | Edit |
 | `Ctrl+U` | Delete to Start of Line | Edit |
-| `Alt+D` | Delete Word | Edit |
+| `Alt+D` | Delete Next Word | Edit |
 | `Ctrl+W` | Cut | Edit |
 | `Alt+W` | Copy | Edit |
 | `Ctrl+Y` | Paste | Edit |
@@ -261,6 +263,7 @@ Commands with no default key in either map:
 - Paper Size: A4
 - Paper Size: US Letter
 - Paste from Cut History…
+- Remove Indents
 - Remove from List
 - Restart Numbering at 1
 - Reveal Codes: Show Preserved Run Properties
@@ -289,3 +292,4 @@ Commands with no default key in either map:
 - Theme: Terminal Default
 - Warnings — Unsupported Content in This Document
 - Widow/Orphan Control
+- Wrap Lines: Page Width / Terminal Width

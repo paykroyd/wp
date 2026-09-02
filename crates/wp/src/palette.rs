@@ -16,6 +16,20 @@ pub fn score(query: &str, candidate: &str) -> Option<i32> {
     Some(total)
 }
 
+/// How many times the query's words occur in the candidate beyond the first
+/// hit each. A command whose aliases repeat the word ("Align Right … flush
+/// right") is about that word; one that merely contains it ("Word Right") is
+/// not.
+pub fn extra_occurrences(query: &str, candidate: &str) -> i32 {
+    let c = candidate.to_lowercase();
+    query
+        .to_lowercase()
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .map(|w| (c.matches(w).count() as i32 - 1).max(0))
+        .sum()
+}
+
 fn score_word(q: &[char], c: &[char]) -> Option<i32> {
     // Exact substring first.
     if let Some(pos) = find_sub(q, c) {

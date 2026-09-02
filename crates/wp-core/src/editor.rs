@@ -2,7 +2,7 @@
 
 use crate::document::{rewrite_attrs, AttrMap, Document};
 use crate::edit::Op;
-use crate::layout::{self, Pagination, ParaLayout, ScreenLine};
+use crate::layout::{self, Pagination, ParaLayout, ScreenLine, WrapMode};
 use crate::model::*;
 use crate::numbering::ListLabel;
 use crate::reveal::{self, ParaCode};
@@ -79,6 +79,7 @@ pub struct LayoutCache {
     print: Vec<Option<ParaLayout>>,
     screen: Vec<Option<Vec<ScreenLine>>>,
     cols: u16,
+    wrap: WrapMode,
     pub pagination: Pagination,
     pagination_dirty: bool,
     /// List labels, recomputed for the whole document whenever paragraph
@@ -118,6 +119,7 @@ impl Editor {
                 print: vec![None; n],
                 screen: vec![None; n],
                 cols: 80,
+                wrap: WrapMode::default(),
                 pagination: Pagination::default(),
                 pagination_dirty: true,
                 labels: vec![None; n],
@@ -145,6 +147,19 @@ impl Editor {
 
     pub fn cols(&self) -> u16 {
         self.layout.cols
+    }
+
+    pub fn set_wrap(&mut self, wrap: WrapMode) {
+        if wrap != self.layout.wrap {
+            self.layout.wrap = wrap;
+            for s in self.layout.screen.iter_mut() {
+                *s = None;
+            }
+        }
+    }
+
+    pub fn wrap(&self) -> WrapMode {
+        self.layout.wrap
     }
 
     fn invalidate(&mut self, para: usize) {
@@ -228,7 +243,14 @@ impl Editor {
             let pp = self.doc.para_props(para);
             let cells = self.label_cells(para);
             let cols = self.doc.cell_screen_width(para, self.layout.cols).unwrap_or(self.layout.cols);
-            let lines = layout::wrap_screen(&self.doc.paragraphs[para], &pp, cols, cells);
+            let lines = match self.layout.wrap {
+                WrapMode::Terminal => layout::wrap_screen(&self.doc.paragraphs[para], &pp, cols, cells),
+                WrapMode::Page => {
+                    let print = self.print_layout(para).clone();
+                    let tpc = layout::twips_per_cell(&self.doc.styles.resolve_para_style_run(None));
+                    layout::screen_lines_from_print(&self.doc.paragraphs[para], &pp, tpc, cols, cells, &print)
+                }
+            };
             self.layout.screen[para] = Some(lines);
         }
         self.layout.screen[para].as_ref().unwrap()

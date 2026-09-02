@@ -142,6 +142,9 @@ fn open_docx_render_and_page_rules() {
         return;
     }
     let mut h = Harness::new(KeymapChoice::Modern);
+    // Tall enough that the table is on the first screen with page-wrapped rows.
+    h.app.resize(80, 40);
+    h.term = Terminal::new(TestBackend::new(80, 40)).unwrap();
     h.app.open_path(&p).unwrap();
     let s = h.screen();
     assert!(s.contains("Quarterly Report"), "{}", s);
@@ -1025,4 +1028,79 @@ fn drive_dialog_browses_folders() {
     let s = h.screen();
     assert!(s.contains("Google Drive — Recent") && s.contains("Annual plan") && !s.contains("loading"), "{}", s);
     assert!(matches!(&h.app.overlay, Overlay::Drive(d) if d.mode == DriveMode::Recent));
+}
+
+#[test]
+fn delete_word_backward_and_forward() {
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("one two three");
+    // Ctrl+Backspace and Alt+Backspace delete the word before the cursor.
+    h.key(KeyCode::Backspace, CTRL);
+    assert_eq!(wp_core::text::to_text(&h.app.ed.doc, None).trim_end_matches('\n'), "one two ");
+    h.key(KeyCode::Backspace, ALT);
+    assert_eq!(wp_core::text::to_text(&h.app.ed.doc, None).trim_end_matches('\n'), "one ");
+    // Alt+Delete deletes the word after the cursor.
+    h.key(KeyCode::Home, NONE);
+    h.key(KeyCode::Delete, ALT);
+    assert_eq!(wp_core::text::to_text(&h.app.ed.doc, None).trim_end_matches('\n'), "");
+    // Both are commands, so the palette and menu can reach them.
+    let ids: Vec<&str> = crate::commands::COMMANDS.iter().map(|c| c.key).collect();
+    assert!(ids.contains(&"delete-word-back") && ids.contains(&"delete-word"));
+}
+
+#[test]
+fn palette_ranks_align_right_first_and_indents_can_be_removed() {
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("Some text here");
+    let first = |h: &mut Harness, q: &str| h.app.palette_rows(q).first().map(|r| r.label.clone()).unwrap();
+    assert_eq!(first(&mut h, "right"), "Align Right");
+    assert_eq!(first(&mut h, "left"), "Align Left");
+    assert_eq!(first(&mut h, "center"), "Center");
+    // Enter on the top row applies it.
+    h.key(KeyCode::Char('p'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    h.type_str("right");
+    h.key(KeyCode::Enter, NONE);
+    assert_eq!(h.app.ed.doc.para_props(0).align(), wp_core::Align::Right);
+    // An accidental "Indent Left and Right" leaves 0.5" on both sides even
+    // after aligning left; Remove Indents clears it.
+    h.app.exec(crate::commands::Cmd::IndentLeftRight);
+    h.key(KeyCode::Enter, NONE);
+    h.app.exec(crate::commands::Cmd::AlignLeft);
+    let pp = h.app.ed.doc.para_props(1);
+    assert_eq!((pp.indent_left(), pp.indent_right()), (720, 720));
+    h.app.exec(crate::commands::Cmd::ClearIndent);
+    let pp = h.app.ed.doc.para_props(1);
+    assert_eq!((pp.indent_left(), pp.indent_right(), pp.align()), (0, 0, wp_core::Align::Left));
+}
+
+#[test]
+fn draft_view_wraps_at_printed_lines_by_default() {
+    let p = corpus("gen-report.docx");
+    if !p.exists() {
+        return;
+    }
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.resize(200, 50);
+    h.app.open_path(&p).unwrap();
+    // The longest paragraph: on a wide terminal its screen rows are exactly
+    // its printed lines.
+    let n = h.app.ed.doc.paragraphs.len();
+    let long = (0..n).max_by_key(|&i| h.app.ed.doc.paragraphs[i].items.len()).unwrap();
+    let print: Vec<(usize, usize)> = h.app.ed.print_layout(long).lines.iter().map(|l| (l.start, l.end)).collect();
+    assert!(print.len() >= 2, "{:?}", print);
+    let screen: Vec<(usize, usize)> = h.app.ed.screen_lines(long).iter().map(|l| (l.start, l.end)).collect();
+    assert_eq!(screen, print);
+    // Terminal wrap re-packs the same paragraph into fewer rows on 200 columns…
+    h.app.exec(crate::commands::Cmd::ToggleWrap);
+    assert_eq!(h.app.cfg.draft_wrap, crate::config::WrapChoice::Terminal);
+    let repacked = h.app.ed.screen_lines(long).len();
+    assert!(repacked < print.len(), "{} vs {}", repacked, print.len());
+    // …and toggling back restores the printed breaks; a narrow terminal
+    // continues long printed lines instead of hiding them.
+    h.app.exec(crate::commands::Cmd::ToggleWrap);
+    h.app.resize(40, 20);
+    let rows = h.app.ed.screen_lines(long).clone();
+    assert!(rows.len() > print.len());
+    assert_eq!(rows.last().unwrap().end, h.app.ed.doc.paragraphs[long].items.len());
+    assert!(rows.iter().all(|r| r.indent + r.width <= 40));
 }
