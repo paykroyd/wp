@@ -415,6 +415,31 @@ pub enum BorderStyle {
     Dotted,
     Dashed,
     Thick,
+    /// Explicitly no line (`w:val="nil"`), overriding a style's.
+    None,
+}
+
+impl BorderStyle {
+    pub fn docx_name(self) -> &'static str {
+        match self {
+            BorderStyle::Single => "single",
+            BorderStyle::Double => "double",
+            BorderStyle::Dotted => "dotted",
+            BorderStyle::Dashed => "dashed",
+            BorderStyle::Thick => "thick",
+            BorderStyle::None => "nil",
+        }
+    }
+    pub fn from_docx(s: &str) -> BorderStyle {
+        match s {
+            "double" => BorderStyle::Double,
+            "dotted" => BorderStyle::Dotted,
+            "dashed" => BorderStyle::Dashed,
+            "thick" => BorderStyle::Thick,
+            "nil" | "none" => BorderStyle::None,
+            _ => BorderStyle::Single,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -424,6 +449,64 @@ pub struct Border {
     pub size: u16,
     pub color: Option<Rgb>,
     pub space: u16,
+}
+
+impl Border {
+    /// Word's default table line: single, ½ pt, automatic colour.
+    pub fn single() -> Border {
+        Border { style: BorderStyle::Single, size: 4, color: None, space: 0 }
+    }
+    pub fn none() -> Border {
+        Border { style: BorderStyle::None, size: 0, color: None, space: 0 }
+    }
+    pub fn is_visible(&self) -> bool {
+        self.style != BorderStyle::None
+    }
+}
+
+/// A table's lines (`w:tblBorders`): the outside edges and the lines
+/// between cells. `None` on a side means the table style decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct TableBorders {
+    pub top: Option<Border>,
+    pub left: Option<Border>,
+    pub bottom: Option<Border>,
+    pub right: Option<Border>,
+    pub inside_h: Option<Border>,
+    pub inside_v: Option<Border>,
+}
+
+impl TableBorders {
+    pub fn all(b: Border) -> TableBorders {
+        TableBorders { top: Some(b), left: Some(b), bottom: Some(b), right: Some(b), inside_h: Some(b), inside_v: Some(b) }
+    }
+    /// Outside lines only.
+    pub fn outside(b: Border) -> TableBorders {
+        TableBorders { top: Some(b), left: Some(b), bottom: Some(b), right: Some(b), inside_h: Some(Border::none()), inside_v: Some(Border::none()) }
+    }
+    /// Inside lines only.
+    pub fn inside(b: Border) -> TableBorders {
+        TableBorders { top: Some(Border::none()), left: Some(Border::none()), bottom: Some(Border::none()), right: Some(Border::none()), inside_h: Some(b), inside_v: Some(b) }
+    }
+    /// True when every line is explicitly off.
+    pub fn is_none(&self) -> bool {
+        [self.top, self.left, self.bottom, self.right, self.inside_h, self.inside_v].iter().all(|b| b.map_or(false, |b| !b.is_visible()))
+    }
+}
+
+/// One cell's own lines (`w:tcBorders`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct CellBorders {
+    pub top: Option<Border>,
+    pub left: Option<Border>,
+    pub bottom: Option<Border>,
+    pub right: Option<Border>,
+}
+
+impl CellBorders {
+    pub fn all(b: Border) -> CellBorders {
+        CellBorders { top: Some(b), left: Some(b), bottom: Some(b), right: Some(b) }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -723,6 +806,8 @@ pub struct TableCell {
     pub width: Option<Twips>,
     /// Cell shading fill (`w:shd/@w:fill`), when a plain colour.
     pub shading: Option<Rgb>,
+    /// The cell's own lines, when set.
+    pub borders: Option<CellBorders>,
     /// The complete `w:tcPr` as read (empty when the cell had none);
     /// `None` means it is regenerated from the fields on write.
     pub raw_tcpr: Option<String>,
@@ -765,6 +850,8 @@ pub struct Table {
     pub rows: Vec<TableRow>,
     /// Table style id (`w:tblStyle`).
     pub style: Option<String>,
+    /// The table's lines (`w:tblBorders`), when set directly.
+    pub borders: Option<TableBorders>,
     /// Left/right cell margins (`w:tblCellMar`), defaulting to Word's 108.
     pub cell_margin_left: Twips,
     pub cell_margin_right: Twips,
@@ -786,6 +873,7 @@ impl Table {
             grid: vec![w; cols],
             rows: (0..rows).map(|_| TableRow { cells: (0..cols).map(|_| TableCell { span: 1, width: Some(w), ..Default::default() }).collect(), ..Default::default() }).collect(),
             style: Some("TableGrid".into()),
+            borders: Some(TableBorders::all(Border::single())),
             cell_margin_left: DEFAULT_CELL_MARGIN,
             cell_margin_right: DEFAULT_CELL_MARGIN,
             raw_tblpr: None,
@@ -828,6 +916,16 @@ impl Table {
             }
         }
         r.cells.len().saturating_sub(1)
+    }
+    /// Whether the table draws lines between cells (the grid in draft view
+    /// is dotted when it does not).
+    pub fn lines_visible(&self) -> bool {
+        match &self.borders {
+            Some(b) => !b.is_none(),
+            // No direct borders: the style decides; TableNormal has none,
+            // TableGrid and everything else wp knows draw lines.
+            None => self.style.as_deref().map_or(false, |s| s != "TableNormal"),
+        }
     }
     /// Mark the grid as changed so it is regenerated on write.
     pub fn touch_grid(&mut self) {

@@ -888,7 +888,10 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
                 let Some(paras) = app.ed.doc.table_paras(*para) else { continue };
                 let cells = &paras[*row];
                 let header = t.rows.get(*row).map_or(false, |r| r.header);
-                spans.push(Span::styled(ch.v.to_string(), border));
+                // A table without lines shows a dotted grid on screen, as
+                // Word's gridlines do; it prints nothing.
+                let vbar = if t.lines_visible() { ch.v.to_string() } else if caps.ascii { ":".to_string() } else { "┆".to_string() };
+                spans.push(Span::styled(vbar.clone(), border));
                 let mut x: u16 = left_margin + 1;
                 for (ci, cell) in cells.iter().enumerate() {
                     let g = t.grid_col(*row, ci);
@@ -896,6 +899,7 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
                     let w: u16 = grid.iter().skip(g).take(span).sum::<u16>() + (span as u16).saturating_sub(1);
                     let inner = w.saturating_sub(2).max(1);
                     let continued = t.rows.get(*row).and_then(|r| r.cells.get(ci)).map_or(false, |c| c.vmerge == Some(VMerge::Continue));
+                    let shade = t.rows.get(*row).and_then(|r| r.cells.get(ci)).and_then(|c| c.shading).map(rgb);
                     // The paragraph/line of this cell on this screen line.
                     let mut k = 0;
                     let mut target: Option<(usize, usize)> = None;
@@ -908,7 +912,9 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
                         k += n;
                     }
                     let mut used: u16 = 0;
-                    spans.push(Span::raw(" "));
+                    let pad_style = shade.map(|bg| Style::default().bg(bg)).unwrap_or_default();
+                    spans.push(Span::styled(" ", pad_style));
+                    let text_start = spans.len();
                     if let Some((p, l)) = target.filter(|_| !continued) {
                         if app.ed.doc.paragraphs[p].props.raw_block {
                             let label = match app.ed.doc.paragraphs[p].items.first() {
@@ -939,7 +945,12 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
                         spans.push(Span::raw(" ".repeat((inner - used) as usize)));
                     }
                     spans.push(Span::raw(" "));
-                    spans.push(Span::styled(ch.v.to_string(), border));
+                    if let Some(bg) = shade {
+                        for sp in spans.iter_mut().skip(text_start) {
+                            sp.style = sp.style.bg(bg);
+                        }
+                    }
+                    spans.push(Span::styled(vbar.clone(), border));
                     x += w + 1;
                     if x >= left_margin + width {
                         break;
@@ -1080,6 +1091,13 @@ fn clip_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
 /// junctions where the cell borders of the rows above and below meet.
 fn table_rule(app: &App, table: u32, row: usize, width: u16, ch: &Chrome) -> String {
     let Some(t) = app.ed.doc.tables.get(&table) else { return String::new() };
+    if !t.lines_visible() {
+        // Dotted gridlines: only where cell edges meet, and a light rule.
+        let grid = app.ed.doc.table_screen_grid(t, width);
+        let total: u16 = grid.iter().sum::<u16>() + grid.len() as u16;
+        let dash = if ch.h == "-" { "." } else { "┄" };
+        return dash.repeat((total as usize + 1).min(width as usize));
+    }
     let grid = app.ed.doc.table_screen_grid(t, width);
     // x positions of cell borders in a row (relative to the table's left edge).
     let borders = |r: usize| -> Vec<u16> {

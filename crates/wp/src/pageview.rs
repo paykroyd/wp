@@ -196,9 +196,11 @@ pub fn page_rows(app: &mut App, page: usize, g: &Geom) -> Vec<PRow> {
             let col_x = placement.col(li) as Twips * col_pitch;
             let (flow, borders, x) = match cell {
                 Some(c) => {
-                    let (bx, bw) = ed.doc.tables.get(&c.table).map(|t| t.cell_extent(c.row as usize, c.col as usize)).unwrap_or((0, 0));
+                    let t = ed.doc.tables.get(&c.table);
+                    let (bx, bw) = t.map(|t| t.cell_extent(c.row as usize, c.col as usize)).unwrap_or((0, 0));
                     let left = sec.margin_left + col_x + bx;
-                    (Flow::Cell(c), vec![g.cols(left), g.cols(left + bw)], left + ed.doc.tables.get(&c.table).map(|t| t.cell_margin_left).unwrap_or(0) + line.x)
+                    let borders = if t.map_or(false, |t| t.lines_visible()) { vec![g.cols(left), g.cols(left + bw)] } else { Vec::new() };
+                    (Flow::Cell(c), borders, left + t.map(|t| t.cell_margin_left).unwrap_or(0) + line.x)
                 }
                 None => (Flow::Body(placement.col(li)), Vec::new(), sec.margin_left + col_x + line.x),
             };

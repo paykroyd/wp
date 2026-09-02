@@ -87,6 +87,8 @@ pub enum PromptKind {
     TabSet,
     TableInsert,
     ColumnWidth,
+    RowHeight,
+    Formula,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +109,7 @@ pub enum ListAction {
     FontColor,
     HighlightColor,
     ListFormat,
+    CellShading,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1746,6 +1749,95 @@ impl App {
                     }
                 }
             }
+            Cmd::TableMergeCells => {
+                if self.ed.current_cell().is_none() {
+                    self.message("Not in a table");
+                } else if self.guard_edit() {
+                    match self.ed.merge_cells() {
+                        Ok(()) => self.message("Cells merged"),
+                        Err(e) => self.message(e),
+                    }
+                    self.block_mode = false;
+                }
+            }
+            Cmd::TableSplitCell => {
+                if self.ed.current_cell().is_none() {
+                    self.message("Not in a table");
+                } else if self.guard_edit() {
+                    match self.ed.split_cell() {
+                        Ok(m) => self.message(m),
+                        Err(e) => self.message(e),
+                    }
+                }
+            }
+            Cmd::TableSortAsc | Cmd::TableSortDesc => {
+                if self.ed.current_cell().is_none() {
+                    self.message("Not in a table");
+                } else if self.guard_edit() {
+                    match self.ed.sort_rows(cmd == Cmd::TableSortDesc) {
+                        Ok(0) => self.message("Already in order"),
+                        Ok(n) => self.message(format!("{} rows sorted (Undo restores the order)", n)),
+                        Err(e) => self.message(e),
+                    }
+                }
+            }
+            Cmd::TableFormula => {
+                if self.ed.current_cell().is_none() {
+                    self.message("Formulas go in table cells");
+                } else if self.guard_edit() {
+                    self.prompt(PromptKind::Formula, "Formula — SUM(ABOVE), AVERAGE(LEFT), MAX(B2:B9)…: ", "SUM(ABOVE)");
+                }
+            }
+            Cmd::TableRecalculate => {
+                if self.guard_edit() {
+                    let n = self.ed.recalculate();
+                    self.message(match n {
+                        0 => "Formulas are up to date".to_string(),
+                        1 => "1 formula updated".to_string(),
+                        n => format!("{} formulas updated", n),
+                    });
+                }
+            }
+            Cmd::TableBordersAll => self.table_op(|ed| ed.set_table_borders(Some(TableBorders::all(Border::single()))), "Lines on every cell edge"),
+            Cmd::TableBordersNone => self.table_op(|ed| ed.set_table_borders(Some(TableBorders::all(Border::none()))), "No lines (the dotted grid is only on screen)"),
+            Cmd::TableBordersOutside => self.table_op(|ed| ed.set_table_borders(Some(TableBorders::outside(Border::single()))), "Lines around the table only"),
+            Cmd::TableBordersInside => self.table_op(|ed| ed.set_table_borders(Some(TableBorders::inside(Border::single()))), "Lines between cells only"),
+            Cmd::TableCellBordersNone => self.table_op(|ed| ed.set_cell_borders(Some(CellBorders::all(Border::none()))), "No lines on the selected cells"),
+            Cmd::TableCellBordersAll => self.table_op(|ed| ed.set_cell_borders(Some(CellBorders::all(Border::single()))), "Lines on the selected cells"),
+            Cmd::TableCellShading => {
+                if self.ed.current_cell().is_none() {
+                    self.message("Not in a table");
+                } else {
+                    let mut items: Vec<ListItem> = vec![ListItem { label: "None".into(), detail: "clear shading".into(), value: String::new() }];
+                    for (name, hex) in [("Light gray", "D9D9D9"), ("Gray", "A6A6A6"), ("Yellow", "FFFF00"), ("Light yellow", "FFF2CC"), ("Light blue", "DEEAF6"), ("Light green", "E2EFD9"), ("Light red", "FBE4D5"), ("Black", "000000")] {
+                        items.push(ListItem { label: name.into(), detail: format!("#{}", hex), value: hex.into() });
+                    }
+                    self.list("Cell shading", items, ListAction::CellShading);
+                }
+            }
+            Cmd::TableRowHeight => {
+                if self.ed.current_cell().is_none() {
+                    self.message("Not in a table");
+                } else if self.guard_edit() {
+                    self.prompt(PromptKind::RowHeight, "Row height in inches (blank = fit the text; add \"exact\" to clip): ", "");
+                }
+            }
+            Cmd::TableRowCantSplit => {
+                if self.ed.current_cell().is_none() {
+                    self.message("Not in a table");
+                } else if self.guard_edit() {
+                    match self.ed.toggle_cant_split() {
+                        Some(true) => self.message("This row stays on one page"),
+                        Some(false) => self.message("This row may split across pages"),
+                        None => self.message("Not in a table"),
+                    }
+                }
+            }
+            Cmd::TableInsertTab => {
+                if self.guard_edit() {
+                    self.ed.insert_code(Code::Tab);
+                }
+            }
             Cmd::TableColWidth => {
                 if self.ed.current_cell().is_none() {
                     self.message("Not in a table");
@@ -3193,6 +3285,16 @@ impl App {
 
     fn pick_list(&mut self, action: ListAction, item: &ListItem) {
         match action {
+            ListAction::CellShading => {
+                if self.guard_edit() {
+                    let fill = Rgb::parse_hex(&item.value);
+                    if self.ed.set_cell_shading(fill) {
+                        self.message(if fill.is_some() { format!("Cells shaded {}", item.label.to_lowercase()) } else { "Shading cleared".to_string() });
+                    }
+                    self.block_mode = false;
+                }
+            }
+
             ListAction::ApplyStyle => {
                 let id = item.value.clone();
                 self.ed.set_style(&id);
@@ -3522,6 +3624,33 @@ impl App {
                     self.message(format!("Inserted a {}×{} table — Tab moves between cells", rows, cols));
                 } else {
                     self.message("Can't insert a table here");
+                }
+            }
+            PromptKind::RowHeight => {
+                let exact = v.to_ascii_lowercase().contains("exact");
+                let num: String = v.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+                if num.is_empty() {
+                    if self.ed.set_row_height(None, false) {
+                        self.message("Row height fits its text");
+                    }
+                } else {
+                    match parse_inches(&num) {
+                        Some(h) if h > 0 => {
+                            if self.ed.set_row_height(Some(h), exact) {
+                                self.message(format!("Row height {}{:.2}\"", if exact { "exactly " } else { "at least " }, h as f64 / 1440.0));
+                            }
+                        }
+                        _ => self.message("Enter a height in inches, e.g. 0.5, or leave blank"),
+                    }
+                }
+            }
+            PromptKind::Formula => {
+                if v.is_empty() || !self.guard_edit() {
+                    return;
+                }
+                match self.ed.insert_formula(&v) {
+                    Ok(val) => self.message(format!("= {} — Table: Recalculate updates it after edits", val)),
+                    Err(e) => self.message(e),
                 }
             }
             PromptKind::ColumnWidth => match parse_inches(&v) {

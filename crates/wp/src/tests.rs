@@ -993,6 +993,104 @@ fn table_insert_navigate_render_and_save() {
 }
 
 #[test]
+fn table_formulas_sort_borders_and_merge_from_the_ui() {
+    let mut h = Harness::new(KeymapChoice::Modern);
+    let palette = |h: &mut Harness, cmd: &str| {
+        h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+        h.type_str(cmd);
+        h.key(KeyCode::Enter, NONE);
+    };
+    h.type_str("Totals");
+    h.key(KeyCode::Enter, NONE);
+    h.app.exec(crate::commands::Cmd::TableInsert);
+    h.key(KeyCode::Backspace, NONE);
+    h.key(KeyCode::Backspace, NONE);
+    h.key(KeyCode::Backspace, NONE);
+    h.type_str("3x2");
+    h.key(KeyCode::Enter, NONE);
+    for s in ["Pears", "4", "Apples", "12", "Sum"] {
+        h.type_str(s);
+        h.key(KeyCode::Tab, NONE);
+    }
+    // A formula in the last cell.
+    palette(&mut h, "Table: Formula");
+    h.key(KeyCode::Enter, NONE); // accept SUM(ABOVE)
+    let c = h.app.ed.cursor;
+    assert_eq!(h.app.ed.doc.paragraphs[c.para].text(), "16", "{}", h.screen());
+    let s = h.screen();
+    assert!(s.contains("= 16"), "{}", s);
+    // Edit a value; recalculate updates the total.
+    h.key(KeyCode::Up, NONE);
+    h.key(KeyCode::End, NONE);
+    h.type_str("0");
+    palette(&mut h, "Recalculate Formulas");
+    let sum = h.app.ed.doc.cell_first_para(wp_core::CellRef::new(1, 2, 1)).unwrap();
+    assert_eq!(h.app.ed.doc.paragraphs[sum].text(), "124");
+    // Sort by the first column, ascending: Apples before Pears; Sum sorted too
+    // (no header row), so mark the… no header here — check the order.
+    h.key(KeyCode::Up, NONE);
+    h.key(KeyCode::Up, NONE);
+    h.key(KeyCode::Left, NONE);
+    h.key(KeyCode::Left, NONE);
+    let a1 = h.app.ed.doc.cell_first_para(wp_core::CellRef::new(1, 0, 0)).unwrap();
+    h.app.ed.move_to(wp_core::Pos::new(a1, 0), false);
+    palette(&mut h, "Sort Rows by This Column (A");
+    let col0: Vec<String> = (0..3).map(|r| h.app.ed.doc.paragraphs[h.app.ed.doc.cell_first_para(wp_core::CellRef::new(1, r, 0)).unwrap()].text()).collect();
+    assert_eq!(col0, ["Apples", "Pears", "Sum"]);
+    // Lines off: the draft grid turns dotted.
+    palette(&mut h, "Lines — None");
+    let s = h.screen();
+    assert!(s.contains("┆"), "{}", s);
+    assert!(!s.contains("│ Apples"), "{}", s);
+    palette(&mut h, "Lines — All");
+    let s = h.screen();
+    assert!(s.contains("│ Apples"), "{}", s);
+    // Shade the cell.
+    palette(&mut h, "Cell Shading");
+    h.type_str("yellow");
+    h.key(KeyCode::Enter, NONE);
+    assert_eq!(h.app.ed.doc.tables[&1].rows[0].cells[0].shading, Some(wp_core::Rgb(0xFF, 0xFF, 0)));
+    // Merge A1:B1 with a block selection, then save and reopen.
+    h.app.ed.move_to(wp_core::Pos::new(a1, 0), false);
+    h.app.exec(crate::commands::Cmd::Block);
+    h.key(KeyCode::Tab, NONE);
+    palette(&mut h, "Merge Selected Cells");
+    assert_eq!(h.app.ed.doc.tables[&1].rows[0].cells.len(), 1, "{}", h.screen());
+    assert_eq!(h.app.ed.doc.tables[&1].rows[0].cells[0].span, 2);
+    assert!(h.app.ed.doc.table_is_consistent(1));
+    let s = h.screen();
+    assert!(s.contains("Cells merged"), "{}", s);
+    let dir = std::env::temp_dir().join(format!("wp-tbl2-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let docx = dir.join("t.docx");
+    h.app.save_to(&docx, crate::app::Format::Docx).unwrap();
+    let l = wp_docx::read(&docx).unwrap();
+    let t = &l.doc.tables[&1];
+    assert_eq!(t.rows[0].cells[0].span, 2);
+    assert_eq!(t.rows[0].cells[0].shading, Some(wp_core::Rgb(0xFF, 0xFF, 0)));
+    assert!(t.borders.is_some() && t.lines_visible());
+    let xml = l.package.get_str("word/document.xml").unwrap();
+    assert!(xml.contains("<w:gridSpan w:val=\"2\"/>"), "{}", xml);
+    assert!(xml.contains("w:fill=\"FFFF00\""), "{}", xml);
+    assert!(xml.contains("<w:fldSimple w:instr=\" =SUM(ABOVE) \">"), "{}", xml);
+    assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+    // Reading a table with tblBorders and tcBorders from the corpus, then
+    // changing the lines, keeps the rest of tblPr verbatim.
+    let mut h2 = Harness::new(KeymapChoice::Modern);
+    h2.app.open_path(&docx).unwrap();
+    let a1 = h2.app.ed.doc.cell_first_para(wp_core::CellRef::new(1, 0, 0)).unwrap();
+    h2.app.ed.move_to(wp_core::Pos::new(a1, 0), false);
+    palette(&mut h2, "Lines — Outside Only");
+    let docx2 = dir.join("t2.docx");
+    h2.app.save_to(&docx2, crate::app::Format::Docx).unwrap();
+    let l2 = wp_docx::read(&docx2).unwrap();
+    let xml2 = l2.package.get_str("word/document.xml").unwrap();
+    assert!(xml2.contains("<w:insideH w:val=\"nil\"/>"), "{}", xml2);
+    assert!(xml2.contains("<w:tblLook"), "the rest of tblPr survives: {}", xml2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn table_corpus_spans_and_merges_render() {
     let p = corpus("word-tables.docx");
     if !p.exists() {

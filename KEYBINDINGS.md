@@ -296,18 +296,34 @@ Commands with no default key in either map:
 - Style Browser (inheritance and overrides at cursor)
 - Style: Title
 - Tab Stops…
+- Table: Cell Lines — All
+- Table: Cell Lines — None
+- Table: Cell Shading…
 - Table: Column Width…
 - Table: Convert to Text (tab-separated)
 - Table: Delete Column
 - Table: Delete Row
 - Table: Delete Table
+- Table: Formula… (SUM, AVERAGE, …)
 - Table: Insert Column Left
 - Table: Insert Column Right
 - Table: Insert Row Above
 - Table: Insert Row Below
+- Table: Insert Tab Character in Cell
+- Table: Lines — All
+- Table: Lines — Inside Only
+- Table: Lines — None
+- Table: Lines — Outside Only
+- Table: Merge Selected Cells
 - Table: Next Cell
 - Table: Previous Cell
+- Table: Recalculate Formulas
 - Table: Repeat Row as Header on Each Page
+- Table: Row Can't Split Across Pages (toggle)
+- Table: Row Height…
+- Table: Sort Rows by This Column (A→Z, 1→9)
+- Table: Sort Rows by This Column (Z→A, 9→1)
+- Table: Split Cell
 - Text Color…
 - Theme: Classic WordPerfect (blue screen)
 - Theme: Terminal Default

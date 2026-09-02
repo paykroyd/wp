@@ -427,6 +427,16 @@ pub fn parse_header_part(xml: &str, ctx: &mut Ctx) -> Result<HeaderFooter> {
     Ok(hf)
 }
 
+/// A border element (`w:top`, `w:insideH`, …).
+pub fn parse_border(ce: &BytesStart<'_>) -> Border {
+    Border {
+        style: BorderStyle::from_docx(attr(ce, "w:val").as_deref().unwrap_or("single")),
+        size: attr_i32(ce, "w:sz").unwrap_or(4).clamp(0, 255) as u16,
+        color: attr(ce, "w:color").and_then(|v| Rgb::parse_hex(&v)),
+        space: attr_i32(ce, "w:space").unwrap_or(0).clamp(0, 255) as u16,
+    }
+}
+
 /// The text of a `w:instrText` element.
 pub fn instr_text(raw: &str) -> String {
     let start = raw.find('>').map(|i| i + 1).unwrap_or(0);
@@ -1019,18 +1029,7 @@ pub fn parse_ppr(xml: &str, ctx: &Ctx) -> ParaProps {
                 let mut b = ParaBorders::default();
                 for c in children_of(&child.xml) {
                     if let Some(ce) = start_tag(&c.xml) {
-                        let border = Border {
-                            style: match attr(&ce, "w:val").as_deref() {
-                                Some("double") => BorderStyle::Double,
-                                Some("dotted") => BorderStyle::Dotted,
-                                Some("dashed") => BorderStyle::Dashed,
-                                Some("thick") => BorderStyle::Thick,
-                                _ => BorderStyle::Single,
-                            },
-                            size: attr_i32(&ce, "w:sz").unwrap_or(4).clamp(0, 255) as u16,
-                            color: attr(&ce, "w:color").and_then(|v| Rgb::parse_hex(&v)),
-                            space: attr_i32(&ce, "w:space").unwrap_or(1).clamp(0, 255) as u16,
-                        };
+                        let border = parse_border(&ce);
                         match c.tag.as_str() {
                             "w:top" => b.top = Some(border),
                             "w:bottom" => b.bottom = Some(border),

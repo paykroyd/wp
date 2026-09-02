@@ -885,15 +885,7 @@ pub fn render_ppr_body(p: &ParaProps) -> String {
         let mut s = String::from("<w:pBdr>");
         for (tag, bd) in [("w:top", &b.top), ("w:left", &b.left), ("w:bottom", &b.bottom), ("w:right", &b.right)] {
             if let Some(bd) = bd {
-                let val = match bd.style {
-                    BorderStyle::Single => "single",
-                    BorderStyle::Double => "double",
-                    BorderStyle::Dotted => "dotted",
-                    BorderStyle::Dashed => "dashed",
-                    BorderStyle::Thick => "thick",
-                };
-                let color = bd.color.map(|c| c.hex()).unwrap_or_else(|| "auto".into());
-                let _ = write!(s, "<{} w:val=\"{}\" w:sz=\"{}\" w:space=\"{}\" w:color=\"{}\"/>", tag, val, bd.size, bd.space, color);
+                s.push_str(&border_xml(tag, bd));
             }
         }
         s.push_str("</w:pBdr>");
@@ -1007,6 +999,15 @@ const SECTPR_ORDER: &[&str] = &[
     "w:paperSrc", "w:pgBorders", "w:lnNumType", "w:pgNumType", "w:cols", "w:formProt", "w:vAlign", "w:noEndnote",
     "w:titlePg", "w:textDirection", "w:bidi", "w:rtlGutter", "w:docGrid", "w:printerSettings", "w:sectPrChange",
 ];
+
+/// One border element.
+pub fn border_xml(tag: &str, bd: &Border) -> String {
+    if bd.style == BorderStyle::None {
+        return format!("<{} w:val=\"nil\"/>", tag);
+    }
+    let color = bd.color.map(|c| c.hex()).unwrap_or_else(|| "auto".into());
+    format!("<{} w:val=\"{}\" w:sz=\"{}\" w:space=\"{}\" w:color=\"{}\"/>", tag, bd.style.docx_name(), bd.size, bd.space, color)
+}
 
 /// Emit a `w:sectPr`: the children as read, with the modelled ones
 /// (page geometry, section start, title page, header and footer

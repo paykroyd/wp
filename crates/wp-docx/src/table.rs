@@ -10,7 +10,8 @@
 //! Writing: a run of cell paragraphs is wrapped in `w:tbl`/`w:tr`/`w:tc` as
 //! the writer walks the body.
 
-use crate::read::{block_label, bookmark_item, element_label, parse_paragraph, raw_block, Ctx};
+use crate::read::{block_label, bookmark_item, element_label, parse_border, parse_paragraph, raw_block, Ctx};
+use crate::write::border_xml;
 use crate::xml::*;
 use anyhow::Result;
 use quick_xml::events::Event;
@@ -97,6 +98,23 @@ fn parse_tblpr(raw: &str, table: &mut Table) {
     for c in children_of(raw) {
         match c.tag.as_str() {
             "w:tblStyle" => table.style = start_tag(&c.xml).and_then(|t| attr(&t, "w:val")),
+            "w:tblBorders" => {
+                let mut b = TableBorders::default();
+                for side in children_of(&c.xml) {
+                    let Some(t) = start_tag(&side.xml) else { continue };
+                    let bd = Some(parse_border(&t));
+                    match side.tag.as_str() {
+                        "w:top" => b.top = bd,
+                        "w:left" | "w:start" => b.left = bd,
+                        "w:bottom" => b.bottom = bd,
+                        "w:right" | "w:end" => b.right = bd,
+                        "w:insideH" => b.inside_h = bd,
+                        "w:insideV" => b.inside_v = bd,
+                        _ => {}
+                    }
+                }
+                table.borders = Some(b);
+            }
             "w:tblCellMar" => {
                 for m in children_of(&c.xml) {
                     let Some(t) = start_tag(&m.xml) else { continue };
@@ -320,9 +338,78 @@ fn parse_tcpr(raw: &str, cell: &mut TableCell) {
                 }
             }
             "w:shd" => cell.shading = t.and_then(|t| attr(&t, "w:fill")).and_then(|f| Rgb::parse_hex(&f)),
+            "w:tcBorders" => {
+                let mut b = CellBorders::default();
+                for side in children_of(&c.xml) {
+                    let Some(t) = start_tag(&side.xml) else { continue };
+                    let bd = Some(parse_border(&t));
+                    match side.tag.as_str() {
+                        "w:top" => b.top = bd,
+                        "w:left" | "w:start" => b.left = bd,
+                        "w:bottom" => b.bottom = bd,
+                        "w:right" | "w:end" => b.right = bd,
+                        _ => {}
+                    }
+                }
+                cell.borders = Some(b);
+            }
             _ => {}
         }
     }
+}
+
+fn tbl_borders_xml(b: &TableBorders) -> String {
+    let mut s = String::from("<w:tblBorders>");
+    for (tag, bd) in [("w:top", b.top), ("w:left", b.left), ("w:bottom", b.bottom), ("w:right", b.right), ("w:insideH", b.inside_h), ("w:insideV", b.inside_v)] {
+        if let Some(bd) = bd {
+            s.push_str(&border_xml(tag, &bd));
+        }
+    }
+    s.push_str("</w:tblBorders>");
+    s
+}
+
+fn tc_borders_xml(b: &CellBorders) -> String {
+    let mut s = String::from("<w:tcBorders>");
+    for (tag, bd) in [("w:top", b.top), ("w:left", b.left), ("w:bottom", b.bottom), ("w:right", b.right)] {
+        if let Some(bd) = bd {
+            s.push_str(&border_xml(tag, &bd));
+        }
+    }
+    s.push_str("</w:tcBorders>");
+    s
+}
+
+/// Schema order of `w:tblPr` children (CT_TblPr).
+const TBLPR_ORDER: &[&str] = &[
+    "w:tblStyle", "w:tblpPr", "w:tblOverlap", "w:bidiVisual", "w:tblStyleRowBandSize", "w:tblStyleColBandSize", "w:tblW",
+    "w:jc", "w:tblCellSpacing", "w:tblInd", "w:tblBorders", "w:shd", "w:tblLayout", "w:tblCellMar", "w:tblLook",
+    "w:tblCaption", "w:tblDescription", "w:tblPrChange",
+];
+
+/// Schema order of `w:tcPr` children (CT_TcPr).
+const TCPR_ORDER: &[&str] = &[
+    "w:cnfStyle", "w:tcW", "w:gridSpan", "w:hMerge", "w:vMerge", "w:tcBorders", "w:shd", "w:noWrap", "w:tcMar",
+    "w:textDirection", "w:tcFitText", "w:vAlign", "w:hideMark", "w:headers", "w:cellIns", "w:cellDel", "w:cellMerge",
+    "w:tcPrChange",
+];
+
+/// Replace (or remove, with `None`) one child of a properties element,
+/// keeping everything else verbatim and the schema order.
+fn patch_child(raw: &str, tag_name: &str, tag: &str, xml: Option<String>, order: &[&str]) -> String {
+    let mut children = children_of(raw);
+    children.retain(|c| c.tag != tag);
+    if let Some(x) = xml {
+        children.push(RawChild { tag: tag.to_string(), xml: x });
+    }
+    children.sort_by_key(|c| order.iter().position(|t| *t == c.tag).unwrap_or(order.len() - 1));
+    let attrs = start_tag(raw).map(|e| tag_attrs(&e)).unwrap_or_default();
+    let mut out = format!("<{}{}>", tag_name, attrs);
+    for c in children {
+        out.push_str(&c.xml);
+    }
+    let _ = write!(out, "</{}>", tag_name);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -353,18 +440,26 @@ pub(crate) fn table_for_write(doc: &Document, id: u32) -> Table {
 pub(crate) fn open_table(t: &Table, out: &mut String) {
     let _ = write!(out, "<w:tbl{}>", t.attrs);
     match &t.raw_tblpr {
-        Some(raw) => out.push_str(raw),
+        Some(raw) => {
+            // Verbatim, unless the borders were changed: then only that
+            // child is replaced.
+            let mut original = Table::default();
+            parse_tblpr(raw, &mut original);
+            if original.borders == t.borders {
+                out.push_str(raw);
+            } else {
+                out.push_str(&patch_child(raw, "w:tblPr", "w:tblBorders", t.borders.as_ref().map(tbl_borders_xml), TBLPR_ORDER));
+            }
+        }
         None => {
             out.push_str("<w:tblPr>");
             if let Some(s) = &t.style {
                 let _ = write!(out, "<w:tblStyle w:val=\"{}\"/>", escape_attr(s));
             }
             out.push_str("<w:tblW w:w=\"0\" w:type=\"auto\"/>");
-            out.push_str("<w:tblBorders>");
-            for side in ["top", "left", "bottom", "right", "insideH", "insideV"] {
-                let _ = write!(out, "<w:{} w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/>", side);
+            if let Some(b) = &t.borders {
+                out.push_str(&tbl_borders_xml(b));
             }
-            out.push_str("</w:tblBorders>");
             if t.cell_margin_left != DEFAULT_CELL_MARGIN || t.cell_margin_right != DEFAULT_CELL_MARGIN {
                 let _ = write!(out, "<w:tblCellMar><w:left w:w=\"{}\" w:type=\"dxa\"/><w:right w:w=\"{}\" w:type=\"dxa\"/></w:tblCellMar>", t.cell_margin_left, t.cell_margin_right);
             }
@@ -411,7 +506,22 @@ pub(crate) fn open_cell(t: &Table, row: usize, col: usize, out: &mut String) {
     let c = t.rows.get(row).and_then(|r| r.cells.get(col)).cloned().unwrap_or_else(TableCell::new);
     let _ = write!(out, "<w:tc{}>", c.attrs);
     match &c.raw_tcpr {
-        Some(raw) => out.push_str(raw),
+        Some(raw) if raw.is_empty() && c.shading.is_none() && c.borders.is_none() => {}
+        Some(raw) => {
+            // Verbatim, with only the shading and borders replaced when
+            // they were changed.
+            let mut original = TableCell::new();
+            parse_tcpr(raw, &mut original);
+            let raw = if raw.is_empty() { "<w:tcPr></w:tcPr>".to_string() } else { raw.clone() };
+            let mut xml = raw.clone();
+            if original.shading != c.shading {
+                xml = patch_child(&xml, "w:tcPr", "w:shd", c.shading.map(|s| format!("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{}\"/>", s.hex())), TCPR_ORDER);
+            }
+            if original.borders != c.borders {
+                xml = patch_child(&xml, "w:tcPr", "w:tcBorders", c.borders.as_ref().map(tc_borders_xml), TCPR_ORDER);
+            }
+            out.push_str(&xml);
+        }
         None => {
             let width = c.width.unwrap_or_else(|| t.cell_extent(row, col).1);
             let _ = write!(out, "<w:tcPr><w:tcW w:w=\"{}\" w:type=\"dxa\"/>", width);
@@ -422,6 +532,9 @@ pub(crate) fn open_cell(t: &Table, row: usize, col: usize, out: &mut String) {
                 Some(VMerge::Restart) => out.push_str("<w:vMerge w:val=\"restart\"/>"),
                 Some(VMerge::Continue) => out.push_str("<w:vMerge/>"),
                 None => {}
+            }
+            if let Some(b) = &c.borders {
+                out.push_str(&tc_borders_xml(b));
             }
             if let Some(s) = c.shading {
                 let _ = write!(out, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{}\"/>", s.hex());

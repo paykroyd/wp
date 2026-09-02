@@ -332,10 +332,15 @@ impl Editor {
         true
     }
 
+    /// Move to a cell's first paragraph. A selection in progress (Block)
+    /// extends to it, so Block then Tab selects a run of cells.
     fn select_cell_or_move(&mut self, para: usize) {
         self.commit();
-        self.anchor = None;
-        self.cursor = Pos::new(para, 0);
+        if self.anchor.is_none() {
+            self.cursor = Pos::new(para, 0);
+        } else {
+            self.cursor = Pos::new(para, self.doc.paragraphs[para].items.len());
+        }
         self.goal_x = None;
     }
 
@@ -377,7 +382,7 @@ impl Editor {
         let new_r = if below { r + 1 } else { r };
         let src_row = table.rows[r].clone();
         let new_row = TableRow {
-            cells: src_row.cells.iter().map(|c| TableCell { span: c.span, vmerge: None, width: c.width, shading: None, raw_tcpr: None, attrs: String::new() }).collect(),
+            cells: src_row.cells.iter().map(|c| TableCell { span: c.span, vmerge: None, width: c.width, shading: None, borders: None, raw_tcpr: None, attrs: String::new() }).collect(),
             header: false,
             cant_split: src_row.cant_split,
             height: src_row.height,
@@ -480,7 +485,7 @@ impl Editor {
                 }
             }
             let width = row.cells.get(idx.min(row.cells.len().saturating_sub(1))).and_then(|x| x.width).map(|_| w);
-            row.cells.insert(idx, TableCell { span: 1, vmerge: None, width, shading: None, raw_tcpr: None, attrs: String::new() });
+            row.cells.insert(idx, TableCell { span: 1, vmerge: None, width, shading: None, borders: None, raw_tcpr: None, attrs: String::new() });
             let para_at = if idx < paras[ri].len() { paras[ri][idx][0] } else { paras[ri].last().unwrap().last().unwrap() + 1 };
             inserts.push((para_at, CellRef::new(id, ri as u32, idx as u32)));
             new_cols.push(idx);
@@ -709,11 +714,608 @@ impl Editor {
         Some(on)
     }
 
+    /// The rectangle of grid columns and rows covered by the selection (or
+    /// the cursor's cell): `(r0, r1, g0, g1)`, inclusive.
+    fn selected_rect(&self) -> Option<(usize, usize, usize, usize)> {
+        let at = self.at_table()?;
+        let t = self.doc.tables.get(&at.cell.table)?;
+        let other = match self.selection() {
+            Some(r) => {
+                let a = self.doc.cell_of(r.start.para)?;
+                let b = self.doc.cell_of(r.end.para.min(self.doc.paragraphs.len() - 1)).filter(|c| c.table == a.table);
+                match b {
+                    Some(b) => (a, b),
+                    None => (a, a),
+                }
+            }
+            None => (at.cell, at.cell),
+        };
+        let (a, b) = other;
+        if a.table != at.cell.table {
+            return None;
+        }
+        let ga = t.grid_col(a.row as usize, a.col as usize);
+        let gb = t.grid_col(b.row as usize, b.col as usize);
+        let ea = ga + t.rows[a.row as usize].cells[a.col as usize].span() - 1;
+        let eb = gb + t.rows[b.row as usize].cells[b.col as usize].span() - 1;
+        Some((a.row.min(b.row) as usize, a.row.max(b.row) as usize, ga.min(gb), ea.max(eb)))
+    }
+
+    /// Merge the selected cells (a rectangle) into one: the top-left cell
+    /// spans the rectangle's columns, the rows below it continue it
+    /// vertically, and every merged cell's text moves into it. Fails with
+    /// a reason when the selection is not a clean rectangle of cells.
+    pub fn merge_cells(&mut self) -> Result<(), &'static str> {
+        let at = self.at_table().ok_or("Not in a table")?;
+        let (r0, r1, g0, g1) = self.selected_rect().ok_or("Select the cells to merge first (Block, then move)")?;
+        if r0 == r1 && g0 == g1 {
+            return Err("Select two or more cells to merge (Block, then move to the last cell)");
+        }
+        let id = at.cell.table;
+        let mut table = self.doc.tables.get(&id).cloned().ok_or("Not in a table")?;
+        let paras = self.doc.table_paras(self.cursor.para).ok_or("Not in a table")?;
+        // Every row must have a cell starting at g0 and one ending at g1.
+        let mut plan: Vec<(usize, usize, usize)> = Vec::new(); // (row, first cell idx, last cell idx)
+        for r in r0..=r1 {
+            let row = &table.rows[r];
+            let mut acc = 0;
+            let mut first = None;
+            let mut last = None;
+            for (ci, c) in row.cells.iter().enumerate() {
+                if acc == g0 {
+                    first = Some(ci);
+                }
+                if acc + c.span() - 1 == g1 {
+                    last = Some(ci);
+                }
+                acc += c.span();
+            }
+            match (first, last) {
+                (Some(f), Some(l)) if f <= l => plan.push((r, f, l)),
+                _ => return Err("Those cells don't line up into a rectangle"),
+            }
+        }
+        self.commit();
+        let (top_r, top_f, _) = plan[0];
+        let top_cell = CellRef::new(id, top_r as u32, top_f as u32);
+        // The text of every merged cell but the top-left moves into it. A
+        // cell in a lower row lives on as a continuation and keeps one
+        // empty paragraph; a cell in the top row disappears entirely.
+        let mut moved: Vec<Paragraph> = Vec::new();
+        let mut removals: Vec<usize> = Vec::new();
+        let mut emptied: Vec<usize> = Vec::new();
+        for &(r, f, l) in &plan {
+            for ci in f..=l {
+                if r == top_r && ci == top_f {
+                    continue;
+                }
+                let keeps_one = r != top_r && ci == f;
+                for (k, &p) in paras[r][ci].iter().enumerate() {
+                    let para = &self.doc.paragraphs[p];
+                    if !para.items.is_empty() && !para.props.raw_block {
+                        let mut clone = para.clone();
+                        clone.props.p_attrs = None;
+                        clone.props.cell = Some(top_cell);
+                        moved.push(clone);
+                    }
+                    if keeps_one && k == 0 {
+                        emptied.push(p);
+                    } else {
+                        removals.push(p);
+                    }
+                }
+            }
+        }
+        for p in emptied {
+            if !self.doc.paragraphs[p].items.is_empty() {
+                self.apply_op(Op::ReplaceItems { para: p, items: Vec::new() });
+            }
+        }
+        removals.sort_unstable();
+        let top_last = *paras[top_r][top_f].last().unwrap();
+        for p in removals.iter().rev() {
+            self.apply_op(Op::RemovePara { para: *p });
+        }
+        let shift = removals.iter().filter(|&&p| p <= top_last).count();
+        let insert_at = top_last + 1 - shift;
+        for (k, p) in moved.into_iter().enumerate() {
+            self.apply_op(Op::InsertPara { para: insert_at + k, paragraph: p });
+        }
+        // The grid: one cell per row spanning the rectangle.
+        for &(r, f, l) in &plan {
+            let row = &mut table.rows[r];
+            let span: u16 = (f..=l).map(|ci| row.cells[ci].span() as u16).sum();
+            let mut kept = row.cells[f].clone();
+            kept.span = span;
+            kept.raw_tcpr = None;
+            kept.width = Some(table.grid.iter().skip(g0).take(g1 - g0 + 1).sum());
+            kept.vmerge = if r1 > r0 { Some(if r == top_r { VMerge::Restart } else { VMerge::Continue }) } else { None };
+            row.cells.drain(f..=l);
+            row.cells.insert(f, kept);
+        }
+        self.apply_op(Op::SetTable { id, table: Some(table) });
+        // Cell indices after a removed cell shift left: renumber every row
+        // from the stream.
+        let (start, end) = self.doc.table_span(id).ok_or("Not in a table")?;
+        self.retag_rows(start, end, id);
+        let first = self.doc.cell_first_para(top_cell).unwrap_or(start);
+        self.cursor = Pos::new(first, 0);
+        self.anchor = None;
+        self.goal_x = None;
+        self.commit();
+        Ok(())
+    }
+
+    /// Renumber each row's cells left to right from the paragraph stream
+    /// (after cells were removed from rows).
+    fn retag_rows(&mut self, start: usize, end: usize, id: u32) {
+        let mut i = start;
+        while i < end {
+            let Some(c) = self.doc.cell_of(i) else { break };
+            if c.table != id {
+                break;
+            }
+            let row = c.row;
+            let mut ci = 0u32;
+            let mut prev: Option<CellRef> = None;
+            while i < end {
+                let Some(cc) = self.doc.cell_of(i) else { break };
+                if cc.table != id || cc.row != row {
+                    break;
+                }
+                if prev.map_or(false, |p| p != cc) {
+                    ci += 1;
+                }
+                prev = Some(cc);
+                self.retag(i, CellRef::new(id, row, ci));
+                i += 1;
+            }
+        }
+    }
+
+    /// Split the cursor's cell: a vertically merged region is unmerged, a
+    /// cell spanning several columns becomes one cell per column, and a
+    /// plain cell is split in two (its column is divided).
+    pub fn split_cell(&mut self) -> Result<&'static str, &'static str> {
+        let at = self.at_table().ok_or("Not in a table")?;
+        let id = at.cell.table;
+        let mut table = self.doc.tables.get(&id).cloned().ok_or("Not in a table")?;
+        let (r, c) = (at.cell.row as usize, at.cell.col as usize);
+        let cell = table.rows[r].cells[c].clone();
+        let paras = self.doc.table_paras(self.cursor.para).ok_or("Not in a table")?;
+        self.commit();
+        if cell.vmerge.is_some() {
+            // Unmerge the vertical region this cell belongs to: up to its
+            // restart, then down while cells continue it.
+            let g = table.grid_col(r, c);
+            let vm = |t: &Table, rr: usize| t.rows[rr].cells[t.cell_at_grid(rr, g)].vmerge;
+            let mut top = r;
+            while top > 0 && vm(&table, top) == Some(VMerge::Continue) {
+                top -= 1;
+            }
+            let mut rr = top;
+            while rr < table.rows.len() && (rr == top || vm(&table, rr) == Some(VMerge::Continue)) {
+                let ci = table.cell_at_grid(rr, g);
+                table.rows[rr].cells[ci].vmerge = None;
+                table.rows[rr].cells[ci].raw_tcpr = None;
+                rr += 1;
+            }
+            self.apply_op(Op::SetTable { id, table: Some(table) });
+            self.commit();
+            return Ok("Cells unmerged");
+        }
+        if cell.span() > 1 {
+            let g0 = table.grid_col(r, c);
+            let n = cell.span();
+            let mut new_cells = Vec::new();
+            for k in 0..n {
+                let mut nc = TableCell::new();
+                nc.width = Some(table.grid[g0 + k]);
+                nc.shading = cell.shading;
+                nc.borders = cell.borders;
+                new_cells.push(nc);
+            }
+            table.rows[r].cells.remove(c);
+            for (k, nc) in new_cells.into_iter().enumerate() {
+                table.rows[r].cells.insert(c + k, nc);
+            }
+            // New empty paragraphs after this cell's, then retag the rest of the row.
+            let after = *paras[r][c].last().unwrap() + 1;
+            for k in (c + 1..paras[r].len()).rev() {
+                for &p in &paras[r][k] {
+                    self.retag(p, CellRef::new(id, r as u32, (k + n - 1) as u32));
+                }
+            }
+            for k in 1..n {
+                let like = self.doc.paragraphs[paras[r][c][0]].props.clone();
+                self.apply_op(Op::InsertPara { para: after + k - 1, paragraph: Editor::cell_para(CellRef::new(id, r as u32, (c + k) as u32), Some(&like)) });
+            }
+            self.apply_op(Op::SetTable { id, table: Some(table) });
+            self.commit();
+            return Ok("Cell split into its columns");
+        }
+        // A plain cell: divide its grid column in two.
+        if table.cols() >= 63 {
+            return Err("Too many columns");
+        }
+        let g = table.grid_col(r, c);
+        let w = table.grid[g];
+        table.grid[g] = w / 2;
+        table.grid.insert(g + 1, w - w / 2);
+        for (ri, row) in table.rows.iter_mut().enumerate() {
+            if ri == r {
+                continue;
+            }
+            let ci = {
+                let mut acc = 0;
+                let mut idx = row.cells.len() - 1;
+                for (i, cc) in row.cells.iter().enumerate() {
+                    if g >= acc && g < acc + cc.span() {
+                        idx = i;
+                        break;
+                    }
+                    acc += cc.span();
+                }
+                idx
+            };
+            let cc = &mut row.cells[ci];
+            cc.span = (cc.span() + 1) as u16;
+            cc.raw_tcpr = None;
+        }
+        let mut left = table.rows[r].cells[c].clone();
+        left.width = Some(w / 2);
+        left.raw_tcpr = None;
+        let mut right = TableCell::new();
+        right.width = Some(w - w / 2);
+        right.shading = left.shading;
+        right.borders = left.borders;
+        table.rows[r].cells[c] = left;
+        table.rows[r].cells.insert(c + 1, right);
+        table.touch_grid();
+        let after = *paras[r][c].last().unwrap() + 1;
+        for k in (c + 1..paras[r].len()).rev() {
+            for &p in &paras[r][k] {
+                self.retag(p, CellRef::new(id, r as u32, (k + 1) as u32));
+            }
+        }
+        let like = self.doc.paragraphs[paras[r][c][0]].props.clone();
+        self.apply_op(Op::InsertPara { para: after, paragraph: Editor::cell_para(CellRef::new(id, r as u32, (c + 1) as u32), Some(&like)) });
+        self.apply_op(Op::SetTable { id, table: Some(table) });
+        self.commit();
+        Ok("Cell split in two")
+    }
+
+    /// Sort the table's rows (header rows stay) by the cursor's column:
+    /// numerically when every key is a number, else alphabetically.
+    pub fn sort_rows(&mut self, descending: bool) -> Result<usize, &'static str> {
+        let at = self.at_table().ok_or("Not in a table")?;
+        let id = at.cell.table;
+        let mut table = self.doc.tables.get(&id).cloned().ok_or("Not in a table")?;
+        if table.rows.iter().any(|r| r.cells.iter().any(|c| c.vmerge.is_some())) {
+            return Err("Can't sort a table with vertically merged cells");
+        }
+        let paras = self.doc.table_paras(self.cursor.para).ok_or("Not in a table")?;
+        let g = table.grid_col(at.cell.row as usize, at.cell.col as usize);
+        let first = table.rows.iter().take_while(|r| r.header).count();
+        if table.rows.len() - first < 2 {
+            return Err("Nothing to sort");
+        }
+        let key = |ed: &Editor, r: usize| -> String {
+            let ci = table.cell_at_grid(r, g);
+            paras[r].get(ci).map(|cell| cell.iter().map(|&p| ed.doc.paragraphs[p].text()).collect::<Vec<_>>().join(" ")).unwrap_or_default().trim().to_string()
+        };
+        let keys: Vec<String> = (first..table.rows.len()).map(|r| key(self, r)).collect();
+        let nums: Vec<Option<f64>> = keys.iter().map(|k| parse_number(k)).collect();
+        let numeric = nums.iter().all(|n| n.is_some());
+        let mut order: Vec<usize> = (0..keys.len()).collect();
+        order.sort_by(|&a, &b| {
+            let o = if numeric { nums[a].partial_cmp(&nums[b]).unwrap_or(std::cmp::Ordering::Equal) } else { keys[a].to_lowercase().cmp(&keys[b].to_lowercase()) };
+            if descending {
+                o.reverse()
+            } else {
+                o
+            }
+        });
+        if order.iter().enumerate().all(|(i, &o)| i == o) {
+            return Ok(0);
+        }
+        self.commit();
+        // Rebuild the data rows' paragraphs in the new order.
+        let data_start = paras[first][0][0];
+        let data_end = *paras.last().unwrap().last().unwrap().last().unwrap() + 1;
+        let mut new_paras: Vec<Paragraph> = Vec::new();
+        let mut new_rows: Vec<TableRow> = Vec::new();
+        for (new_r, &o) in order.iter().enumerate() {
+            let r = first + o;
+            for (ci, cell) in paras[r].iter().enumerate() {
+                for &p in cell {
+                    let mut q = self.doc.paragraphs[p].clone();
+                    q.props.cell = Some(CellRef::new(id, (first + new_r) as u32, ci as u32));
+                    new_paras.push(q);
+                }
+            }
+            new_rows.push(table.rows[r].clone());
+        }
+        for i in (data_start..data_end).rev() {
+            self.apply_op(Op::RemovePara { para: i });
+        }
+        for (k, p) in new_paras.into_iter().enumerate() {
+            self.apply_op(Op::InsertPara { para: data_start + k, paragraph: p });
+        }
+        table.rows.truncate(first);
+        table.rows.extend(new_rows);
+        self.apply_op(Op::SetTable { id, table: Some(table) });
+        self.cursor = Pos::new(data_start, 0);
+        self.anchor = None;
+        self.goal_x = None;
+        self.commit();
+        Ok(order.len())
+    }
+
+    /// Insert a formula field (`=SUM(ABOVE)`) at the cursor with its value.
+    pub fn insert_formula(&mut self, formula: &str) -> Result<String, String> {
+        let cell = self.current_cell().ok_or("Formulas go in table cells")?;
+        let f = formula.trim().trim_start_matches('=').trim();
+        let value = evaluate_formula(&self.doc, cell, f)?;
+        self.insert_field(&format!(" ={} ", f), &value);
+        Ok(value)
+    }
+
+    /// Recompute every formula field in the document. Returns how many
+    /// results changed.
+    pub fn recalculate(&mut self) -> usize {
+        self.commit();
+        let mut changed = 0;
+        let mut pi = 0;
+        while pi < self.doc.paragraphs.len() {
+            let Some(cell) = self.doc.cell_of(pi) else {
+                pi += 1;
+                continue;
+            };
+            let mut idx = 0;
+            while idx < self.doc.paragraphs[pi].items.len() {
+                let instr = match &self.doc.paragraphs[pi].items[idx] {
+                    Item::Code(Code::Opaque(o)) => crate::editor::field_instr(o).filter(|s| s.starts_with('=')),
+                    _ => None,
+                };
+                if let Some(instr) = instr {
+                    let close = self.doc.paired_code(Pos::new(pi, idx));
+                    if let Some(close) = close {
+                        let old: String = self.doc.paragraphs[pi].items[idx + 1..close].iter().filter_map(Item::as_char).collect();
+                        let new = evaluate_formula(&self.doc, cell, instr.trim_start_matches('=').trim()).unwrap_or_else(|e| format!("!{}", e));
+                        if new != old {
+                            let saved = self.cursor;
+                            self.apply_op(Op::Delete { at: Pos::new(pi, idx + 1), len: close - idx - 1 });
+                            self.apply_op(Op::Insert { at: Pos::new(pi, idx + 1), items: new.chars().map(Item::Char).collect() });
+                            self.cursor = self.doc.clamp(saved);
+                            changed += 1;
+                        }
+                    }
+                }
+                idx += 1;
+            }
+            pi += 1;
+        }
+        self.commit();
+        changed
+    }
+
+    /// Set (or clear, with `None`) the height of the cursor's row.
+    pub fn set_row_height(&mut self, height: Option<Twips>, exact: bool) -> bool {
+        let Some(at) = self.at_table() else { return false };
+        let id = at.cell.table;
+        let Some(mut table) = self.doc.tables.get(&id).cloned() else { return false };
+        let Some(row) = table.rows.get_mut(at.cell.row as usize) else { return false };
+        row.height = height;
+        row.height_exact = exact && height.is_some();
+        row.raw_trpr = None;
+        self.commit();
+        self.apply_op(Op::SetTable { id, table: Some(table) });
+        self.commit();
+        true
+    }
+
+    /// Toggle "may not split across pages" on the cursor's row.
+    pub fn toggle_cant_split(&mut self) -> Option<bool> {
+        let at = self.at_table()?;
+        let id = at.cell.table;
+        let mut table = self.doc.tables.get(&id).cloned()?;
+        let row = table.rows.get_mut(at.cell.row as usize)?;
+        row.cant_split = !row.cant_split;
+        row.raw_trpr = None;
+        let on = row.cant_split;
+        self.commit();
+        self.apply_op(Op::SetTable { id, table: Some(table) });
+        self.commit();
+        Some(on)
+    }
+
+    /// Set the table's lines.
+    pub fn set_table_borders(&mut self, borders: Option<TableBorders>) -> bool {
+        let Some(at) = self.at_table() else { return false };
+        let id = at.cell.table;
+        let Some(mut table) = self.doc.tables.get(&id).cloned() else { return false };
+        table.borders = borders;
+        self.commit();
+        self.apply_op(Op::SetTable { id, table: Some(table) });
+        self.commit();
+        true
+    }
+
+    /// Set the shading of the selected cells (or the cursor's).
+    pub fn set_cell_shading(&mut self, fill: Option<Rgb>) -> bool {
+        self.for_selected_cells(|c| c.shading = fill)
+    }
+
+    /// Set the lines of the selected cells (or the cursor's).
+    pub fn set_cell_borders(&mut self, borders: Option<CellBorders>) -> bool {
+        self.for_selected_cells(|c| c.borders = borders)
+    }
+
+    fn for_selected_cells(&mut self, f: impl Fn(&mut TableCell)) -> bool {
+        let Some(at) = self.at_table() else { return false };
+        let Some((r0, r1, g0, g1)) = self.selected_rect() else { return false };
+        let id = at.cell.table;
+        let Some(mut table) = self.doc.tables.get(&id).cloned() else { return false };
+        for r in r0..=r1 {
+            let row = &mut table.rows[r];
+            let mut acc = 0;
+            for c in row.cells.iter_mut() {
+                let (s, e) = (acc, acc + c.span());
+                acc = e;
+                if s <= g1 && e > g0 {
+                    f(c);
+                }
+            }
+        }
+        self.commit();
+        self.apply_op(Op::SetTable { id, table: Some(table) });
+        self.commit();
+        true
+    }
+
     /// Column width of the cursor's cell, in twips.
     pub fn current_column_width(&self) -> Option<Twips> {
         let c = self.current_cell()?;
         let t = self.doc.tables.get(&c.table)?;
         Some(t.cell_extent(c.row as usize, c.col as usize).1)
+    }
+}
+
+/// The first number in a cell's text (`$1,234.50` → 1234.5), if any.
+pub fn parse_number(s: &str) -> Option<f64> {
+    let cleaned: String = s.chars().filter(|c| !matches!(c, '$' | ',' | '%' | '€' | '£' | ' ')).collect();
+    let t = cleaned.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let neg = t.starts_with('(') && t.ends_with(')');
+    let t = t.trim_matches(|c| c == '(' || c == ')');
+    t.parse::<f64>().ok().map(|v| if neg { -v } else { v })
+}
+
+/// Evaluate a table formula (`SUM(ABOVE)`, `AVERAGE(LEFT)`, `MAX(A1:B3)`,
+/// `COUNT(BELOW)`, `MIN(RIGHT)`) for the cell it sits in.
+pub fn evaluate_formula(doc: &Document, cell: CellRef, f: &str) -> Result<String, String> {
+    let f = f.trim();
+    let open = f.find('(').ok_or("Formulas look like SUM(ABOVE), AVERAGE(LEFT) or SUM(A1:B3)")?;
+    let close = f.rfind(')').ok_or("Missing closing parenthesis")?;
+    if close < open {
+        return Err("Formulas look like SUM(ABOVE)".into());
+    }
+    let func = f[..open].trim().to_ascii_uppercase();
+    let arg = f[open + 1..close].trim().to_ascii_uppercase();
+    let t = doc.tables.get(&cell.table).ok_or("Not in a table")?;
+    let start = doc.table_span(cell.table).map(|(s, _)| s).ok_or("Not in a table")?;
+    let paras = doc.table_paras(start).ok_or("Not in a table")?;
+    let cell_text = |r: usize, ci: usize| -> String { paras.get(r).and_then(|row| row.get(ci)).map(|c| c.iter().map(|&p| doc.paragraphs[p].text()).collect::<Vec<_>>().join(" ")).unwrap_or_default() };
+    let g = t.grid_col(cell.row as usize, cell.col as usize);
+    let mut values: Vec<f64> = Vec::new();
+    let mut push_cell = |r: usize, ci: usize, stop_at_blank: bool| -> bool {
+        match parse_number(&cell_text(r, ci)) {
+            Some(v) => {
+                values.push(v);
+                true
+            }
+            None => !stop_at_blank,
+        }
+    };
+    match arg.as_str() {
+        "ABOVE" => {
+            for r in (0..cell.row as usize).rev() {
+                let ci = t.cell_at_grid(r, g);
+                if !push_cell(r, ci, true) {
+                    break;
+                }
+            }
+        }
+        "BELOW" => {
+            for r in cell.row as usize + 1..t.rows.len() {
+                let ci = t.cell_at_grid(r, g);
+                if !push_cell(r, ci, true) {
+                    break;
+                }
+            }
+        }
+        "LEFT" => {
+            for ci in (0..cell.col as usize).rev() {
+                if !push_cell(cell.row as usize, ci, true) {
+                    break;
+                }
+            }
+        }
+        "RIGHT" => {
+            for ci in cell.col as usize + 1..paras[cell.row as usize].len() {
+                if !push_cell(cell.row as usize, ci, true) {
+                    break;
+                }
+            }
+        }
+        _ => {
+            // A1:B3 range, or a list of cells.
+            for part in arg.split(',') {
+                let part = part.trim();
+                let (a, b) = match part.split_once(':') {
+                    Some((a, b)) => (parse_cell_name(a)?, parse_cell_name(b)?),
+                    None => {
+                        let c = parse_cell_name(part)?;
+                        (c, c)
+                    }
+                };
+                for r in a.1.min(b.1)..=a.1.max(b.1) {
+                    for ci in a.0.min(b.0)..=a.0.max(b.0) {
+                        push_cell(r, ci, false);
+                    }
+                }
+            }
+        }
+    }
+    let n = values.len() as f64;
+    let v = match func.as_str() {
+        "SUM" => values.iter().sum::<f64>(),
+        "AVERAGE" | "AVG" | "MEAN" => {
+            if values.is_empty() {
+                0.0
+            } else {
+                values.iter().sum::<f64>() / n
+            }
+        }
+        "COUNT" => n,
+        "MAX" => values.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        "MIN" => values.iter().cloned().fold(f64::INFINITY, f64::min),
+        "PRODUCT" => values.iter().product::<f64>(),
+        _ => return Err(format!("Unknown function {} (SUM, AVERAGE, COUNT, MAX, MIN, PRODUCT)", func)),
+    };
+    let v = if v.is_finite() { v } else { 0.0 };
+    Ok(format_number(v))
+}
+
+fn parse_cell_name(s: &str) -> Result<(usize, usize), String> {
+    let s = s.trim();
+    let letters: String = s.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+    let digits: String = s.chars().skip(letters.len()).collect();
+    if letters.is_empty() || digits.is_empty() {
+        return Err(format!("Not a cell name: {}", s));
+    }
+    let mut col = 0usize;
+    for c in letters.chars() {
+        col = col * 26 + (c.to_ascii_uppercase() as u8 - b'A') as usize + 1;
+    }
+    let row: usize = digits.parse().map_err(|_| format!("Not a cell name: {}", s))?;
+    if row == 0 {
+        return Err(format!("Not a cell name: {}", s));
+    }
+    Ok((col - 1, row - 1))
+}
+
+/// Numbers as Word shows formula results: no trailing zeros, at most two
+/// decimals.
+pub fn format_number(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 {
+        format!("{}", v.round() as i64)
+    } else {
+        let s = format!("{:.2}", v);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
     }
 }
 
@@ -723,6 +1325,107 @@ mod tests {
 
     fn ed() -> Editor {
         Editor::new(crate::text::from_text("before\nafter", false))
+    }
+
+    #[test]
+    fn merge_split_sort_and_formulas() {
+        let mut e = ed();
+        e.move_to(Pos::new(1, 0), false);
+        assert!(e.insert_table(3, 3));
+        // Fill: header row, then numbers.
+        for s in ["Item", "Qty", "Price", "b", "2", "20", "a", "1", "10"] {
+            e.insert_str(s);
+            e.next_cell_no_append();
+        }
+        assert!(e.doc.table_is_consistent(1));
+        // Formulas.
+        e.next_cell(); // adds a row
+        e.next_cell();
+        assert_eq!(e.current_cell(), Some(CellRef::new(1, 3, 1)));
+        assert_eq!(e.insert_formula("SUM(ABOVE)").unwrap(), "3");
+        e.next_cell();
+        assert_eq!(e.insert_formula("=AVERAGE(above)").unwrap(), "15");
+        assert_eq!(e.doc.paragraphs[e.cursor.para].text(), "15");
+        assert_eq!(evaluate_formula(&e.doc, CellRef::new(1, 3, 2), "MAX(B2:C3)").unwrap(), "20");
+        assert_eq!(evaluate_formula(&e.doc, CellRef::new(1, 3, 2), "COUNT(LEFT)").unwrap(), "1");
+        assert!(evaluate_formula(&e.doc, CellRef::new(1, 3, 2), "FOO(ABOVE)").is_err());
+        // Change a value and recalculate.
+        e.move_to(e.doc.cell_first_para(CellRef::new(1, 1, 2)).map(|p| Pos::new(p, 0)).unwrap(), false);
+        e.insert_str("1");
+        assert_eq!(e.doc.paragraphs[e.cursor.para].text(), "120");
+        assert_eq!(e.recalculate(), 1);
+        let avg = e.doc.cell_first_para(CellRef::new(1, 3, 2)).unwrap();
+        assert_eq!(e.doc.paragraphs[avg].text(), "65");
+        // Sort the data rows by the first column (header stays first).
+        e.move_to(Pos::new(e.doc.cell_first_para(CellRef::new(1, 0, 0)).unwrap(), 0), false);
+        assert_eq!(e.toggle_header_row(), Some(true));
+        e.move_to(Pos::new(e.doc.cell_first_para(CellRef::new(1, 1, 0)).unwrap(), 0), false);
+        assert_eq!(e.sort_rows(false).unwrap(), 3);
+        let col0: Vec<String> = (0..4).map(|r| e.doc.paragraphs[e.doc.cell_first_para(CellRef::new(1, r, 0)).unwrap()].text()).collect();
+        assert_eq!(col0, ["Item", "", "a", "b"]);
+        assert!(e.doc.table_is_consistent(1));
+        // Numeric sort on the Qty column, descending.
+        e.move_to(Pos::new(e.doc.cell_first_para(CellRef::new(1, 1, 1)).unwrap(), 0), false);
+        assert_eq!(e.sort_rows(true).unwrap(), 3);
+        let col1: Vec<String> = (0..4).map(|r| e.doc.paragraphs[e.doc.cell_first_para(CellRef::new(1, r, 1)).unwrap()].text()).collect();
+        assert_eq!(col1, ["Qty", "3", "2", "1"]);
+        // Merge B1:C1 horizontally.
+        let b1 = e.doc.cell_first_para(CellRef::new(1, 0, 1)).unwrap();
+        let c1 = e.doc.cell_first_para(CellRef::new(1, 0, 2)).unwrap();
+        e.move_to(Pos::new(b1, 0), false);
+        e.move_to(Pos::new(c1, 1), true);
+        e.merge_cells().unwrap();
+        assert_eq!(e.doc.tables[&1].rows[0].cells.len(), 2);
+        assert_eq!(e.doc.tables[&1].rows[0].cells[1].span, 2);
+        let merged = e.doc.cell_first_para(CellRef::new(1, 0, 1)).unwrap();
+        assert_eq!(e.doc.paragraphs[merged].text(), "Qty");
+        assert_eq!(e.doc.paragraphs[merged + 1].text(), "Price");
+        assert!(e.doc.table_is_consistent(1));
+        // Split it again.
+        e.move_to(Pos::new(merged, 0), false);
+        assert_eq!(e.split_cell().unwrap(), "Cell split into its columns");
+        assert_eq!(e.doc.tables[&1].rows[0].cells.len(), 3);
+        assert!(e.doc.table_is_consistent(1));
+        // Merge A2:A3 vertically.
+        let a2 = e.doc.cell_first_para(CellRef::new(1, 1, 0)).unwrap();
+        let a3 = e.doc.cell_first_para(CellRef::new(1, 2, 0)).unwrap();
+        e.move_to(Pos::new(a2, 0), false);
+        e.move_to(Pos::new(a3, 0), true);
+        e.merge_cells().unwrap();
+        assert_eq!(e.doc.tables[&1].rows[1].cells[0].vmerge, Some(VMerge::Restart));
+        assert_eq!(e.doc.tables[&1].rows[2].cells[0].vmerge, Some(VMerge::Continue));
+        assert!(e.doc.table_is_consistent(1));
+        assert!(e.sort_rows(false).is_err());
+        e.move_to(Pos::new(e.doc.cell_first_para(CellRef::new(1, 1, 0)).unwrap(), 0), false);
+        assert_eq!(e.split_cell().unwrap(), "Cells unmerged");
+        assert!(e.doc.tables[&1].rows[1].cells[0].vmerge.is_none());
+        // A plain cell splits its column in two.
+        assert_eq!(e.split_cell().unwrap(), "Cell split in two");
+        assert_eq!(e.doc.tables[&1].cols(), 4);
+        assert_eq!(e.doc.tables[&1].rows[0].cells[0].span, 2);
+        assert!(e.doc.table_is_consistent(1));
+        // Borders and shading; row height; undo all the way.
+        assert!(e.set_table_borders(None));
+        assert!(e.set_cell_shading(Some(Rgb(0xFF, 0xFF, 0))));
+        assert_eq!(e.doc.tables[&1].rows[1].cells[0].shading, Some(Rgb(0xFF, 0xFF, 0)));
+        assert!(e.set_row_height(Some(1440), false));
+        assert_eq!(e.doc.tables[&1].rows[1].height, Some(1440));
+        assert_eq!(e.toggle_cant_split(), Some(true));
+        while e.undo() {}
+        assert_eq!(e.doc.text(), "before\nafter");
+        assert!(e.doc.tables.is_empty());
+    }
+
+    #[test]
+    fn numbers_and_names() {
+        assert_eq!(parse_number("$1,234.50"), Some(1234.5));
+        assert_eq!(parse_number("(12)"), Some(-12.0));
+        assert_eq!(parse_number("n/a"), None);
+        assert_eq!(parse_cell_name("B3").unwrap(), (1, 2));
+        assert_eq!(parse_cell_name("AA1").unwrap(), (26, 0));
+        assert_eq!(format_number(2.5), "2.5");
+        assert_eq!(format_number(3.0), "3");
+        assert_eq!(format_number(1.0 / 3.0), "0.33");
     }
 
     fn cells(e: &Editor) -> Vec<String> {
