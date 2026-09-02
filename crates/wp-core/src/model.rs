@@ -559,8 +559,10 @@ pub struct ParaProps {
     pub mark: RunProps,
     /// Unknown `w:pPr` children, preserved verbatim.
     pub opaque: Vec<String>,
-    /// A section break attached to this paragraph (`w:pPr/w:sectPr`), verbatim.
-    pub sect_break: Option<String>,
+    /// A section break: this paragraph is the last of a section whose page
+    /// setup is these properties (`w:pPr/w:sectPr`). The section after the
+    /// last break is `Document::section`.
+    pub sect_break: Option<SectionProps>,
     /// The complete `w:pPr` as read, kept until the properties are changed.
     pub raw_ppr: Option<String>,
     /// Attribute text of the `w:p` start tag as read (` w:rsidR="…"
@@ -742,8 +744,10 @@ pub struct TableRow {
     pub header: bool,
     /// Don't break this row across pages (`w:cantSplit`).
     pub cant_split: bool,
-    /// Row height in twips (`w:trHeight`), when set.
+    /// Row height in twips (`w:trHeight`), when set: a minimum, or exact
+    /// when `height_exact` (`w:hRule="exact"`).
     pub height: Option<Twips>,
+    pub height_exact: bool,
     /// Everything before the first `w:tc` (`w:tblPrEx`, `w:trPr`), verbatim.
     pub raw_trpr: Option<String>,
     /// Attribute text of the `w:tr` start tag.
@@ -840,9 +844,124 @@ pub enum Orientation {
     Landscape,
 }
 
-/// Page geometry for a section. v0.1 supports one section per document.
+/// How a section begins relative to the one before it (`w:type`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum SectionStart {
+    #[default]
+    NextPage,
+    Continuous,
+    EvenPage,
+    OddPage,
+}
+
+impl SectionStart {
+    pub fn docx_name(self) -> &'static str {
+        match self {
+            SectionStart::NextPage => "nextPage",
+            SectionStart::Continuous => "continuous",
+            SectionStart::EvenPage => "evenPage",
+            SectionStart::OddPage => "oddPage",
+        }
+    }
+    pub fn from_docx(s: &str) -> SectionStart {
+        match s {
+            "continuous" => SectionStart::Continuous,
+            "evenPage" => SectionStart::EvenPage,
+            "oddPage" => SectionStart::OddPage,
+            _ => SectionStart::NextPage,
+        }
+    }
+    pub fn title(self) -> &'static str {
+        match self {
+            SectionStart::NextPage => "New Page",
+            SectionStart::Continuous => "Continuous",
+            SectionStart::EvenPage => "Even Page",
+            SectionStart::OddPage => "Odd Page",
+        }
+    }
+}
+
+/// Header or footer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum HfKind {
+    Header,
+    Footer,
+}
+
+impl HfKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            HfKind::Header => "Header",
+            HfKind::Footer => "Footer",
+        }
+    }
+}
+
+/// Which pages of a section a header or footer applies to (`w:type` of a
+/// `w:headerReference`). `First` needs the section's `title_page`; `Even`
+/// needs the document's `even_odd_headers`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum HfPages {
+    Default,
+    First,
+    Even,
+}
+
+impl HfPages {
+    pub fn docx_name(self) -> &'static str {
+        match self {
+            HfPages::Default => "default",
+            HfPages::First => "first",
+            HfPages::Even => "even",
+        }
+    }
+    pub fn from_docx(s: &str) -> HfPages {
+        match s {
+            "first" => HfPages::First,
+            "even" => HfPages::Even,
+            _ => HfPages::Default,
+        }
+    }
+    pub fn title(self) -> &'static str {
+        match self {
+            HfPages::Default => "every page",
+            HfPages::First => "first page",
+            HfPages::Even => "even pages",
+        }
+    }
+}
+
+/// A section's reference to a header or footer body, by the id it has in
+/// `Document::headers` (the main part's relationship id in a `.docx`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HfRef {
+    pub kind: HfKind,
+    pub pages: HfPages,
+    pub id: String,
+}
+
+/// The body of a header or footer: paragraphs laid out against the
+/// section's text width. Kept as its own part in a `.docx`; `raw` is that
+/// part verbatim until the body is edited.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HeaderFooter {
+    pub kind: Option<HfKind>,
+    pub paragraphs: Vec<Paragraph>,
+    /// The part's XML as read (`None` for a body created in wp, or once
+    /// edited — the writer then regenerates it).
+    pub raw: Option<String>,
+    /// The root start tag of the part as read (`<w:hdr …>`), for the
+    /// namespace declarations.
+    pub root_tag: Option<String>,
+    /// The part's name in the package, once it has one.
+    pub part: Option<String>,
+}
+
+/// Page geometry and page furniture for a section.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SectionProps {
+    /// How the section begins (`w:type`).
+    pub start: SectionStart,
     pub page_width: Twips,
     pub page_height: Twips,
     pub margin_top: Twips,
@@ -854,8 +973,17 @@ pub struct SectionProps {
     pub gutter: Twips,
     pub orientation: Orientation,
     pub columns: u16,
-    /// The full `w:sectPr` element as read, for verbatim re-emission of the
-    /// parts we don't model (headers/footers refs, line numbering, etc.).
+    /// Space between columns (`w:cols/@w:space`).
+    pub column_space: Twips,
+    /// The first page has its own header/footer (`w:titlePg`).
+    pub title_page: bool,
+    /// Headers and footers that apply in this section.
+    pub hf: Vec<HfRef>,
+    /// Page numbering restarts at this number (`w:pgNumType/@w:start`).
+    pub page_start: Option<i32>,
+    /// Every child of `w:sectPr` as read, for verbatim re-emission of the
+    /// parts we don't model (line numbering, page borders, etc.). The
+    /// modelled children are replaced on write only when they changed.
     pub opaque_children: Vec<String>,
     /// Attribute text of the `w:sectPr` start tag as read.
     pub attrs: String,
@@ -865,6 +993,7 @@ impl Default for SectionProps {
     /// US Letter, 1" margins — Word's default.
     fn default() -> Self {
         SectionProps {
+            start: SectionStart::NextPage,
             page_width: 12240,
             page_height: 15840,
             margin_top: 1440,
@@ -876,10 +1005,13 @@ impl Default for SectionProps {
             gutter: 0,
             orientation: Orientation::Portrait,
             columns: 1,
+            column_space: 720,
+            title_page: false,
+            hf: Vec::new(),
+            page_start: None,
             opaque_children: Vec::new(),
             attrs: String::new(),
         }
-
     }
 }
 
@@ -896,6 +1028,51 @@ impl SectionProps {
     }
     pub fn text_height(&self) -> Twips {
         (self.page_height - self.margin_top - self.margin_bottom).max(720)
+    }
+    /// Columns per page, at least 1.
+    pub fn column_count(&self) -> usize {
+        self.columns.max(1) as usize
+    }
+    /// Width of one text column.
+    pub fn column_width(&self) -> Twips {
+        let n = self.column_count() as Twips;
+        ((self.text_width() - self.column_space.max(0) * (n - 1)) / n).max(360)
+    }
+    /// The header/footer id for `kind` on pages of type `pages`, if the
+    /// section has one.
+    pub fn hf_id(&self, kind: HfKind, pages: HfPages) -> Option<&str> {
+        self.hf.iter().find(|r| r.kind == kind && r.pages == pages).map(|r| r.id.as_str())
+    }
+    /// Which header/footer body a page uses: the first-page one on the first
+    /// page when the section has a title page, the even one on even pages
+    /// when the document distinguishes them, else the default.
+    pub fn hf_for_page(&self, kind: HfKind, first: bool, even: bool, even_odd: bool) -> Option<&str> {
+        if first && self.title_page {
+            if let Some(id) = self.hf_id(kind, HfPages::First) {
+                return Some(id);
+            }
+        }
+        if even && even_odd {
+            if let Some(id) = self.hf_id(kind, HfPages::Even) {
+                return Some(id);
+            }
+        }
+        self.hf_id(kind, HfPages::Default)
+    }
+    /// The page setup is the same (headers and preserved XML aside).
+    pub fn same_geometry(&self, o: &SectionProps) -> bool {
+        self.page_width == o.page_width
+            && self.page_height == o.page_height
+            && self.orientation == o.orientation
+            && self.margin_top == o.margin_top
+            && self.margin_bottom == o.margin_bottom
+            && self.margin_left == o.margin_left
+            && self.margin_right == o.margin_right
+            && self.header_distance == o.header_distance
+            && self.footer_distance == o.footer_distance
+            && self.gutter == o.gutter
+            && self.columns == o.columns
+            && self.column_space == o.column_space
     }
 }
 

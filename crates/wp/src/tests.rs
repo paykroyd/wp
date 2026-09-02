@@ -170,6 +170,63 @@ fn open_docx_render_and_page_rules() {
 }
 
 #[test]
+fn section_break_scopes_page_setup_and_saves() {
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("First section.");
+    h.key(KeyCode::Enter, NONE);
+    h.type_str("Second section.");
+    h.key(KeyCode::Home, NONE);
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("section break new page");
+    h.key(KeyCode::Enter, NONE);
+    assert_eq!(h.app.ed.doc.section_count(), 2);
+    assert_eq!(h.app.ed.page_count(), 2);
+    let s = h.screen();
+    assert!(s.contains("Section 2 of 2"), "{}", s);
+    h.app.status = None;
+    let s = h.screen();
+    assert!(s.contains("Sec 2/2") && s.contains("Pg 2/2"), "{}", s);
+    assert!(s.contains("─ Page 2 ─"), "{}", s);
+    // Landscape for section 2 only.
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("orientation landscape");
+    h.key(KeyCode::Enter, NONE);
+    assert_eq!(h.app.ed.section_at(0).orientation, wp_core::Orientation::Portrait);
+    assert_eq!(h.app.ed.doc.section.orientation, wp_core::Orientation::Landscape);
+    // Reveal Codes names the break and its kind.
+    h.key(KeyCode::Up, NONE);
+    h.key(KeyCode::F(3), ALT);
+    let s = h.screen();
+    assert!(s.contains("[Sect Brk:New Page]"), "{}", s);
+    h.key(KeyCode::F(3), ALT);
+    // Saved and reopened, both sections and the orientation survive.
+    let dir = std::env::temp_dir().join(format!("wp-section-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let docx = dir.join("s.docx");
+    h.app.save_to(&docx, crate::app::Format::Docx).unwrap();
+    let l = wp_docx::read(&docx).unwrap();
+    assert_eq!(l.doc.section_count(), 2);
+    assert_eq!(l.doc.section.orientation, wp_core::Orientation::Landscape);
+    assert_eq!(l.doc.section_at(0).orientation, wp_core::Orientation::Portrait);
+    let xml = l.package.get_str("word/document.xml").unwrap();
+    assert!(xml.contains("<w:pPr><w:sectPr><w:pgSz"), "{}", xml);
+    assert!(xml.contains("w:orient=\"landscape\""), "{}", xml);
+    // Deleting the break in Reveal Codes merges the sections: the earlier
+    // text takes the later section's setup.
+    let mut h2 = Harness::new(KeymapChoice::Modern);
+    h2.app.open_path(&docx).unwrap();
+    h2.key(KeyCode::F(3), ALT);
+    let s = h2.screen();
+    assert!(s.contains("[Sect Brk:New Page]"), "{}", s);
+    h2.key(KeyCode::Home, NONE);
+    h2.key(KeyCode::Left, NONE); // onto the paragraph codes
+    h2.key(KeyCode::Delete, NONE);
+    assert_eq!(h2.app.ed.doc.section_count(), 1, "{}", h2.screen());
+    assert_eq!(h2.app.ed.section_at(0).orientation, wp_core::Orientation::Landscape);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn protected_content_refuses_edits() {
     let p = corpus("path-mixed.docx");
     if !p.exists() {

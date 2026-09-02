@@ -149,7 +149,11 @@ fn parse_row(xml: &str, id: u32, row_idx: u32, ctx: &mut Ctx, pending: &mut Vec<
                             match c.tag.as_str() {
                                 "w:tblHeader" => row.header = start_tag(&c.xml).map_or(true, |t| attr_bool(&t, "w:val")),
                                 "w:cantSplit" => row.cant_split = start_tag(&c.xml).map_or(true, |t| attr_bool(&t, "w:val")),
-                                "w:trHeight" => row.height = start_tag(&c.xml).and_then(|t| attr_i32(&t, "w:val")),
+                                "w:trHeight" => {
+                                    let t = start_tag(&c.xml);
+                                    row.height = t.as_ref().and_then(|t| attr_i32(t, "w:val"));
+                                    row.height_exact = t.as_ref().and_then(|t| attr(t, "w:hRule")).as_deref() == Some("exact");
+                                }
                                 _ => {}
                             }
                         }
@@ -391,7 +395,7 @@ pub(crate) fn open_row(t: &Table, row: usize, out: &mut String) {
                 body.push_str("<w:cantSplit/>");
             }
             if let Some(h) = r.height {
-                let _ = write!(body, "<w:trHeight w:val=\"{}\"/>", h);
+                let _ = write!(body, "<w:trHeight w:val=\"{}\"{}/>", h, if r.height_exact { " w:hRule=\"exact\"" } else { "" });
             }
             if r.header {
                 body.push_str("<w:tblHeader/>");

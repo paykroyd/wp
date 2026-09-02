@@ -18,6 +18,11 @@ pub struct Document {
     /// Table grids, by id. Contents are the paragraphs whose `props.cell`
     /// names the table.
     pub tables: BTreeMap<u32, Table>,
+    /// Header and footer bodies by id; sections refer to them by `HfRef`.
+    pub headers: BTreeMap<String, HeaderFooter>,
+    /// Odd and even pages have different headers and footers
+    /// (`w:evenAndOddHeaders` in the settings part).
+    pub even_odd_headers: bool,
 }
 
 impl Default for Document {
@@ -59,6 +64,8 @@ impl Document {
             footnotes: Vec::new(),
             extra_rels: Vec::new(),
             tables: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            even_odd_headers: false,
         }
     }
 

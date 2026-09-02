@@ -12,6 +12,7 @@ pub mod model;
 pub mod numbering;
 pub mod reveal;
 pub mod search;
+pub mod section;
 pub mod table;
 
 pub mod style;

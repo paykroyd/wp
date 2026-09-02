@@ -877,7 +877,9 @@ pub fn render_ppr_body(p: &ParaProps) -> String {
         push("w:rPr", mark);
     }
     if let Some(s) = &p.sect_break {
-        push("w:sectPr", s.clone());
+        let mut xml = String::new();
+        render_sectpr(s, &mut xml);
+        push("w:sectPr", xml);
     }
     for o in &p.opaque {
         let tag = start_tag(o).map(|e| String::from_utf8_lossy(e.name().as_ref()).into_owned()).unwrap_or_default();
@@ -895,31 +897,41 @@ pub fn render_ppr_body(p: &ParaProps) -> String {
     out
 }
 
-fn render_sectpr(s: &SectionProps, out: &mut String) {
+/// Schema order of `w:sectPr` children (CT_SectPr).
+const SECTPR_ORDER: &[&str] = &[
+    "w:headerReference", "w:footerReference", "w:footnotePr", "w:endnotePr", "w:type", "w:pgSz", "w:pgMar",
+    "w:paperSrc", "w:pgBorders", "w:lnNumType", "w:pgNumType", "w:cols", "w:formProt", "w:vAlign", "w:noEndnote",
+    "w:titlePg", "w:textDirection", "w:bidi", "w:rtlGutter", "w:docGrid", "w:printerSettings", "w:sectPrChange",
+];
+
+/// Emit a `w:sectPr`: the children as read, with the modelled ones
+/// (page geometry, section start, title page, header and footer
+/// references) regenerated only when they differ from what was read.
+pub fn render_sectpr(s: &SectionProps, out: &mut String) {
     out.push_str("<w:sectPr");
     out.push_str(&s.attrs);
     out.push('>');
 
-    let mut children: Vec<String> = s.opaque_children.clone();
-    let original = if children.is_empty() {
-        None
-    } else {
-        Some(parse_sectpr(&format!("<w:sectPr>{}</w:sectPr>", children.concat())))
+    let mut children: Vec<RawChild> = s
+        .opaque_children
+        .iter()
+        .map(|c| RawChild { tag: start_tag(c).map(|e| String::from_utf8_lossy(e.name().as_ref()).into_owned()).unwrap_or_default(), xml: c.clone() })
+        .collect();
+    let original = if children.is_empty() { None } else { Some(parse_sectpr(&format!("<w:sectPr>{}</w:sectPr>", s.opaque_children.concat()))) };
+    let geometry_unchanged = original.as_ref().map_or(false, |o| o.same_geometry(s));
+    let start_unchanged = original.as_ref().map_or(s.start == SectionStart::NextPage, |o| o.start == s.start);
+    let title_unchanged = original.as_ref().map_or(!s.title_page, |o| o.title_page == s.title_page);
+    let hf_unchanged = original.as_ref().map_or(s.hf.is_empty(), |o| o.hf == s.hf);
+    let page_start_unchanged = original.as_ref().map_or(s.page_start.is_none(), |o| o.page_start == s.page_start);
+
+    // Replace a modelled child, or add it (schema order is restored below).
+    let set = |children: &mut Vec<RawChild>, tag: &str, xml: Option<String>| {
+        children.retain(|c| c.tag != tag);
+        if let Some(xml) = xml {
+            children.push(RawChild { tag: tag.to_string(), xml });
+        }
     };
-    let geometry_unchanged = original.as_ref().map(|o| {
-        o.page_width == s.page_width
-            && o.page_height == s.page_height
-            && o.orientation == s.orientation
-            && o.margin_top == s.margin_top
-            && o.margin_bottom == s.margin_bottom
-            && o.margin_left == s.margin_left
-            && o.margin_right == s.margin_right
-            && o.header_distance == s.header_distance
-            && o.footer_distance == s.footer_distance
-            && o.gutter == s.gutter
-            && o.columns == s.columns
-    });
-    if geometry_unchanged != Some(true) {
+    if !geometry_unchanged {
         let pgsz = format!(
             "<w:pgSz w:w=\"{}\" w:h=\"{}\"{}/>",
             s.page_width,
@@ -930,56 +942,45 @@ fn render_sectpr(s: &SectionProps, out: &mut String) {
             "<w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\" w:header=\"{}\" w:footer=\"{}\" w:gutter=\"{}\"/>",
             s.margin_top, s.margin_right, s.margin_bottom, s.margin_left, s.header_distance, s.footer_distance, s.gutter
         );
-        let cols = format!("<w:cols w:num=\"{}\" w:space=\"720\"/>", s.columns);
-        let mut replaced = [false; 3];
-        for c in children.iter_mut() {
-            let tag = start_tag(c).map(|e| String::from_utf8_lossy(e.name().as_ref()).into_owned()).unwrap_or_default();
-            match tag.as_str() {
-                "w:pgSz" => {
-                    *c = pgsz.clone();
-                    replaced[0] = true;
-                }
-                "w:pgMar" => {
-                    *c = pgmar.clone();
-                    replaced[1] = true;
-                }
-                "w:cols" => {
-                    if s.columns != 1 || original.as_ref().map(|o| o.columns) != Some(1) {
-                        *c = cols.clone();
-                    }
-                    replaced[2] = true;
-                }
-                _ => {}
-            }
-        }
-        // Insert missing geometry in schema order: pgSz, pgMar come after headers/footers refs.
-        let mut extra = Vec::new();
-        if !replaced[0] {
-            extra.push(pgsz);
-        }
-        if !replaced[1] {
-            extra.push(pgmar);
-        }
-        if !replaced[2] && s.columns != 1 {
-            extra.push(cols);
-        }
-        // Place after any header/footer references and type.
-        let idx = children
-            .iter()
-            .position(|c| {
-                let t = start_tag(c).map(|e| e.name().as_ref().to_vec()).unwrap_or_default();
-                !matches!(t.as_slice(), b"w:headerReference" | b"w:footerReference" | b"w:footnotePr" | b"w:endnotePr" | b"w:type")
-            })
-            .unwrap_or(children.len());
-        for (i, e) in extra.into_iter().enumerate() {
-            children.insert(idx + i, e);
+        set(&mut children, "w:pgSz", Some(pgsz));
+        set(&mut children, "w:pgMar", Some(pgmar));
+        let cols_changed = original.as_ref().map_or(true, |o| o.columns != s.columns || o.column_space != s.column_space);
+        if cols_changed || !children.iter().any(|c| c.tag == "w:cols") {
+            let cols = if s.columns > 1 {
+                format!("<w:cols w:num=\"{}\" w:space=\"{}\"/>", s.columns, s.column_space)
+            } else {
+                format!("<w:cols w:space=\"{}\"/>", s.column_space)
+            };
+            set(&mut children, "w:cols", Some(cols));
         }
         if original.is_none() {
-            children.push("<w:docGrid w:linePitch=\"360\"/>".into());
+            set(&mut children, "w:docGrid", Some("<w:docGrid w:linePitch=\"360\"/>".into()));
         }
     }
+    if !start_unchanged {
+        set(&mut children, "w:type", if s.start == SectionStart::NextPage && original.is_none() { None } else { Some(format!("<w:type w:val=\"{}\"/>", s.start.docx_name())) });
+    }
+    if !title_unchanged {
+        set(&mut children, "w:titlePg", if s.title_page { Some("<w:titlePg/>".into()) } else { None });
+    }
+    if !page_start_unchanged {
+        set(&mut children, "w:pgNumType", s.page_start.map(|n| format!("<w:pgNumType w:start=\"{}\"/>", n)));
+    }
+    if !hf_unchanged {
+        children.retain(|c| c.tag != "w:headerReference" && c.tag != "w:footerReference");
+        for r in &s.hf {
+            let tag = match r.kind {
+                HfKind::Header => "w:headerReference",
+                HfKind::Footer => "w:footerReference",
+            };
+            children.push(RawChild { tag: tag.to_string(), xml: format!("<{} w:type=\"{}\" r:id=\"{}\"/>", tag, r.pages.docx_name(), escape_attr(&r.id)) });
+        }
+    }
+    if !(geometry_unchanged && start_unchanged && title_unchanged && hf_unchanged && page_start_unchanged) {
+        children.sort_by_key(|c| SECTPR_ORDER.iter().position(|t| *t == c.tag).unwrap_or(SECTPR_ORDER.len() - 3));
+    }
     for c in children {
-        out.push_str(&c);
+        out.push_str(&c.xml);
     }
     out.push_str("</w:sectPr>");
 }

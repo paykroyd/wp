@@ -228,6 +228,9 @@ Part of the modern map. Delivered only by terminals that report the Cmd key thro
 
 Commands with no default key in either map:
 
+- Columns: One
+- Columns: Three
+- Columns: Two
 - Continue Previous List
 - F-Key Legend (keyboard template)
 - Find Bold Text
@@ -249,6 +252,10 @@ Commands with no default key in either map:
 - Go to Heading…
 - Highlight…
 - Increase List Level (Demote)
+- Insert Section Break (Continuous)
+- Insert Section Break (Even Page)
+- Insert Section Break (New Page)
+- Insert Section Break (Odd Page)
 - Keep Lines Together
 - Keep With Next Paragraph
 - Keyboard: Classic (WordPerfect 5.1 F-keys)

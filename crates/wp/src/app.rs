@@ -1709,10 +1709,19 @@ impl App {
                 }
             }
             Cmd::PageSetup | Cmd::Margins => {
-                let s = &self.ed.doc.section;
+                let s = self.ed.section_at(self.ed.cursor.para);
                 let cur = format!("{} {} {} {}", inches(s.margin_top), inches(s.margin_bottom), inches(s.margin_left), inches(s.margin_right));
-                self.prompt(PromptKind::Margins, "Margins in inches — top bottom left right: ", &cur);
+                let (n, total) = self.ed.cursor_section();
+                let label = if total > 1 { format!("Margins for section {} in inches — top bottom left right: ", n) } else { "Margins in inches — top bottom left right: ".to_string() };
+                self.prompt(PromptKind::Margins, &label, &cur);
             }
+            Cmd::SectionBreakNextPage => self.section_break(SectionStart::NextPage),
+            Cmd::SectionBreakContinuous => self.section_break(SectionStart::Continuous),
+            Cmd::SectionBreakOddPage => self.section_break(SectionStart::OddPage),
+            Cmd::SectionBreakEvenPage => self.section_break(SectionStart::EvenPage),
+            Cmd::ColumnsOne => self.section(|s| s.columns = 1),
+            Cmd::ColumnsTwo => self.section(|s| s.columns = 2),
+            Cmd::ColumnsThree => self.section(|s| s.columns = 3),
             Cmd::PaperLetter => self.section(|s| {
                 s.page_width = 12240;
                 s.page_height = 15840;
@@ -2173,10 +2182,26 @@ impl App {
         self.ed.set_wrap(self.cfg.draft_wrap.mode());
     }
 
+    /// Change the page setup of the section the cursor is in.
     fn section(&mut self, f: impl Fn(&mut SectionProps)) {
-        let mut s = self.ed.doc.section.clone();
+        let para = self.ed.cursor.para;
+        let mut s = self.ed.section_at(para);
         f(&mut s);
-        self.ed.set_section(s);
+        self.ed.set_section_at(para, s);
+    }
+
+    fn section_break(&mut self, start: SectionStart) {
+        if !self.guard_edit() {
+            return;
+        }
+        if self.ed.insert_section_break(start) {
+            let (n, total) = self.ed.cursor_section();
+            self.message(format!("Section {} of {} begins here ({}); page setup commands now apply to it", n, total, start.title().to_lowercase()));
+        } else {
+            self.message("Can't start a section inside a table");
+        }
+        self.block_mode = false;
+        self.reveal_para_code = None;
     }
 
     fn apply_style_named(&mut self, id: &str) {

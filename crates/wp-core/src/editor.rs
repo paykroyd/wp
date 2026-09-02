@@ -4,6 +4,7 @@ use crate::document::{rewrite_attrs, AttrMap, Document};
 use crate::edit::Op;
 use crate::layout::{self, Pagination, ParaLayout, ScreenLine, WrapMode};
 use crate::model::*;
+use crate::section::Sections;
 use crate::numbering::ListLabel;
 use crate::reveal::{self, ParaCode};
 use std::collections::VecDeque;
@@ -86,6 +87,10 @@ pub struct LayoutCache {
     /// structure or properties change (one cheap pass).
     labels: Vec<Option<ListLabel>>,
     labels_dirty: bool,
+    /// The section of each paragraph, rebuilt with the labels.
+    pub sections: Sections,
+    /// Header/footer bodies laid out by (id, text width).
+    hf: std::collections::HashMap<(String, Twips), std::rc::Rc<Vec<ParaLayout>>>,
 }
 
 pub struct Editor {
@@ -124,6 +129,8 @@ impl Editor {
                 pagination_dirty: true,
                 labels: vec![None; n],
                 labels_dirty: true,
+                sections: Sections::default(),
+                hf: std::collections::HashMap::new(),
             },
             cut_ring: VecDeque::new(),
             typeover: false,
@@ -179,8 +186,9 @@ impl Editor {
         self.layout.labels_dirty = true;
     }
 
-    /// Recompute list labels if paragraph structure changed; any paragraph
-    /// whose label changed is laid out again.
+    /// Recompute list labels and the section map if paragraph structure
+    /// changed; any paragraph whose label or text width changed is laid
+    /// out again.
     fn refresh_labels(&mut self) {
         if !self.layout.labels_dirty {
             return;
@@ -196,7 +204,100 @@ impl Editor {
             }
         }
         self.layout.labels = new;
+        let secs = Sections::build(&self.doc);
+        let old = &self.layout.sections;
+        for i in 0..self.doc.paragraphs.len() {
+            let same = old.of.get(i).map_or(false, |_| old.section_of(i).column_width() == secs.section_of(i).column_width());
+            if !same && i < self.layout.print.len() {
+                self.layout.print[i] = None;
+                self.layout.screen[i] = None;
+            }
+        }
+        if *old != secs {
+            self.layout.pagination_dirty = true;
+        }
+        self.layout.sections = secs;
         self.layout.labels_dirty = false;
+    }
+
+    /// The section that governs a paragraph.
+    pub fn section_at(&mut self, para: usize) -> SectionProps {
+        self.refresh_labels();
+        self.layout.sections.section_of(para).clone()
+    }
+
+    /// 1-based number of the section the cursor is in, and how many there are.
+    pub fn cursor_section(&mut self) -> (usize, usize) {
+        self.refresh_labels();
+        (self.layout.sections.index_of(self.cursor.para) + 1, self.layout.sections.len())
+    }
+
+    /// Replace the properties of the section governing `para`: the section
+    /// break that ends it, or the document's final section.
+    pub fn set_section_at(&mut self, para: usize, s: SectionProps) {
+        self.commit();
+        match self.doc.section_owner(para) {
+            Some(k) => {
+                let mut props = self.doc.paragraphs[k].props.clone();
+                props.sect_break = Some(s);
+                props.touch();
+                self.apply(Op::SetParaProps { para: k, props });
+            }
+            None => self.apply(Op::SetSection(s)),
+        }
+        self.commit();
+    }
+
+    /// End the current section at the cursor: the paragraph is split there
+    /// and the half before the cursor carries a copy of the section's
+    /// properties (Word's convention), so the new section that follows
+    /// keeps the existing setup and begins as `start` says.
+    pub fn insert_section_break(&mut self, start: SectionStart) -> bool {
+        if self.current_cell().is_some() || self.doc.paragraphs[self.cursor.para].props.raw_block {
+            return false;
+        }
+        self.commit();
+        if self.has_selection() {
+            self.delete_selection();
+        }
+        let para = self.cursor.para;
+        let governing = self.doc.section_at(para).clone();
+        let owner = self.doc.section_owner(para);
+        // At the start of a paragraph the break goes on the paragraph before
+        // (no empty paragraph is left behind); otherwise the paragraph is
+        // split and the tail keeps any break that ended the section, now
+        // describing the section that starts here.
+        let prev_ok = self.cursor.idx == 0
+            && para > 0
+            && self.doc.paragraphs[para - 1].props.cell.is_none()
+            && !self.doc.paragraphs[para - 1].props.raw_block
+            && self.doc.paragraphs[para - 1].props.sect_break.is_none();
+        if prev_ok {
+            self.cursor = Pos::new(para, 0);
+        } else {
+            self.split_paragraph_raw();
+        }
+        let head = self.cursor.para - 1;
+        let mut head_props = self.doc.paragraphs[head].props.clone();
+        head_props.sect_break = Some(SectionProps { start: governing.start, ..governing.clone() });
+        head_props.touch();
+        self.apply(Op::SetParaProps { para: head, props: head_props });
+        let mut after = governing;
+        after.start = start;
+        match owner {
+            Some(_) => {
+                let k = self.cursor.para + (owner.unwrap() - para);
+                let mut props = self.doc.paragraphs[k].props.clone();
+                props.sect_break = Some(after);
+                props.touch();
+                self.apply(Op::SetParaProps { para: k, props });
+            }
+            None => self.apply(Op::SetSection(after)),
+        }
+        self.commit();
+        self.anchor = None;
+        self.goal_x = None;
+        true
     }
 
     /// The list label of a paragraph, if it is a list item.
@@ -212,21 +313,71 @@ impl Editor {
         debug_assert_eq!(self.layout.print.len(), n);
         for i in 0..n {
             if self.layout.print[i].is_none() {
-                self.layout.print[i] = Some(layout::layout_paragraph(&self.doc, i, self.layout.labels[i].as_ref()));
+                self.layout.print[i] = Some(layout::layout_paragraph_in(&self.doc, i, self.layout.labels[i].as_ref(), self.layout.sections.section_of(i)));
                 self.layout.pagination_dirty = true;
             }
         }
         if self.layout.pagination_dirty {
             let layouts: Vec<ParaLayout> = self.layout.print.iter().map(|l| l.clone().unwrap()).collect();
-            self.layout.pagination = layout::paginate(&self.doc, &layouts);
+            let furniture = self.furniture();
+            self.layout.pagination = layout::paginate_with(&self.doc, &layouts, &self.layout.sections, &|sec, first, even| furniture.get(&(sec, first, even)).cloned().unwrap_or_default());
             self.layout.pagination_dirty = false;
         }
+    }
+
+    /// The laid-out body of header/footer `id` at the text width of `sect`.
+    pub fn hf_layout(&mut self, id: &str, sect: &SectionProps) -> Option<std::rc::Rc<Vec<ParaLayout>>> {
+        let width = sect.text_width();
+        let key = (id.to_string(), width);
+        if let Some(l) = self.layout.hf.get(&key) {
+            return Some(l.clone());
+        }
+        let hf = self.doc.headers.get(id)?;
+        let l = std::rc::Rc::new(crate::section::layout_body(&self.doc, hf, sect));
+        self.layout.hf.insert(key, l.clone());
+        Some(l)
+    }
+
+    /// The header or footer a page of section `sec` shows, by id.
+    pub fn hf_id_for(&self, sec: &SectionProps, kind: HfKind, first: bool, even: bool) -> Option<String> {
+        sec.hf_for_page(kind, first, even, self.doc.even_odd_headers).map(|s| s.to_string())
+    }
+
+    /// Header and footer bodies changed: lay them out again and repaginate.
+    pub fn invalidate_headers(&mut self) {
+        self.layout.hf.clear();
+        self.layout.pagination_dirty = true;
+    }
+
+    /// Header and footer space per (section, first page, even page).
+    fn furniture(&mut self) -> std::collections::HashMap<(usize, bool, bool), layout::PageFurniture> {
+        let mut m = std::collections::HashMap::new();
+        let secs = self.layout.sections.list.clone();
+        for (si, s) in secs.iter().enumerate() {
+            for first in [false, true] {
+                for even in [false, true] {
+                    let mut f = layout::PageFurniture::default();
+                    for (kind, dist, margin) in [(HfKind::Header, s.header_distance, s.margin_top), (HfKind::Footer, s.footer_distance, s.margin_bottom)] {
+                        let Some(id) = self.hf_id_for(s, kind, first, even) else { continue };
+                        let Some(l) = self.hf_layout(&id, s) else { continue };
+                        let h = crate::section::body_height(&l);
+                        let extra = (dist + h - margin).max(0);
+                        match kind {
+                            HfKind::Header => f.extra_top = extra,
+                            HfKind::Footer => f.extra_bottom = extra,
+                        }
+                    }
+                    m.insert((si, first, even), f);
+                }
+            }
+        }
+        m
     }
 
     pub fn print_layout(&mut self, para: usize) -> &ParaLayout {
         self.refresh_labels();
         if self.layout.print[para].is_none() {
-            self.layout.print[para] = Some(layout::layout_paragraph(&self.doc, para, self.layout.labels[para].as_ref()));
+            self.layout.print[para] = Some(layout::layout_paragraph_in(&self.doc, para, self.layout.labels[para].as_ref(), self.layout.sections.section_of(para)));
             self.layout.pagination_dirty = true;
         }
         self.layout.print[para].as_ref().unwrap()
@@ -273,7 +424,7 @@ impl Editor {
         let xs = layout::item_x_positions(&self.doc, c.para, &line);
         let x = xs.get(c.idx.saturating_sub(line.start)).copied().unwrap_or(0);
         let cell_x = self.doc.cell_x(c.para);
-        let sec = &self.doc.section;
+        let sec = self.layout.sections.section_of(c.para);
         (page + 1, sec.margin_top + y, sec.margin_left + cell_x + line.x + x)
     }
 
@@ -956,6 +1107,9 @@ impl Editor {
         // applies when splitting at the end of the paragraph.
         let mut props = self.doc.paragraphs[at.para].props.clone();
         let at_end = at.idx >= self.doc.paragraphs[at.para].items.len() - n_close;
+        // A section break belongs to the last paragraph of its section, so
+        // it moves to the new paragraph and leaves the one it was on.
+        let sect_break = props.sect_break.take();
         if at_end {
             if let Some(sid) = props.style.clone() {
                 if let Some(st) = self.doc.styles.get(&sid) {
@@ -967,11 +1121,15 @@ impl Editor {
                 }
             }
             props.page_break_before = None;
-            props.sect_break = None;
-        } else {
-            props.sect_break = None;
         }
         props.p_attrs = None;
+        props.sect_break = sect_break.clone();
+        if sect_break.is_some() {
+            let mut head = self.doc.paragraphs[at.para].props.clone();
+            head.sect_break = None;
+            head.touch();
+            self.apply(Op::SetParaProps { para: at.para, props: head });
+        }
         self.apply(Op::Split { at: split_at, props: Some(props) });
 
         let n_open = opens.len();
@@ -1543,6 +1701,7 @@ impl Editor {
         self.layout.labels = vec![None; n];
         self.layout.labels_dirty = true;
         self.layout.pagination_dirty = true;
+        self.layout.hf.clear();
         self.dirty = false;
     }
 
@@ -1554,6 +1713,39 @@ mod tests {
 
     fn ed(s: &str) -> Editor {
         Editor::new(crate::text::from_text(s, false))
+    }
+
+    #[test]
+    fn section_breaks_split_and_scope_page_setup() {
+        let mut e = ed("alpha\nbeta\ngamma");
+        e.move_to(Pos::new(1, 2), false);
+        assert!(e.insert_section_break(SectionStart::NextPage));
+        // "be" ends section 1; "ta" starts section 2.
+        assert_eq!(e.doc.text(), "alpha\nbe\nta\ngamma");
+        assert!(e.doc.paragraphs[1].props.sect_break.is_some());
+        assert_eq!(e.cursor, Pos::new(2, 0));
+        assert_eq!(e.cursor_section(), (2, 2));
+        assert_eq!(e.doc.section.start, SectionStart::NextPage);
+        assert_eq!(e.page_count(), 2);
+        // Landscape applies to the cursor's section only.
+        let mut s = e.section_at(2);
+        s.orientation = Orientation::Landscape;
+        std::mem::swap(&mut s.page_width, &mut s.page_height);
+        e.set_section_at(2, s);
+        assert_eq!(e.section_at(0).orientation, Orientation::Portrait);
+        assert_eq!(e.section_at(3).orientation, Orientation::Landscape);
+        // Enter at the end of a section's last paragraph keeps the break at
+        // the end of the section.
+        e.move_to(Pos::new(1, 2), false);
+        e.newline();
+        assert!(e.doc.paragraphs[1].props.sect_break.is_none());
+        assert!(e.doc.paragraphs[2].props.sect_break.is_some());
+        assert_eq!(e.cursor_section(), (1, 2));
+        // Undo it all.
+        while e.undo() {}
+        assert_eq!(e.doc.text(), "alpha\nbeta\ngamma");
+        assert_eq!(e.doc.section_count(), 1);
+        assert_eq!(e.page_count(), 1);
     }
 
     #[test]

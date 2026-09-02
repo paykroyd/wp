@@ -1113,6 +1113,10 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect, caps: Caps) {
     if let Some(c) = app.ed.current_cell() {
         indicators.push(format!("Cell {}", c.name()));
     }
+    let (sec, secs) = app.ed.cursor_section();
+    if secs > 1 {
+        indicators.push(format!("Sec {}/{}", sec, secs));
+    }
     // The paragraph style at the cursor, when it is not the default one.
     if let Some(id) = app.ed.doc.paragraphs.get(app.ed.cursor.para).and_then(|p| p.props.style.as_deref()) {
         let name = app.ed.doc.styles.get(id).map(|s| s.name.as_str()).unwrap_or(id);

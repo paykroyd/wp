@@ -5,6 +5,7 @@ use crate::document::{Document, Run};
 use crate::metrics;
 use crate::model::*;
 use crate::numbering::{ListLabel, Suffix};
+use crate::section::Sections;
 
 /// Default tab interval when no tab stop applies (Word: 0.5").
 pub const DEFAULT_TAB: Twips = 720;
@@ -130,13 +131,21 @@ fn place_label(doc: &Document, para: usize, pp: &ParaProps, label: &ListLabel) -
     (LabelPlacement { text: label.text.clone(), x, width, props }, text_x)
 }
 
-/// Lay out one paragraph against the section's text width.
+/// Lay out one paragraph against the width of the section that governs it
+/// (found by a forward scan; the editor uses [`layout_paragraph_in`] with
+/// its cached section map).
 pub fn layout_paragraph(doc: &Document, para: usize, label: Option<&ListLabel>) -> ParaLayout {
+    let sect = doc.section_at(para).clone();
+    layout_paragraph_in(doc, para, label, &sect)
+}
+
+/// Lay out one paragraph against the text column of `sect`.
+pub fn layout_paragraph_in(doc: &Document, para: usize, label: Option<&ListLabel>, sect: &SectionProps) -> ParaLayout {
     let p = &doc.paragraphs[para];
     let pp = doc.para_props(para);
     let runs: Vec<Run> = doc.runs(para);
     // Inside a table cell the column, not the page, bounds the text.
-    let text_width = doc.cell_text_width(para).unwrap_or_else(|| doc.section.text_width());
+    let text_width = doc.cell_text_width(para).unwrap_or_else(|| sect.column_width());
     let base_x = pp.indent_left();
     let mut first_off = pp.first_line_offset();
     let label = label.filter(|l| !l.text.is_empty()).map(|l| place_label(doc, para, &pp, l));
@@ -319,10 +328,37 @@ pub struct ParaPlacement {
     pub line_y: Vec<Twips>,
 }
 
+/// Which header and footer a page shows, and how much of the page they
+/// take beyond the margins. Computed by the caller of [`paginate`] (the
+/// editor lays out the header bodies); the pager only needs the heights.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct PageFurniture {
+    /// Extra space the header needs below the top margin, and the footer
+    /// above the bottom margin (0 when they fit inside the margins).
+    pub extra_top: Twips,
+    pub extra_bottom: Twips,
+}
+
+/// Header/footer space for a page: given the section index, whether the
+/// page is the first of its section, and whether it is an even page.
+pub type FurnitureFn<'a> = &'a dyn Fn(usize, bool, bool) -> PageFurniture;
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Pagination {
     pub pages: Vec<PageStart>,
     pub placements: Vec<ParaPlacement>,
+    /// Section index (into [`Sections::list`]) of each page.
+    pub page_section: Vec<u32>,
+    /// Whether each page is the first page of its section.
+    pub page_first_in_section: Vec<bool>,
+    /// Text height available on each page (after headers and footers).
+    pub page_text_height: Vec<Twips>,
+    /// Pages on which a table continues from the previous page and repeats
+    /// its header rows at the top: `(page, table id)`.
+    pub repeated_headers: Vec<(u32, u32)>,
+    /// Pages that are blank because an odd- or even-page section start
+    /// needed one.
+    pub blank_pages: Vec<u32>,
 }
 
 impl Pagination {
@@ -339,31 +375,78 @@ impl Pagination {
     pub fn start_of_page(&self, page: usize) -> Option<PageStart> {
         self.pages.get(page).copied()
     }
+    pub fn section_of_page(&self, page: usize) -> usize {
+        self.page_section.get(page).copied().unwrap_or(0) as usize
+    }
+    pub fn is_blank(&self, page: usize) -> bool {
+        self.blank_pages.contains(&(page as u32))
+    }
+    /// The number printed on a page: pages count from 1, or from the
+    /// section's `page_start` when it restarts numbering.
+    pub fn page_number(&self, page: usize, secs: &Sections) -> i32 {
+        let mut n = 1;
+        for p in 0..=page.min(self.pages.len().saturating_sub(1)) {
+            let si = self.section_of_page(p);
+            if self.page_first_in_section.get(p).copied().unwrap_or(false) {
+                if let Some(s) = secs.list.get(si).and_then(|s| s.page_start) {
+                    n = s;
+                    continue;
+                }
+            }
+            if p > 0 {
+                n += 1;
+            }
+        }
+        n
+    }
 }
 
-/// Paginate the document given per-paragraph layouts. Table rows are placed
-/// as units: the cells of a row start at the same y, the row's height is
-/// its tallest cell's, and a row taller than the space left moves to the
-/// next page whole (splitting only when it is taller than a page).
+/// Paginate the document given per-paragraph layouts, with no headers or
+/// footers taken into account.
 pub fn paginate(doc: &Document, layouts: &[ParaLayout]) -> Pagination {
+    let secs = Sections::build(doc);
+    paginate_with(doc, layouts, &secs, &|_, _, _| PageFurniture::default())
+}
+
+/// Paginate the document. Sections start where their `start` says; table
+/// rows are placed as units — the cells of a row start at the same y, the
+/// row is as tall as its tallest cell, a row that may not split moves to
+/// the next page whole (unless it is taller than a page), and header rows
+/// repeat at the top of each page the table continues on.
+pub fn paginate_with(doc: &Document, layouts: &[ParaLayout], secs: &Sections, furniture: FurnitureFn<'_>) -> Pagination {
     let n = layouts.len();
     let mut pg = Pager {
-        page_h: doc.section.text_height(),
+        secs,
+        furniture,
+        sec: 0,
+        page_h: 0,
         pages: vec![PageStart { para: 0, line: 0 }],
+        page_section: vec![0],
+        page_first: vec![true],
+        page_text_height: vec![0],
+        repeated_headers: Vec::new(),
+        blank_pages: Vec::new(),
         placements: Vec::with_capacity(n),
         y: 0,
         page: 0,
         after_hard_break: true, // start of document behaves like one
     };
+    pg.page_h = pg.height_for(0, 0);
+    pg.page_text_height[0] = pg.page_h;
     let mut i = 0;
     while i < n {
-        if doc.cell_of(i).is_some() {
+        pg.enter_section(secs.index_of(i), i);
+        if let Some(c) = doc.cell_of(i) {
             let (_, end) = doc.table_bounds(i).unwrap();
             let rows = doc.table_paras(i).unwrap();
-            let header_h: Twips = 0;
-            let _ = header_h;
-            for row in &rows {
-                pg.place_row(row, layouts);
+            let table = doc.tables.get(&c.table).cloned().unwrap_or_default();
+            // Header rows: the leading rows flagged to repeat, and the
+            // height they take on a continuation page.
+            let n_header = table.rows.iter().take_while(|r| r.header).count().min(rows.len());
+            let header_h: Twips = rows.iter().take(n_header).enumerate().map(|(ri, row)| pg.row_height(row, layouts, table.rows.get(ri))).sum();
+            for (ri, row) in rows.iter().enumerate() {
+                let repeat = if ri >= n_header && n_header > 0 { Some((c.table, header_h)) } else { None };
+                pg.place_row(row, layouts, table.rows.get(ri), repeat);
             }
             if pg.y >= pg.page_h && end < n {
                 pg.new_page(end, 0);
@@ -375,35 +458,135 @@ pub fn paginate(doc: &Document, layouts: &[ParaLayout]) -> Pagination {
         pg.place_para(i, layouts);
         i += 1;
     }
-    Pagination { pages: pg.pages, placements: pg.placements }
+    Pagination {
+        pages: pg.pages,
+        placements: pg.placements,
+        page_section: pg.page_section,
+        page_first_in_section: pg.page_first,
+        page_text_height: pg.page_text_height,
+        repeated_headers: pg.repeated_headers,
+        blank_pages: pg.blank_pages,
+    }
 }
 
-struct Pager {
+struct Pager<'a> {
+    secs: &'a Sections,
+    furniture: FurnitureFn<'a>,
+    sec: usize,
+    /// Text height of the current page.
     page_h: Twips,
     pages: Vec<PageStart>,
+    page_section: Vec<u32>,
+    page_first: Vec<bool>,
+    page_text_height: Vec<Twips>,
+    repeated_headers: Vec<(u32, u32)>,
+    blank_pages: Vec<u32>,
     placements: Vec<ParaPlacement>,
     y: Twips,
     page: u32,
     after_hard_break: bool,
 }
 
-impl Pager {
+impl<'a> Pager<'a> {
+    /// Text height of page `page` (0-based) when it belongs to section `sec`.
+    fn height_for(&self, sec: usize, page: u32) -> Twips {
+        let s = &self.secs.list[sec.min(self.secs.list.len() - 1)];
+        let first = self.page_first.get(page as usize).copied().unwrap_or(true);
+        let even = page % 2 == 1;
+        let f = (self.furniture)(sec, first, even);
+        (s.text_height() - f.extra_top - f.extra_bottom).max(720)
+    }
+
     fn new_page(&mut self, para: usize, line: usize) {
         self.page += 1;
         self.y = 0;
         self.pages.push(PageStart { para, line });
+        self.page_section.push(self.sec as u32);
+        self.page_first.push(false);
+        self.page_h = self.height_for(self.sec, self.page);
+        self.page_text_height.push(self.page_h);
     }
 
-    /// One table row: every cell starts at the same y; lines that run past
-    /// the page bottom continue on the next page.
-    fn place_row(&mut self, row: &[Vec<usize>], layouts: &[ParaLayout]) {
-        let page_h = self.page_h;
-        let cell_h = |cell: &Vec<usize>| -> Twips { cell.iter().map(|&p| layouts[p].space_before + layouts[p].height() + layouts[p].space_after).sum() };
-        let row_h = row.iter().map(cell_h).max().unwrap_or(0);
-        let first = row.first().and_then(|c| c.first().copied()).unwrap_or(0);
-        if self.y > 0 && self.y + row_h > page_h && row_h <= page_h {
-            self.new_page(first, 0);
+    /// Move to section `s` before placing paragraph `para`.
+    fn enter_section(&mut self, s: usize, para: usize) {
+        if s == self.sec {
+            return;
         }
+        self.sec = s;
+        let start = self.secs.list[s].start;
+        let at_top = self.y == 0;
+        match start {
+            SectionStart::Continuous => {
+                // The rest of this page keeps its geometry; the section's
+                // own applies from its next page.
+                if at_top {
+                    self.retag_page(true);
+                }
+            }
+            SectionStart::NextPage | SectionStart::EvenPage | SectionStart::OddPage => {
+                if at_top {
+                    self.retag_page(true);
+                } else {
+                    self.new_page(para, 0);
+                    self.retag_page(true);
+                }
+                let want_odd = start == SectionStart::OddPage;
+                let want_even = start == SectionStart::EvenPage;
+                let is_odd = self.page % 2 == 0; // page 0 is page 1
+                if (want_odd && !is_odd) || (want_even && is_odd) {
+                    // A blank page to reach the right side.
+                    self.blank_pages.push(self.page);
+                    self.page_first[self.page as usize] = false;
+                    self.new_page(para, 0);
+                    self.retag_page(true);
+                }
+                self.after_hard_break = true;
+            }
+        }
+    }
+
+    /// The current page belongs to the current section (used when a
+    /// section starts at the top of a page that was opened for the
+    /// previous one).
+    fn retag_page(&mut self, first: bool) {
+        let p = self.page as usize;
+        self.page_section[p] = self.sec as u32;
+        self.page_first[p] = first;
+        self.page_h = self.height_for(self.sec, self.page);
+        self.page_text_height[p] = self.page_h;
+    }
+
+    /// Height of a row: its tallest cell, or its set height when that is
+    /// larger (or exact).
+    fn row_height(&self, row: &[Vec<usize>], layouts: &[ParaLayout], props: Option<&TableRow>) -> Twips {
+        let cell_h = |cell: &Vec<usize>| -> Twips { cell.iter().map(|&p| layouts[p].space_before + layouts[p].height() + layouts[p].space_after).sum() };
+        let content = row.iter().map(cell_h).max().unwrap_or(0);
+        match props {
+            Some(TableRow { height: Some(h), height_exact: true, .. }) => *h,
+            Some(TableRow { height: Some(h), .. }) => content.max(*h),
+            _ => content,
+        }
+    }
+
+    /// One table row: every cell starts at the same y. A row that may not
+    /// split (or any row, when it fits on a fresh page but not here and is
+    /// marked `cantSplit`) moves to the next page whole; otherwise its
+    /// lines run on past the page bottom and continue on the next page.
+    /// `repeat` names the table and the height of its header rows, placed
+    /// again at the top of any page this row continues onto.
+    fn place_row(&mut self, row: &[Vec<usize>], layouts: &[ParaLayout], props: Option<&TableRow>, repeat: Option<(u32, Twips)>) {
+        let row_h = self.row_height(row, layouts, props);
+        let first = row.first().and_then(|c| c.first().copied()).unwrap_or(0);
+        let cant_split = props.map_or(false, |r| r.cant_split) || props.map_or(false, |r| r.header);
+        let header_h = repeat.map(|r| r.1).unwrap_or(0);
+        if self.y > 0 && self.y + row_h > self.page_h && cant_split && row_h <= self.page_h {
+            self.new_page(first, 0);
+            if let Some((id, h)) = repeat {
+                self.repeated_headers.push((self.page, id));
+                self.y = h.min(self.page_h / 2);
+            }
+        }
+        let exact = matches!(props, Some(TableRow { height: Some(_), height_exact: true, .. }));
         let (page0, y0) = (self.page, self.y);
         let mut end = (page0, y0);
         for cell in row {
@@ -413,12 +596,15 @@ impl Pager {
                 let mut pl = ParaPlacement { line_page: Vec::with_capacity(l.lines.len()), line_y: Vec::with_capacity(l.lines.len()) };
                 yy += l.space_before;
                 for (li, line) in l.lines.iter().enumerate() {
-                    if yy + line.height > page_h && yy > 0 {
+                    if yy + line.height > self.page_h && yy > 0 && !exact {
                         pg += 1;
-                        yy = 0;
                         if pg as usize >= self.pages.len() {
-                            self.pages.push(PageStart { para: p, line: li });
+                            self.new_page(p, li);
+                            if let Some((id, _)) = repeat {
+                                self.repeated_headers.push((self.page, id));
+                            }
                         }
+                        yy = header_h.min(self.page_h / 2);
                     }
                     pl.line_page.push(pg);
                     pl.line_y.push(yy);
@@ -431,13 +617,19 @@ impl Pager {
                 end = (pg, yy);
             }
         }
+        // A set row height pads (or, exact, bounds) the row.
+        if end.0 == page0 {
+            let min_end = y0 + row_h;
+            if exact || min_end > end.1 {
+                end.1 = min_end;
+            }
+        }
         self.page = end.0;
         self.y = end.1;
         self.after_hard_break = false;
     }
 
     fn place_para(&mut self, i: usize, layouts: &[ParaLayout]) {
-        let page_h = self.page_h;
         let n = layouts.len();
         let l = &layouts[i];
         let mut pl = ParaPlacement { line_page: Vec::with_capacity(l.lines.len()), line_y: Vec::with_capacity(l.lines.len()) };
@@ -470,8 +662,8 @@ impl Pager {
             needed += l.space_after + extra;
         }
 
-        let fits_whole = self.y + needed <= page_h;
-        let fits_fresh = needed <= page_h;
+        let fits_whole = self.y + needed <= self.page_h;
+        let fits_fresh = needed <= self.page_h;
         if !fits_whole && fits_fresh && self.y > 0 {
             self.new_page(i, 0);
             sb = l.space_before;
@@ -486,6 +678,7 @@ impl Pager {
         let mut li = 0;
         while li < nl {
             let line = &l.lines[li];
+            let page_h = self.page_h;
             if ly + line.height > page_h && ly > 0 {
                 // Line doesn't fit. Widow/orphan: avoid leaving a lone line.
                 let page = self.page;
@@ -532,7 +725,7 @@ impl Pager {
                     ly = 0;
                 } else {
                     // Break at the end of the paragraph: next paragraph starts a page.
-                    ly = page_h + 1;
+                    ly = self.page_h + 1;
                 }
                 self.after_hard_break = true;
             } else {
@@ -541,7 +734,7 @@ impl Pager {
             li += 1;
         }
         self.y = ly + l.space_after;
-        if self.y >= page_h && i + 1 < n {
+        if self.y >= self.page_h && i + 1 < n {
             let hard = self.after_hard_break;
             self.new_page(i + 1, 0);
             self.after_hard_break = hard;
@@ -849,6 +1042,75 @@ mod tests {
         let rows = screen_lines_from_print(&doc.paragraphs[0], &pp, twips_per_cell(&doc.base_run_props(0)), 80, 0, &print);
         assert_eq!(rows.len(), 2);
         assert_eq!(wrap_screen(&doc.paragraphs[0], &pp, 80, 0).len(), 2);
+    }
+
+    #[test]
+    fn sections_start_pages_and_change_widths() {
+        let mut doc = Document::new();
+        doc.paragraphs = vec![Paragraph::from_text("one"), Paragraph::from_text("two"), Paragraph::from_text("three")];
+        let mut narrow = SectionProps::default();
+        narrow.margin_left = 3600;
+        narrow.margin_right = 3600;
+        doc.paragraphs[0].props.sect_break = Some(narrow.clone());
+        let layouts: Vec<ParaLayout> = (0..3).map(|i| layout_paragraph(&doc, i, None)).collect();
+        // The first paragraph is laid out against the narrow section.
+        assert_eq!(layouts[0].lines[0].avail, narrow.text_width());
+        assert_eq!(layouts[1].lines[0].avail, SectionProps::default().text_width());
+        let pg = paginate(&doc, &layouts);
+        assert_eq!(pg.page_count(), 2, "a next-page section break starts a page");
+        assert_eq!(pg.page_of(1, 0), 1);
+        assert_eq!(pg.section_of_page(0), 0);
+        assert_eq!(pg.section_of_page(1), 1);
+        assert!(pg.page_first_in_section[1]);
+        // Continuous: same page.
+        doc.section.start = SectionStart::Continuous;
+        let pg = paginate(&doc, &layouts);
+        assert_eq!(pg.page_count(), 1);
+        // Even page: page 2 is fine; odd page needs a blank page 2 first.
+        doc.section.start = SectionStart::EvenPage;
+        assert_eq!(paginate(&doc, &layouts).page_count(), 2);
+        doc.section.start = SectionStart::OddPage;
+        let pg = paginate(&doc, &layouts);
+        assert_eq!(pg.page_count(), 3);
+        assert!(pg.is_blank(1));
+        assert_eq!(pg.page_of(1, 0), 2);
+        // Page numbering restarts where a section says so.
+        doc.section.page_start = Some(10);
+        let pg = paginate(&doc, &layouts);
+        let secs = Sections::build(&doc);
+        assert_eq!(pg.page_number(0, &secs), 1);
+        assert_eq!(pg.page_number(2, &secs), 10);
+    }
+
+    #[test]
+    fn table_rows_split_unless_told_not_to_and_headers_repeat() {
+        use crate::editor::Editor;
+        let mut e = Editor::new(crate::text::from_text("x\ny", false));
+        e.move_to(Pos::new(1, 0), false);
+        assert!(e.insert_table(3, 1));
+        // A very tall row.
+        e.insert_str(&"line\n".repeat(70));
+        let count = |e: &mut Editor| e.page_count();
+        assert_eq!(count(&mut e), 2, "the row runs on to the next page");
+        let first_row_pages: Vec<u32> = e.layout.pagination.placements[1..3].iter().map(|p| p.line_page[0]).collect();
+        assert_eq!(first_row_pages, [0, 0]);
+        // Can't split: the row moves whole when it would fit on a page…
+        let id = e.current_cell().unwrap().table;
+        let mut t = e.doc.tables[&id].clone();
+        t.rows[0].cant_split = true;
+        e.doc.tables.insert(id, t.clone());
+        e.invalidate_headers();
+        assert_eq!(count(&mut e), 2);
+        // …the second row, being short, stays with the flow; a header row
+        // is repeated on the continuation page.
+        t.rows[0].cant_split = false;
+        t.rows[0].header = true;
+        e.doc.tables.insert(id, t);
+        e.invalidate_headers();
+        e.move_to(Pos::new(e.doc.paragraphs.len() - 3, 0), false);
+        e.insert_str(&"more\n".repeat(70));
+        assert!(count(&mut e) >= 3);
+        assert!(e.layout.pagination.repeated_headers.iter().any(|&(_, tid)| tid == id), "{:?}", e.layout.pagination.repeated_headers);
     }
 
     #[test]

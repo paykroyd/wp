@@ -226,8 +226,8 @@ pub fn para_codes(p: &ParaProps) -> Vec<(ParaCode, String)> {
     if let Some(l) = p.outline_level {
         v.push((ParaCode::OutlineLevel, format!("[Outline Lvl:{}]", l + 1)));
     }
-    if p.sect_break.is_some() {
-        v.push((ParaCode::SectBreak, "[Sect Brk]".into()));
+    if let Some(s) = &p.sect_break {
+        v.push((ParaCode::SectBreak, format!("[Sect Brk:{}]", s.start.title())));
     }
     if !p.opaque.is_empty() {
         v.push((ParaCode::Opaque, format!("[Par Props:{} preserved]", p.opaque.len())));

@@ -907,7 +907,7 @@ pub fn parse_ppr(xml: &str, ctx: &Ctx) -> ParaProps {
                 }
                 p.mark = run_props_from_rpr(&child.xml, ctx);
             }
-            "w:sectPr" => p.sect_break = Some(child.xml.clone()),
+            "w:sectPr" => p.sect_break = Some(parse_sectpr(&child.xml)),
             _ => p.opaque.push(child.xml.clone()),
         }
     }
@@ -962,6 +962,19 @@ pub fn parse_sectpr(xml: &str) -> SectionProps {
                 }
                 "w:cols" => {
                     s.columns = attr_i32(&e, "w:num").unwrap_or(1).clamp(1, 12) as u16;
+                    if let Some(sp) = attr_i32(&e, "w:space") {
+                        s.column_space = sp.max(0);
+                    }
+                }
+                "w:type" => s.start = SectionStart::from_docx(attr(&e, "w:val").as_deref().unwrap_or("nextPage")),
+                "w:titlePg" => s.title_page = attr_bool(&e, "w:val"),
+                "w:pgNumType" => s.page_start = attr_i32(&e, "w:start"),
+                "w:headerReference" | "w:footerReference" => {
+                    let kind = if child.tag == "w:headerReference" { HfKind::Header } else { HfKind::Footer };
+                    let pages = HfPages::from_docx(attr(&e, "w:type").as_deref().unwrap_or("default"));
+                    if let Some(id) = attr(&e, "r:id") {
+                        s.hf.push(HfRef { kind, pages, id });
+                    }
                 }
                 _ => {}
             }

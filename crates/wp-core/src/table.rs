@@ -381,6 +381,7 @@ impl Editor {
             header: false,
             cant_split: src_row.cant_split,
             height: src_row.height,
+            height_exact: src_row.height_exact,
             raw_trpr: None,
             attrs: String::new(),
         };
