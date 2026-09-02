@@ -299,6 +299,11 @@ pub struct App {
     pub status: Option<(String, Instant)>,
     pub sticky_status: Option<String>,
     pub scroll: (usize, usize),
+    /// Page view's scroll position: (page, row within the page's rows), and
+    /// the cursor it last followed — the view moves with the cursor only
+    /// when the cursor moves, so the wheel can show the rest of a page.
+    pub page_scroll: (usize, usize),
+    pub page_followed: Option<Pos>,
     pub clipboard: Option<Fragment>,
     pub quit: bool,
     pub last_autosave: Instant,
@@ -361,6 +366,8 @@ impl App {
             status: None,
             sticky_status: None,
             scroll: (0, 0),
+            page_scroll: (0, 0),
+            page_followed: None,
             clipboard: None,
             quit: false,
             last_autosave: Instant::now(),
@@ -431,6 +438,8 @@ impl App {
         }
         self.needs_redraw = true;
         match ev.kind {
+            MouseEventKind::ScrollUp if self.view == View::Page => crate::pageview::scroll_by(self, -3),
+            MouseEventKind::ScrollDown if self.view == View::Page => crate::pageview::scroll_by(self, 3),
             MouseEventKind::ScrollUp => self.ed.move_lines(-3, false),
             MouseEventKind::ScrollDown => self.ed.move_lines(3, false),
             MouseEventKind::Down(MouseButton::Left) => {
@@ -1662,6 +1671,14 @@ impl App {
             Cmd::PageBreak => {
                 if self.guard_edit() {
                     self.ed.insert_code(Code::PageBreak);
+                }
+            }
+            Cmd::ColumnBreak => {
+                if self.guard_edit() {
+                    if self.ed.section_at(self.ed.cursor.para).column_count() < 2 {
+                        self.message("This section has one column; a column break acts as a page break here (Columns: Two sets up columns)");
+                    }
+                    self.ed.insert_code(Code::ColumnBreak);
                 }
             }
             Cmd::LineBreak => {

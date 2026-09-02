@@ -427,6 +427,16 @@ pub fn parse_header_part(xml: &str, ctx: &mut Ctx) -> Result<HeaderFooter> {
     Ok(hf)
 }
 
+/// The text of a `w:instrText` element.
+pub fn instr_text(raw: &str) -> String {
+    let start = raw.find('>').map(|i| i + 1).unwrap_or(0);
+    let end = raw.rfind("</").unwrap_or(raw.len());
+    if start >= end {
+        return String::new();
+    }
+    raw[start..end].replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").trim().to_string()
+}
+
 pub(crate) fn raw_block(raw: &str, label: &str) -> Paragraph {
     Paragraph {
         props: ParaProps { raw_block: true, ..Default::default() },
@@ -783,6 +793,22 @@ fn parse_run(reader: &mut Reader<&[u8]>, xml: &str, para: &mut Paragraph, ctx: &
                         }
                         content.extend(text.chars().map(Item::Char));
                     }
+                    b"w:instrText" => {
+                        // A page number or page count is wp's own; other
+                        // field codes are preserved and reported.
+                        let _ = reader.read_to_end(name);
+                        let after = reader.buffer_position() as usize;
+                        let raw = &xml[before..after];
+                        let instr = instr_text(raw);
+                        let label = wp_core::editor::field_label(&instr);
+                        let label = if label == "Field" {
+                            ctx.warn("field");
+                            "Field Code".to_string()
+                        } else {
+                            format!("{} Code", label)
+                        };
+                        content.push(Item::Code(Code::Opaque(OpaqueXml::element(raw, label))));
+                    }
                     _ => {
                         let _ = reader.read_to_end(name);
                         let after = reader.buffer_position() as usize;
@@ -802,7 +828,7 @@ fn parse_run(reader: &mut Reader<&[u8]>, xml: &str, para: &mut Paragraph, ctx: &
                         let plain = e.attributes().flatten().all(|a| a.key.as_ref() == b"w:type");
                         match attr(&e, "w:type").as_deref() {
                             Some("page") if plain => content.push(Item::Code(Code::PageBreak)),
-                            Some("column") => content.push(Item::Code(Code::Opaque(OpaqueXml::element(&xml[before..after], "Column Break")))),
+                            Some("column") if plain => content.push(Item::Code(Code::ColumnBreak)),
                             None | Some("textWrapping") if plain => content.push(Item::Code(Code::LineBreak)),
                             _ => content.push(Item::Code(Code::Opaque(OpaqueXml::element(&xml[before..after], "Ln Brk")))),
                         }

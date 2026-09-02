@@ -87,6 +87,7 @@ pub enum Cmd {
     StyleBrowser,
     // Insert
     PageBreak,
+    ColumnBreak,
     LineBreak,
     InsertTab,
     Bookmark,
@@ -311,6 +312,7 @@ pub static COMMANDS: &[Command] = &[
     cmd!(StyleTitle, "style-title", "Style: Title", "Styles"),
     cmd!(StyleBrowser, "style-browser", "Style Browser (inheritance and overrides at cursor)", "Styles", "inspect"),
     cmd!(PageBreak, "page-break", "Insert Page Break", "Insert", "hard page"),
+    cmd!(ColumnBreak, "column-break", "Insert Column Break", "Insert", "next column newspaper"),
     cmd!(LineBreak, "line-break", "Insert Line Break", "Insert", "soft return"),
     cmd!(InsertTab, "tab", "Insert Tab", "Insert"),
     cmd!(Bookmark, "bookmark", "Insert Bookmark…", "Insert"),

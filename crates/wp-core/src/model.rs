@@ -301,6 +301,8 @@ pub enum Code {
     LineBreak,
     /// `[HPg]` — a hard page break.
     PageBreak,
+    /// `[Col Brk]` — the rest of the text column is left empty.
+    ColumnBreak,
     Bookmark(String),
     BookmarkEnd(String),
     /// Run-level XML that wp does not understand. Zero width in layout.
@@ -310,7 +312,7 @@ pub enum Code {
 impl Code {
     /// True for codes that are invisible/zero-width in ordinary editing.
     pub fn is_zero_width(&self) -> bool {
-        !matches!(self, Code::Tab | Code::LineBreak | Code::PageBreak)
+        !matches!(self, Code::Tab | Code::LineBreak | Code::PageBreak | Code::ColumnBreak)
     }
 }
 

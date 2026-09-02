@@ -25,6 +25,8 @@ pub struct Line {
     pub avail: Twips,
     /// The line ends with a hard page break code.
     pub page_break_after: bool,
+    /// The line ends with a column break code.
+    pub column_break_after: bool,
 }
 
 /// A list label placed on the first line.
@@ -189,7 +191,7 @@ pub fn layout_paragraph_in(doc: &Document, para: usize, label: Option<&ListLabel
         let avail = if first { avail_first } else { avail_rest };
         let item = &p.items[i];
 
-        let forced = matches!(item, Item::Code(Code::LineBreak) | Item::Code(Code::PageBreak));
+        let forced = matches!(item, Item::Code(Code::LineBreak) | Item::Code(Code::PageBreak) | Item::Code(Code::ColumnBreak));
         if forced {
             let h = if had_glyph { max_h } else { empty_h };
             lines.push(Line {
@@ -200,6 +202,7 @@ pub fn layout_paragraph_in(doc: &Document, para: usize, label: Option<&ListLabel
                 x: 0,
                 avail,
                 page_break_after: matches!(item, Item::Code(Code::PageBreak)),
+                column_break_after: matches!(item, Item::Code(Code::ColumnBreak)),
             });
             line_start = i + 1;
             x = 0;
@@ -227,6 +230,7 @@ pub fn layout_paragraph_in(doc: &Document, para: usize, label: Option<&ListLabel
                         x: 0,
                         avail,
                         page_break_after: false,
+                        column_break_after: false,
                     });
                     line_start = at;
                     // re-measure from `at`
@@ -250,6 +254,7 @@ pub fn layout_paragraph_in(doc: &Document, para: usize, label: Option<&ListLabel
                 x: 0,
                 avail,
                 page_break_after: false,
+                column_break_after: false,
             });
             line_start = i;
             x = 0;
@@ -288,6 +293,7 @@ pub fn layout_paragraph_in(doc: &Document, para: usize, label: Option<&ListLabel
         x: 0,
         avail,
         page_break_after: false,
+        column_break_after: false,
     });
 
     // Alignment: compute x offsets.
@@ -326,6 +332,38 @@ pub struct ParaPlacement {
     pub line_page: Vec<u32>,
     /// Y of each line's top relative to the top of the text area.
     pub line_y: Vec<Twips>,
+    /// Text column (0-based) of each line, in a multi-column section.
+    pub line_col: Vec<u8>,
+}
+
+impl ParaPlacement {
+    fn push(&mut self, page: u32, y: Twips, col: u8) {
+        self.line_page.push(page);
+        self.line_y.push(y);
+        self.line_col.push(col);
+    }
+    fn pop(&mut self) {
+        self.line_page.pop();
+        self.line_y.pop();
+        self.line_col.pop();
+    }
+    fn clear(&mut self) {
+        self.line_page.clear();
+        self.line_y.clear();
+        self.line_col.clear();
+    }
+    pub fn col(&self, line: usize) -> u8 {
+        self.line_col.get(line).copied().unwrap_or(0)
+    }
+}
+
+/// Where a text column other than the first begins on a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnStart {
+    pub para: usize,
+    pub line: usize,
+    pub page: u32,
+    pub col: u8,
 }
 
 /// Which header and footer a page shows, and how much of the page they
@@ -359,6 +397,8 @@ pub struct Pagination {
     /// Pages that are blank because an odd- or even-page section start
     /// needed one.
     pub blank_pages: Vec<u32>,
+    /// Where each column after the first begins, in multi-column sections.
+    pub column_starts: Vec<ColumnStart>,
 }
 
 impl Pagination {
@@ -426,10 +466,14 @@ pub fn paginate_with(doc: &Document, layouts: &[ParaLayout], secs: &Sections, fu
         page_text_height: vec![0],
         repeated_headers: Vec::new(),
         blank_pages: Vec::new(),
+        column_starts: Vec::new(),
         placements: Vec::with_capacity(n),
         y: 0,
         page: 0,
+        col: 0,
+        col_top: 0,
         after_hard_break: true, // start of document behaves like one
+        column_break_pending: false,
     };
     pg.page_h = pg.height_for(0, 0);
     pg.page_text_height[0] = pg.page_h;
@@ -449,7 +493,7 @@ pub fn paginate_with(doc: &Document, layouts: &[ParaLayout], secs: &Sections, fu
                 pg.place_row(row, layouts, table.rows.get(ri), repeat);
             }
             if pg.y >= pg.page_h && end < n {
-                pg.new_page(end, 0);
+                pg.overflow(end, 0);
                 pg.after_hard_break = false;
             }
             i = end;
@@ -466,6 +510,7 @@ pub fn paginate_with(doc: &Document, layouts: &[ParaLayout], secs: &Sections, fu
         page_text_height: pg.page_text_height,
         repeated_headers: pg.repeated_headers,
         blank_pages: pg.blank_pages,
+        column_starts: pg.column_starts,
     }
 }
 
@@ -481,10 +526,16 @@ struct Pager<'a> {
     page_text_height: Vec<Twips>,
     repeated_headers: Vec<(u32, u32)>,
     blank_pages: Vec<u32>,
+    column_starts: Vec<ColumnStart>,
     placements: Vec<ParaPlacement>,
     y: Twips,
     page: u32,
+    /// Current text column, and the y at which this page's column set began.
+    col: u8,
+    col_top: Twips,
     after_hard_break: bool,
+    /// A column break ended the last paragraph: the next one starts a column.
+    column_break_pending: bool,
 }
 
 impl<'a> Pager<'a> {
@@ -500,11 +551,26 @@ impl<'a> Pager<'a> {
     fn new_page(&mut self, para: usize, line: usize) {
         self.page += 1;
         self.y = 0;
+        self.col = 0;
+        self.col_top = 0;
         self.pages.push(PageStart { para, line });
         self.page_section.push(self.sec as u32);
         self.page_first.push(false);
         self.page_h = self.height_for(self.sec, self.page);
         self.page_text_height.push(self.page_h);
+    }
+
+    /// The page is full at `para`/`line`: move to the next text column of
+    /// the section, or the next page.
+    fn overflow(&mut self, para: usize, line: usize) {
+        let ncols = self.secs.list[self.sec.min(self.secs.list.len() - 1)].column_count() as u8;
+        if self.col + 1 < ncols {
+            self.col += 1;
+            self.y = self.col_top;
+            self.column_starts.push(ColumnStart { para, line, page: self.page, col: self.col });
+        } else {
+            self.new_page(para, line);
+        }
     }
 
     /// Move to section `s` before placing paragraph `para`.
@@ -518,9 +584,12 @@ impl<'a> Pager<'a> {
         match start {
             SectionStart::Continuous => {
                 // The rest of this page keeps its geometry; the section's
-                // own applies from its next page.
+                // own applies from its next page. Its columns begin here.
                 if at_top {
                     self.retag_page(true);
+                } else {
+                    self.col = 0;
+                    self.col_top = self.y;
                 }
             }
             SectionStart::NextPage | SectionStart::EvenPage | SectionStart::OddPage => {
@@ -587,13 +656,13 @@ impl<'a> Pager<'a> {
             }
         }
         let exact = matches!(props, Some(TableRow { height: Some(_), height_exact: true, .. }));
-        let (page0, y0) = (self.page, self.y);
+        let (page0, y0, col0) = (self.page, self.y, self.col);
         let mut end = (page0, y0);
         for cell in row {
             let (mut pg, mut yy) = (page0, y0);
             for &p in cell {
                 let l = &layouts[p];
-                let mut pl = ParaPlacement { line_page: Vec::with_capacity(l.lines.len()), line_y: Vec::with_capacity(l.lines.len()) };
+                let mut pl = ParaPlacement::default();
                 yy += l.space_before;
                 for (li, line) in l.lines.iter().enumerate() {
                     if yy + line.height > self.page_h && yy > 0 && !exact {
@@ -606,8 +675,7 @@ impl<'a> Pager<'a> {
                         }
                         yy = header_h.min(self.page_h / 2);
                     }
-                    pl.line_page.push(pg);
-                    pl.line_y.push(yy);
+                    pl.push(pg, yy, col0);
                     yy += line.height;
                 }
                 yy += l.space_after;
@@ -632,9 +700,9 @@ impl<'a> Pager<'a> {
     fn place_para(&mut self, i: usize, layouts: &[ParaLayout]) {
         let n = layouts.len();
         let l = &layouts[i];
-        let mut pl = ParaPlacement { line_page: Vec::with_capacity(l.lines.len()), line_y: Vec::with_capacity(l.lines.len()) };
+        let mut pl = ParaPlacement::default();
         let mut sb = l.space_before;
-        if self.y == 0 && !self.after_hard_break {
+        if self.y == self.col_top && !self.after_hard_break {
             sb = 0; // Word suppresses space-before at the top of a page after a soft break
         }
         if l.page_break_before && self.y > 0 {
@@ -663,9 +731,9 @@ impl<'a> Pager<'a> {
         }
 
         let fits_whole = self.y + needed <= self.page_h;
-        let fits_fresh = needed <= self.page_h;
-        if !fits_whole && fits_fresh && self.y > 0 {
-            self.new_page(i, 0);
+        let fits_fresh = needed <= self.page_h - self.col_top;
+        if !fits_whole && fits_fresh && self.y > self.col_top {
+            self.overflow(i, 0);
             sb = l.space_before;
             if !self.after_hard_break {
                 sb = 0;
@@ -679,45 +747,41 @@ impl<'a> Pager<'a> {
         while li < nl {
             let line = &l.lines[li];
             let page_h = self.page_h;
-            if ly + line.height > page_h && ly > 0 {
+            if ly + line.height > page_h && ly > self.col_top {
                 // Line doesn't fit. Widow/orphan: avoid leaving a lone line.
-                let page = self.page;
-                let lines_on_this_page = li - pl.line_page.iter().rposition(|&p| p != page).map(|p| p + 1).unwrap_or(0);
+                let slot = (self.page, self.col);
+                let lines_on_this_page = li - pl.line_page.iter().zip(&pl.line_col).rposition(|(p, c)| (*p, *c) != slot).map(|p| p + 1).unwrap_or(0);
                 if l.widow_control && !l.keep_lines {
                     if lines_on_this_page == 1 && nl >= 2 && li == 1 {
                         // Orphan: pull the first line down.
-                        pl.line_page.pop();
-                        pl.line_y.pop();
-                        self.new_page(i, 0);
-                        ly = 0;
+                        pl.pop();
+                        self.overflow(i, 0);
+                        ly = self.y;
                         li = 0;
                         self.after_hard_break = false;
                         continue;
                     }
                     if nl - li == 1 && lines_on_this_page >= 2 {
                         // Widow: push the previous line over too.
-                        pl.line_page.pop();
-                        pl.line_y.pop();
-                        self.new_page(i, li - 1);
-                        ly = 0;
+                        pl.pop();
+                        self.overflow(i, li - 1);
+                        ly = self.y;
                         li -= 1;
                         self.after_hard_break = false;
                         continue;
                     }
-                } else if l.keep_lines && li > 0 && total <= page_h {
-                    pl.line_page.clear();
-                    pl.line_y.clear();
-                    self.new_page(i, 0);
-                    ly = 0;
+                } else if l.keep_lines && li > 0 && total <= page_h - self.col_top {
+                    pl.clear();
+                    self.overflow(i, 0);
+                    ly = self.y;
                     li = 0;
                     self.after_hard_break = false;
                     continue;
                 }
-                self.new_page(i, li);
-                ly = 0;
+                self.overflow(i, li);
+                ly = self.y;
             }
-            pl.line_page.push(self.page);
-            pl.line_y.push(ly);
+            pl.push(self.page, ly, self.col);
             ly += line.height;
             if line.page_break_after {
                 if li + 1 < nl {
@@ -728,6 +792,15 @@ impl<'a> Pager<'a> {
                     ly = self.page_h + 1;
                 }
                 self.after_hard_break = true;
+            } else if line.column_break_after {
+                if li + 1 < nl {
+                    self.overflow(i, li + 1);
+                    ly = self.y;
+                } else {
+                    ly = self.page_h + 1;
+                    self.column_break_pending = true;
+                }
+                self.after_hard_break = true;
             } else {
                 self.after_hard_break = false;
             }
@@ -736,7 +809,12 @@ impl<'a> Pager<'a> {
         self.y = ly + l.space_after;
         if self.y >= self.page_h && i + 1 < n {
             let hard = self.after_hard_break;
-            self.new_page(i + 1, 0);
+            if hard && !self.column_break_pending {
+                self.new_page(i + 1, 0);
+            } else {
+                self.overflow(i + 1, 0);
+            }
+            self.column_break_pending = false;
             self.after_hard_break = hard;
         }
         self.placements.push(pl);
@@ -885,7 +963,7 @@ fn wrap_screen_range(p: &Paragraph, pp: &ParaProps, cols: u16, label_cells: u16,
         let indent = if first && lines.is_empty() { first_indent } else { left };
         let avail = cols.saturating_sub(indent + right).max(3);
         let it = &p.items[i];
-        if matches!(it, Item::Code(Code::LineBreak) | Item::Code(Code::PageBreak)) {
+        if matches!(it, Item::Code(Code::LineBreak) | Item::Code(Code::PageBreak) | Item::Code(Code::ColumnBreak)) {
             lines.push(ScreenLine { start, end: i + 1, indent, width: width_nonspace, align_width: cols });
             start = i + 1;
             x = 0;
@@ -956,7 +1034,7 @@ pub fn screen_idx_at_x(p: &Paragraph, pp: &ParaProps, line: &ScreenLine, target:
     let mut x = 0u16;
     let mut end = line.end;
     // Don't land after a trailing forced break or on the trailing space of a wrapped line.
-    if end > line.start && matches!(p.items[end - 1], Item::Code(Code::LineBreak) | Item::Code(Code::PageBreak)) {
+    if end > line.start && matches!(p.items[end - 1], Item::Code(Code::LineBreak) | Item::Code(Code::PageBreak) | Item::Code(Code::ColumnBreak)) {
         end -= 1;
     } else if end > line.start && end < p.items.len() && p.items[end - 1].is_whitespace() {
         end -= 1;
@@ -1080,6 +1158,27 @@ mod tests {
         let secs = Sections::build(&doc);
         assert_eq!(pg.page_number(0, &secs), 1);
         assert_eq!(pg.page_number(2, &secs), 10);
+    }
+
+    #[test]
+    fn two_columns_fill_the_page_twice() {
+        let text = "word ".repeat(3000);
+        let mut doc = Document::new();
+        doc.paragraphs[0] = Paragraph::from_text(text.trim());
+        let one = paginate(&doc, &[layout_paragraph(&doc, 0, None)]).page_count();
+        doc.section.columns = 2;
+        let l = layout_paragraph(&doc, 0, None);
+        assert!(l.lines[0].avail < doc.section.text_width() / 2);
+        let pg = paginate(&doc, &[l]);
+        // Twice the lines, half the width: about as many pages as before.
+        assert!(pg.page_count() <= one + 1, "{} vs {}", pg.page_count(), one);
+        assert!(!pg.column_starts.is_empty());
+        assert_eq!(pg.column_starts[0].page, 0);
+        assert_eq!(pg.column_starts[0].col, 1);
+        let first_col1 = pg.column_starts[0].line;
+        assert_eq!(pg.placements[0].col(first_col1), 1);
+        assert_eq!(pg.placements[0].col(first_col1 - 1), 0);
+        assert_eq!(pg.placements[0].line_y[first_col1], 0);
     }
 
     #[test]

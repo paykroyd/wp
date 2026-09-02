@@ -89,6 +89,7 @@ pub fn code_label(c: &Code) -> String {
         Code::Tab => "[Tab]".into(),
         Code::LineBreak => "[Ln Brk]".into(),
         Code::PageBreak => "[HPg]".into(),
+        Code::ColumnBreak => "[Col Brk]".into(),
         Code::Bookmark(n) => format!("[Bookmark:{}]", n),
         Code::BookmarkEnd(n) => format!("[bookmark:{}]", n),
         Code::Opaque(o) => format!("[{}]", o.label),

@@ -263,6 +263,7 @@ Commands with no default key in either map:
 - Header: Remove from This Section
 - Highlight…
 - Increase List Level (Demote)
+- Insert Column Break
 - Insert Page Count (NUMPAGES)
 - Insert Page Number
 - Insert Section Break (Continuous)

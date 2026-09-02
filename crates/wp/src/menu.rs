@@ -183,6 +183,7 @@ pub static MENUS: &[Menu] = &[
         mnemonic: 'I',
         items: &[
             C(Cmd::PageBreak),
+            C(Cmd::ColumnBreak),
             C(Cmd::LineBreak),
             C(Cmd::InsertTab),
             C(Cmd::Date),

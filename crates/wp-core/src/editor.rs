@@ -91,6 +91,8 @@ pub struct LayoutCache {
     pub sections: Sections,
     /// Header/footer bodies laid out by (id, text width).
     hf: std::collections::HashMap<(String, Twips), std::rc::Rc<Vec<ParaLayout>>>,
+    /// Header/footer bodies as documents of their own, for rendering.
+    hf_docs: std::collections::HashMap<String, std::rc::Rc<Document>>,
 }
 
 pub struct Editor {
@@ -131,6 +133,7 @@ impl Editor {
                 labels_dirty: true,
                 sections: Sections::default(),
                 hf: std::collections::HashMap::new(),
+                hf_docs: std::collections::HashMap::new(),
             },
             cut_ring: VecDeque::new(),
             typeover: false,
@@ -338,6 +341,27 @@ impl Editor {
         Some(l)
     }
 
+    /// Header/footer `id` as a document of its own (the body's paragraphs
+    /// with this document's styles), for laying out and drawing it.
+    pub fn hf_doc(&mut self, id: &str) -> Option<std::rc::Rc<Document>> {
+        if let Some(d) = self.layout.hf_docs.get(id) {
+            return Some(d.clone());
+        }
+        let hf = self.doc.headers.get(id)?;
+        let d = std::rc::Rc::new(crate::section::scratch_doc(&self.doc, &hf.paragraphs));
+        self.layout.hf_docs.insert(id.to_string(), d.clone());
+        Some(d)
+    }
+
+    /// Header and footer space on page `page` (0-based).
+    pub fn page_furniture(&mut self, page: usize) -> layout::PageFurniture {
+        self.ensure_layout();
+        let sec = self.layout.pagination.section_of_page(page);
+        let first = self.layout.pagination.page_first_in_section.get(page).copied().unwrap_or(true);
+        let even = page % 2 == 1;
+        self.furniture().get(&(sec, first, even)).cloned().unwrap_or_default()
+    }
+
     /// The header or footer a page of section `sec` shows, by id.
     pub fn hf_id_for(&self, sec: &SectionProps, kind: HfKind, first: bool, even: bool) -> Option<String> {
         sec.hf_for_page(kind, first, even, self.doc.even_odd_headers).map(|s| s.to_string())
@@ -346,6 +370,7 @@ impl Editor {
     /// Header and footer bodies changed: lay them out again and repaginate.
     pub fn invalidate_headers(&mut self) {
         self.layout.hf.clear();
+        self.layout.hf_docs.clear();
         self.layout.labels_dirty = true; // the section map names the headers
         self.layout.pagination_dirty = true;
     }
@@ -373,6 +398,11 @@ impl Editor {
             }
         }
         m
+    }
+
+    /// The cached print layout of a paragraph, if `ensure_layout` has run.
+    pub fn print_layout_ref(&self, para: usize) -> Option<&ParaLayout> {
+        self.layout.print.get(para).and_then(|l| l.as_ref())
     }
 
     pub fn print_layout(&mut self, para: usize) -> &ParaLayout {
@@ -426,7 +456,9 @@ impl Editor {
         let x = xs.get(c.idx.saturating_sub(line.start)).copied().unwrap_or(0);
         let cell_x = self.doc.cell_x(c.para);
         let sec = self.layout.sections.section_of(c.para);
-        (page + 1, sec.margin_top + y, sec.margin_left + cell_x + line.x + x)
+        let col = self.layout.pagination.placements[c.para].col(li) as Twips;
+        let col_x = col * (sec.column_width() + sec.column_space);
+        (page + 1, sec.margin_top + y, sec.margin_left + col_x + cell_x + line.x + x)
     }
 
     /// The position at which page `page` (1-based) starts.
@@ -1758,6 +1790,7 @@ impl Editor {
         self.layout.labels_dirty = true;
         self.layout.pagination_dirty = true;
         self.layout.hf.clear();
+        self.layout.hf_docs.clear();
         self.dirty = false;
     }
 
@@ -1773,6 +1806,42 @@ pub fn field_label(instr: &str) -> String {
         s if s.starts_with('=') => format!("Formula:{}", instr.trim()),
         _ => "Field".into(),
     }
+}
+
+/// What a complex-field element (`w:fldChar`, `w:instrText`) is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FieldPart {
+    Begin,
+    Separate,
+    End,
+    Instr(String),
+}
+
+pub fn field_part(o: &OpaqueXml) -> Option<FieldPart> {
+    if o.kind != OpaqueKind::Element {
+        return None;
+    }
+    if o.xml.starts_with("<w:fldChar") {
+        if o.xml.contains("\"begin\"") {
+            return Some(FieldPart::Begin);
+        }
+        if o.xml.contains("\"separate\"") {
+            return Some(FieldPart::Separate);
+        }
+        if o.xml.contains("\"end\"") {
+            return Some(FieldPart::End);
+        }
+        return None;
+    }
+    if o.xml.starts_with("<w:instrText") {
+        let start = o.xml.find('>').map(|i| i + 1).unwrap_or(0);
+        let end = o.xml.rfind("</").unwrap_or(o.xml.len());
+        if start < end {
+            return Some(FieldPart::Instr(o.xml[start..end].replace("&amp;", "&").replace("&lt;", "<").replace("&quot;", "\"").trim().to_string()));
+        }
+        return Some(FieldPart::Instr(String::new()));
+    }
+    None
 }
 
 /// The instruction of a field wrapper opened by this opaque, if it is one.

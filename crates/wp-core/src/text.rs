@@ -76,6 +76,7 @@ pub fn to_text(doc: &Document, wrap: Option<usize>) -> String {
                 Item::Code(Code::Tab) => line.push('\t'),
                 Item::Code(Code::LineBreak) => line.push('\n'),
                 Item::Code(Code::PageBreak) => line.push('\u{c}'),
+                Item::Code(Code::ColumnBreak) => line.push('\n'),
                 _ => {}
             }
         }

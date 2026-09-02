@@ -223,6 +223,8 @@ pub enum Row {
     Line { para: usize, line: usize },
     Gap,
     PageRule(usize),
+    /// A new text column begins at this row (multi-column sections).
+    ColumnRule(u8),
     Block { para: usize },
     /// Screen line `line` of table row `row`, whose first paragraph is `para`.
     TableLine { table: u32, row: usize, para: usize, line: usize },
@@ -324,7 +326,7 @@ fn size_class(props: &RunProps, base_hp: u16) -> Option<&'static str> {
     }
 }
 
-fn style_for(props: &RunProps, base_hp: u16, caps: Caps, th: &Theme) -> Style {
+pub(crate) fn style_for(props: &RunProps, base_hp: u16, caps: Caps, th: &Theme) -> Style {
     let mut s = Style::default();
     if props.is_bold() {
         s = s.add_modifier(Modifier::BOLD);
@@ -384,6 +386,7 @@ pub struct RowWalker<'a> {
     pending: Vec<Row>,
     done: bool,
     page_starts: Vec<(usize, usize, usize)>, // (para, item idx, page number 1-based)
+    column_starts: Vec<(usize, usize, u8)>,  // (para, item idx, column 0-based)
 }
 
 impl<'a> RowWalker<'a> {
@@ -395,8 +398,27 @@ impl<'a> RowWalker<'a> {
             let idx = app.ed.print_layout(ps.para).lines.get(ps.line).map(|l| l.start).unwrap_or(0);
             page_starts.push((ps.para, idx, i + 1));
         }
+        let mut column_starts = Vec::new();
+        for cs in app.ed.layout.pagination.column_starts.clone() {
+            let idx = app.ed.print_layout(cs.para).lines.get(cs.line).map(|l| l.start).unwrap_or(0);
+            column_starts.push((cs.para, idx, cs.col));
+        }
         let start = row_coords(app, start.0, start.1);
-        RowWalker { app, para: start.0, line: start.1, pending: Vec::new(), done: false, page_starts }
+        RowWalker { app, para: start.0, line: start.1, pending: Vec::new(), done: false, page_starts, column_starts }
+    }
+
+    fn column_rule_for(&self, para: usize, lines: &[ScreenLine], line: usize) -> Option<u8> {
+        for &(p, idx, c) in &self.column_starts {
+            if p != para {
+                continue;
+            }
+            let l = &lines[line];
+            let last = line + 1 == lines.len();
+            if (idx >= l.start && idx < l.end) || (last && idx >= l.end) || (line == 0 && idx == 0 && l.start == 0) {
+                return Some(c);
+            }
+        }
+        None
     }
 
     /// Rows of a table: the rule above each row, its lines, the bottom rule.
@@ -472,6 +494,7 @@ impl<'a> RowWalker<'a> {
         let para = self.para;
         let line = self.line;
         let rule = self.page_rule_for(para, &lines, line);
+        let col_rule = self.column_rule_for(para, &lines, line);
         let row = if raw_block { Row::Block { para } } else { Row::Line { para, line } };
         // Advance.
         let last_line = line + 1 >= lines.len() || raw_block;
@@ -495,6 +518,10 @@ impl<'a> RowWalker<'a> {
         if let Some(pg) = rule {
             self.pending.push(row); // popped before any Gap queued earlier
             return Some(Row::PageRule(pg));
+        }
+        if let Some(c) = col_rule {
+            self.pending.push(row);
+            return Some(Row::ColumnRule(c));
         }
         Some(row)
     }
@@ -662,7 +689,7 @@ pub fn draw(f: &mut Frame, app: &mut App, caps: Caps) {
     }
 
     // Document.
-    let cursor = draw_draft(f, app, doc_area, caps, &ch);
+    let cursor = if app.view == View::Page { crate::pageview::draw(f, app, doc_area, caps, &ch) } else { draw_draft(f, app, doc_area, caps, &ch) };
 
     // Overlays.
     match &app.overlay {
@@ -681,6 +708,9 @@ pub fn pos_at(app: &mut App, x: u16, y: u16) -> Option<Pos> {
     let y = y.checked_sub(app.doc_top())?;
     if y as usize >= rows {
         return None;
+    }
+    if app.view == View::Page {
+        return crate::pageview::pos_at(app, x, y);
     }
     let scroll = app.scroll;
     let cols = app.ed.cols();
@@ -750,7 +780,7 @@ pub fn pos_at(app: &mut App, x: u16, y: u16) -> Option<Pos> {
             let idx = layout::screen_idx_at_x(para_ref, &pp, &sl, x.saturating_sub(x0 + sl.indent));
             Some(Pos::new(p, idx))
         }
-        Some(Row::TableRule { .. }) | Some(Row::Gap) | Some(Row::PageRule(_)) | None => {
+        Some(Row::TableRule { .. }) | Some(Row::Gap) | Some(Row::PageRule(_)) | Some(Row::ColumnRule(_)) | None => {
             // Between paragraphs: land on the nearer line above.
             let mut walker = RowWalker::new(app, scroll);
             let mut last = None;
@@ -809,6 +839,16 @@ fn draw_draft(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome)
                 let left = (total.saturating_sub(lw)) / 2;
                 let right = total.saturating_sub(lw + left);
                 let s = format!("{}{}{}", ch.h.repeat(left), label, ch.h.repeat(right));
+                lines_out.push(Line::from(Span::styled(s, Style::default().fg(th.dim))));
+            }
+            Row::ColumnRule(c) => {
+                let label = format!(" Column {} ", *c as usize + 1);
+                let total = area.width as usize;
+                let lw = label.width();
+                let left = (total.saturating_sub(lw)) / 2;
+                let right = total.saturating_sub(lw + left);
+                let dash = if caps.ascii { "." } else { "┄" };
+                let s = format!("{}{}{}", dash.repeat(left), label, dash.repeat(right));
                 lines_out.push(Line::from(Span::styled(s, Style::default().fg(th.dim))));
             }
             Row::Block { para } => {
@@ -1266,7 +1306,7 @@ fn draw_reveal(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrome
         let soft_starts: Vec<usize> = pl.lines.iter().skip(1).map(|l| l.start).collect();
         for (i, it) in p.items.iter().enumerate() {
             if soft_starts.contains(&i) && i > 0 {
-                let hard_before = matches!(p.items[i - 1], Item::Code(Code::LineBreak) | Item::Code(Code::PageBreak));
+                let hard_before = matches!(p.items[i - 1], Item::Code(Code::LineBreak) | Item::Code(Code::PageBreak) | Item::Code(Code::ColumnBreak));
                 if !hard_before {
                     let label = if page_breaks.contains(&i) { "[SPg]" } else { "[SRt]" };
                     toks.push(Tok { text: label.into(), pos: None, para_code: None, style: soft_style });

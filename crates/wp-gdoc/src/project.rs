@@ -377,7 +377,7 @@ pub fn project(ctx: &Ctx, p: &Paragraph) -> Result<Proj, String> {
                     sty = Sty::from_attrs(&stack, link.as_deref());
                 }
                 Code::Tab => units.push(Unit { kind: UnitKind::Char('\t'), len: 1, sty: sty.clone() }),
-                Code::LineBreak => units.push(Unit { kind: UnitKind::Char('\u{b}'), len: 1, sty: sty.clone() }),
+                Code::LineBreak | Code::ColumnBreak => units.push(Unit { kind: UnitKind::Char('\u{b}'), len: 1, sty: sty.clone() }),
                 Code::PageBreak => units.push(Unit { kind: UnitKind::PageBreak, len: 1, sty: Sty::default() }),
                 Code::Bookmark(_) | Code::BookmarkEnd(_) => {}
                 Code::Opaque(o) => {

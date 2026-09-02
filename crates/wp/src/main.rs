@@ -6,6 +6,7 @@ mod config;
 mod google;
 mod keymap;
 mod menu;
+mod pageview;
 mod palette;
 mod ui;
 #[cfg(test)]

@@ -582,6 +582,10 @@ fn render_paragraph_in(doc: &Document, para: usize, out: &mut String, ctx: &Ctx,
                     ensure_run!();
                     out.push_str("<w:br w:type=\"page\"/>");
                 }
+                Item::Code(Code::ColumnBreak) => {
+                    ensure_run!();
+                    out.push_str("<w:br w:type=\"column\"/>");
+                }
                 Item::Code(Code::Bookmark(name)) => {
                     close_run!();
                     let id = bookmark_id.id(name);

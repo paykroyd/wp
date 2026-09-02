@@ -103,7 +103,7 @@ fn inline(doc: &Document, para: usize, rels: &dyn Fn(&str) -> Option<String>, lo
         match it {
             Item::Char(c) => pending_text.push(*c),
             Item::Code(Code::Tab) => pending_text.push('\t'),
-            Item::Code(Code::LineBreak) => {
+            Item::Code(Code::LineBreak) | Item::Code(Code::ColumnBreak) => {
                 flush_text(&mut out, &mut pending_text);
                 out.push_str("  \n");
             }

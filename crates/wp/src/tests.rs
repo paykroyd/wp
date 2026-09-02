@@ -347,6 +347,108 @@ fn new_footer_with_page_number_saves_and_paginates() {
 }
 
 #[test]
+fn page_view_draws_pages_headers_and_fields() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let p = corpus("word-headers-footers.docx");
+    if !p.exists() {
+        return;
+    }
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.resize(120, 40);
+    h.term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    h.app.open_path(&p).unwrap();
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("switch draft page view");
+    h.key(KeyCode::Enter, NONE);
+    assert_eq!(h.app.view, crate::app::View::Page);
+    let s = h.screen();
+    assert!(s.contains("┌──"), "page border: {}", s);
+    assert!(s.contains("Confidential draft"), "header on the page: {}", s);
+    assert!(s.contains("Paragraph 0."), "body text: {}", s);
+    // The header is right-aligned: it ends near the right edge of the text.
+    let hdr = s.lines().find(|l| l.contains("Confidential draft")).unwrap();
+    let body = s.lines().find(|l| l.contains("Paragraph 0.")).unwrap();
+    assert!(hdr.find("Confidential").unwrap() > body.find("Paragraph").unwrap() + 20, "{}\n{}", hdr, body);
+    // Typing works in page view and the cursor is on the page.
+    h.type_str("XYZ ");
+    let s = h.screen();
+    assert!(s.contains("XYZ Paragraph 0."), "{}", s);
+    // Clicking on a word puts the cursor there.
+    let y = s.lines().position(|l| l.contains("XYZ Paragraph 0.")).unwrap() as u16;
+    let line = s.lines().nth(y as usize).unwrap();
+    let x = line[..line.find("Paragraph 0.").unwrap()].chars().count() as u16;
+    let m = |kind, col, row| MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE };
+    h.app.handle_mouse(m(MouseEventKind::Down(MouseButton::Left), x, y));
+    h.app.handle_mouse(m(MouseEventKind::Up(MouseButton::Left), x, y));
+    let c = h.app.ed.cursor;
+    assert_eq!(c.para, 0);
+    assert_eq!(h.app.ed.doc.paragraphs[0].items[c.idx].as_char(), Some('P'), "{}", s);
+    // The footer's PAGE field shows the page's number (numbering starts at 3).
+    h.key(KeyCode::End, CTRL);
+    let s = h.screen();
+    let pages = h.app.ed.page_count();
+    assert!(s.contains(&format!("Pg {}/{}", pages, pages)), "{}", s);
+    // The footer is a complex PAGE field whose stored result is "1"; the
+    // wheel scrolls down to it without moving the cursor.
+    assert_eq!(h.app.ed.doc.headers["rId9"].paragraphs[0].text(), "1");
+    let n = h.app.ed.layout.pagination.page_number(pages - 1, &h.app.ed.layout.sections.clone());
+    assert_eq!(n as usize, pages + 2);
+    let c = h.app.ed.cursor;
+    for _ in 0..30 {
+        h.app.handle_mouse(m(MouseEventKind::ScrollDown, 10, 10));
+    }
+    let s = h.screen();
+    assert_eq!(h.app.ed.cursor, c);
+    assert!(s.lines().any(|l| l.trim_matches(|c| c == '│' || c == ' ') == n.to_string()), "footer shows the page number {}: {}", n, s);
+    assert!(!h.app.warnings.iter().any(|w| w.label == "field"), "{:?}", h.app.warnings);
+    assert!(s.contains("└──"), "{}", s);
+    // Back to draft.
+    h.key(KeyCode::Char('p'), CTRL | KeyModifiers::SHIFT);
+    h.type_str("switch draft page view");
+    h.key(KeyCode::Enter, NONE);
+    assert_eq!(h.app.view, crate::app::View::Draft);
+}
+
+#[test]
+fn columns_flow_and_draft_marks_them() {
+    let p = corpus("word-sections.docx");
+    if !p.exists() {
+        return;
+    }
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.open_path(&p).unwrap();
+    assert_eq!(h.app.ed.doc.section_count(), 3);
+    assert_eq!(h.app.ed.section_at(2).columns, 2);
+    let mut seen = false;
+    for _ in 0..200 {
+        h.key(KeyCode::Down, NONE);
+        if h.screen().contains(" Column 2 ") {
+            seen = true;
+            break;
+        }
+    }
+    assert!(seen, "{}", h.screen());
+    assert!(!h.app.ed.layout.pagination.column_starts.is_empty());
+    // Page view shows the two columns side by side: a line from column 2
+    // starts right of the text of column 1 on the same row.
+    h.app.resize(120, 40);
+    h.term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    h.app.exec(crate::commands::Cmd::ToggleView);
+    let cs = h.app.ed.layout.pagination.column_starts[0];
+    let start = h.app.ed.print_layout(cs.para).lines[cs.line].start;
+    h.app.ed.move_to(wp_core::Pos::new(cs.para, start), false);
+    let s = h.screen();
+    // A row of the page holds text from both columns: text left of the
+    // page's middle and text right of it.
+    let two = s.lines().any(|l| {
+        let inner = l.trim_start_matches(' ').trim_start_matches('│');
+        let mid = inner.len() / 2;
+        inner.len() > 60 && inner[..mid].contains(char::is_alphabetic) && inner[mid..].contains(char::is_alphabetic) && inner[mid - 3..mid + 3].contains(' ')
+    });
+    assert!(two, "{}", s);
+}
+
+#[test]
 fn protected_content_refuses_edits() {
     let p = corpus("path-mixed.docx");
     if !p.exists() {
@@ -496,6 +598,32 @@ fn perf_typing_latency_big_doc() {
         let _ = h.screen();
     }
     eprintln!("110 keystrokes+renders near top: {:?} ({:?}/key)", t2.elapsed(), t2.elapsed() / 110);
+}
+
+#[test]
+fn perf_page_view_big_doc() {
+    let p = std::path::PathBuf::from("/tmp/big.docx");
+    let p = if p.exists() { p } else { corpus("gen-long.docx") };
+    if !p.exists() {
+        return;
+    }
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.resize(120, 50);
+    h.term = Terminal::new(TestBackend::new(120, 50)).unwrap();
+    h.app.open_path(&p).unwrap();
+    h.app.exec(crate::commands::Cmd::ToggleView);
+    let t0 = std::time::Instant::now();
+    let _ = h.screen();
+    eprintln!("page view first render ({} pages): {:?}", h.app.ed.page_count(), t0.elapsed());
+    h.key(KeyCode::End, CTRL);
+    let t1 = std::time::Instant::now();
+    for c in "the quick brown fox ".repeat(5).chars() {
+        h.key(KeyCode::Char(c), NONE);
+        let _ = h.screen();
+    }
+    let per = t1.elapsed() / 100;
+    eprintln!("100 keystrokes+renders in page view at end: {:?} ({:?}/key)", t1.elapsed(), per);
+    assert!(per < std::time::Duration::from_millis(50), "{:?}/key", per);
 }
 
 #[test]
