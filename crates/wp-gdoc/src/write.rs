@@ -79,6 +79,25 @@ pub fn diff(base: &Baseline, doc: &Document) -> Result<Vec<Value>, String> {
         let mp: Vec<&Paragraph> = f.paragraphs.iter().collect();
         w.region(&bp, &mp, Some(gid))?;
     }
+    // Header and footer bodies, each its own segment keyed by the Docs id.
+    for hid in &base.header_ids {
+        let Some(h) = doc.headers.get(hid) else { return Err("removing a header or footer is not supported for Google Docs yet".into()) };
+        let Some(seg) = base.segments.iter().find(|s| s.id.as_deref() == Some(hid)) else { continue };
+        let bp: Vec<BPara> = seg
+            .blocks
+            .iter()
+            .flat_map(|b| match b {
+                BBlock::Paras(v) => v.clone(),
+                BBlock::Table { .. } => Vec::new(),
+            })
+            .collect();
+        let mp: Vec<&Paragraph> = h.paragraphs.iter().collect();
+        w.region(&bp, &mp, Some(hid))?;
+    }
+    if let Some(hid) = doc.headers.keys().find(|k| !base.header_ids.contains(k)) {
+        let kind = doc.headers[hid].kind.map_or("header", |k| if k == HfKind::Header { "header" } else { "footer" });
+        return Err(format!("a {} created in wp is not supported for Google Docs yet", kind));
+    }
     let mut groups = std::mem::take(&mut w.groups);
     groups.sort_by(|a, b| b.key.cmp(&a.key).then(a.rank.cmp(&b.rank)));
     Ok(groups.into_iter().flat_map(|g| g.reqs).collect())
@@ -311,7 +330,7 @@ impl<'a> Writer<'a> {
                 // paragraph's character formatting, so text styles go after.
                 let (ps, fields) = p.para.to_json(None).unwrap_or((json!({}), P_ALL.into()));
                 reqs.push(json!({ "updateParagraphStyle": { "range": self.range(seg, start, start + 1), "paragraphStyle": ps, "fields": fields } }));
-                self.bullets(&mut reqs, seg, start, src_list, p.list);
+                self.bullets(&mut reqs, seg, start, src_list, p.list)?;
                 for (off, len, sty) in style_runs(&p.units) {
                     reqs.push(json!({ "updateTextStyle": { "range": self.range(seg, start + off, start + off + len), "textStyle": sty.to_json(F_ALL), "fields": field_mask(F_ALL) } }));
                 }
@@ -370,7 +389,13 @@ impl<'a> Writer<'a> {
                     for piece in pieces.into_iter().rev() {
                         match piece {
                             Ok(s) => reqs.push(json!({ "insertText": { "location": self.loc(seg, idx), "text": s } })),
-                            Err(_) => reqs.push(json!({ "insertPageBreak": { "location": self.loc(seg, idx) } })),
+                            Err(_) => {
+                                // Docs inserts a newline after the break (a
+                                // page break ends its paragraph there); take
+                                // it back out so the paragraph stays one.
+                                reqs.push(json!({ "insertPageBreak": { "location": self.loc(seg, idx) } }));
+                                reqs.push(json!({ "deleteContentRange": { "range": self.range(seg, idx + 1, idx + 2) } }));
+                            }
                         }
                     }
                 }
@@ -403,7 +428,7 @@ impl<'a> Writer<'a> {
                 reqs.push(json!({ "updateParagraphStyle": { "range": self.range(seg, base, base + 1), "paragraphStyle": ps, "fields": fields } }));
             }
             let cur = if restyle[bi] { bp[last].list } else { bpp.list };
-            self.bullets(&mut reqs, seg, base, cur, mpp.list);
+            self.bullets(&mut reqs, seg, base, cur, mpp.list)?;
             reqs.extend(text_styles);
             if !reqs.is_empty() {
                 self.group(base, 2).extend(reqs);
@@ -413,13 +438,19 @@ impl<'a> Writer<'a> {
     }
 
     /// Bullet requests for a paragraph that has `cur` and should have `want`.
-    /// Within one list the nesting level follows the indent, which the
-    /// paragraph-style request already set; a new list's level is set by
-    /// leading tabs, which `createParagraphBullets` counts and removes.
-    fn bullets(&self, reqs: &mut Vec<Value>, seg: Option<&str>, index: i64, cur: Option<ListRef>, want: Option<ListRef>) {
+    /// A new list's level is set by leading tabs, which
+    /// `createParagraphBullets` counts and removes. Changing the level of a
+    /// paragraph already in a list has no single-request form (verified
+    /// live, DESIGN.md §6a.2): the indent alone leaves the level as it was,
+    /// and re-bulleting joins the list before it at that list's level, tabs
+    /// or not. It is refused until the two-phase save rebuilds the list.
+    fn bullets(&self, reqs: &mut Vec<Value>, seg: Option<&str>, index: i64, cur: Option<ListRef>, want: Option<ListRef>) -> Result<(), String> {
         let range = self.range(seg, index, index + 1);
         match (cur, want) {
-            (Some(c), Some(w)) if c.num_id == w.num_id => {}
+            (Some(c), Some(w)) if c.num_id == w.num_id && c.level == w.level => {}
+            (Some(c), Some(w)) if c.num_id == w.num_id => {
+                return Err("changing a list item's level is not supported for Google Docs yet (Undo it, or Save As .docx)".into());
+            }
             (_, Some(w)) => {
                 if w.level > 0 {
                     reqs.push(json!({ "insertText": { "location": self.loc(seg, index), "text": "\t".repeat(w.level as usize) } }));
@@ -429,5 +460,6 @@ impl<'a> Writer<'a> {
             (Some(_), None) => reqs.push(json!({ "deleteParagraphBullets": { "range": range } })),
             (None, None) => {}
         }
+        Ok(())
     }
 }

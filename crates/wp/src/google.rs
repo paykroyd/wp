@@ -74,6 +74,8 @@ const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 pub struct ApiError {
     pub status: u16,
     pub message: String,
+    /// The token endpoint said `invalid_grant`: the refresh token is dead.
+    pub invalid_grant: bool,
 }
 
 impl ApiError {
@@ -219,7 +221,8 @@ impl Client {
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if status != 200 {
             let msg = v.get("error_description").or_else(|| v.get("error")).and_then(Value::as_str).unwrap_or(&text).to_string();
-            return Err(ApiError { status, message: msg }.into());
+            let invalid_grant = v.get("error").and_then(Value::as_str) == Some("invalid_grant");
+            return Err(ApiError { status, message: msg, invalid_grant }.into());
         }
         Ok(v)
     }
@@ -258,8 +261,10 @@ impl Client {
                 Ok(self.token.as_ref().unwrap().access_token.clone())
             }
             Err(e) => {
-                // A revoked grant: sign in again next time.
-                if e.downcast_ref::<ApiError>().map_or(false, |a| a.status == 400 || a.status == 401) {
+                // A revoked or expired grant: sign in again next time. Any
+                // other failure (the network, a wrong client id in the
+                // config) keeps the token, since it may still be good.
+                if e.downcast_ref::<ApiError>().map_or(false, |a| a.invalid_grant) {
                     self.sign_out();
                 }
                 Err(e)
@@ -279,7 +284,7 @@ impl Client {
         if status < 200 || status >= 300 {
             let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             let message = v.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or(&text).to_string();
-            return Err(ApiError { status, message }.into());
+            return Err(ApiError { status, message, invalid_grant: false }.into());
         }
         Ok(serde_json::from_str(&text)?)
     }
@@ -288,6 +293,12 @@ impl Client {
     pub fn get_document(&mut self, id: &str) -> anyhow::Result<String> {
         let v = self.call("GET", &format!("{}/{}", DOCS_URL, urlencode(id)), None)?;
         Ok(v.to_string())
+    }
+
+    /// `documents.create`: a new, empty document; returns its id.
+    pub fn create_document(&mut self, title: &str) -> anyhow::Result<String> {
+        let v = self.call("POST", DOCS_URL, Some(&serde_json::json!({ "title": title })))?;
+        v.get("documentId").and_then(Value::as_str).map(str::to_string).ok_or_else(|| anyhow::anyhow!("documents.create returned no documentId"))
     }
 
     /// `documents.batchUpdate`; returns the response (with the new
@@ -443,6 +454,10 @@ fn urldecode(s: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "google_live.rs"]
+mod live;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -493,7 +508,7 @@ mod tests {
 
     #[test]
     fn conflict_detection() {
-        assert!(ApiError { status: 400, message: "The document revision is not the latest".into() }.is_conflict());
-        assert!(!ApiError { status: 404, message: "Requested entity was not found".into() }.is_conflict());
+        assert!(ApiError { status: 400, message: "The document revision is not the latest".into(), invalid_grant: false }.is_conflict());
+        assert!(!ApiError { status: 404, message: "Requested entity was not found".into(), invalid_grant: false }.is_conflict());
     }
 }

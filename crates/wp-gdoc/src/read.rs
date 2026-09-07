@@ -44,6 +44,10 @@ pub struct Baseline {
     pub lists: ListMap,
     /// Model footnote id (1-based) − 1 → Docs footnote id.
     pub footnote_ids: Vec<String>,
+    /// Docs header and footer ids read into `Document::headers` (the model
+    /// keys are the Docs ids), each its own segment.
+    #[serde(default)]
+    pub header_ids: Vec<String>,
 }
 
 pub struct Loaded {
@@ -137,8 +141,44 @@ pub fn read(json: &str) -> Result<Loaded, String> {
     if r.doc.paragraphs.is_empty() {
         r.doc.paragraphs.push(Paragraph::new());
     }
-    if tab.get("headers").map_or(false, |h| h.as_object().map_or(false, |o| !o.is_empty())) || tab.get("footers").map_or(false, |h| h.as_object().map_or(false, |o| !o.is_empty())) {
-        r.warnings.push("headers/footers not shown (kept)".into());
+    // Headers and footers: the document style names one id per kind and
+    // page class; each body is a segment of its own, keyed by that id.
+    let mut header_ids = Vec::new();
+    let ds = tab.get("documentStyle").cloned().unwrap_or(Value::Null);
+    r.doc.section.title_page = ds.get("useFirstPageHeaderFooter").and_then(Value::as_bool).unwrap_or(false);
+    r.doc.even_odd_headers = ds.get("useEvenPageHeaderFooter").and_then(Value::as_bool).unwrap_or(false);
+    for (key, kind, pages) in [
+        ("defaultHeaderId", HfKind::Header, HfPages::Default),
+        ("defaultFooterId", HfKind::Footer, HfPages::Default),
+        ("firstPageHeaderId", HfKind::Header, HfPages::First),
+        ("firstPageFooterId", HfKind::Footer, HfPages::First),
+        ("evenPageHeaderId", HfKind::Header, HfPages::Even),
+        ("evenPageFooterId", HfKind::Footer, HfPages::Even),
+    ] {
+        let Some(hid) = str_of(&ds, key).map(str::to_string) else { continue };
+        let coll = if kind == HfKind::Header { "headers" } else { "footers" };
+        let content = tab.get(coll).and_then(|h| h.get(&hid)).and_then(|h| h.get("content")).and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut hb = Vec::new();
+        r.blocks(&content, None, &mut hb, false, false)?;
+        let mut paras: Vec<Paragraph> = Vec::new();
+        let mut table = false;
+        for b in &hb {
+            match b {
+                BBlock::Paras(ps) => paras.extend(ps.iter().map(|p| p.para.clone())),
+                BBlock::Table { .. } => table = true,
+            }
+        }
+        if table {
+            r.warnings.push(format!("a {} with a table is not shown (kept)", kind.title().to_lowercase()));
+            continue;
+        }
+        if paras.is_empty() {
+            paras.push(Paragraph::new());
+        }
+        r.doc.headers.insert(hid.clone(), HeaderFooter { kind: Some(kind), paragraphs: paras, raw: None, root_tag: None, part: None });
+        r.doc.section.hf.push(HfRef { kind, pages, id: hid.clone() });
+        segments.push(BSegment { id: Some(hid.clone()), blocks: hb });
+        header_ids.push(hid);
     }
     if tab.get("positionedObjects").map_or(false, |h| h.as_object().map_or(false, |o| !o.is_empty())) {
         r.warnings.push("positioned images not shown (kept)".into());
@@ -154,6 +194,7 @@ pub fn read(json: &str) -> Result<Loaded, String> {
         segments,
         lists: r.lists,
         footnote_ids: r.footnote_ids,
+        header_ids,
     };
     Ok(Loaded { doc: r.doc, baseline, warnings: r.warnings })
 }
@@ -439,6 +480,15 @@ impl Reader {
                 items.push(Item::Code(Code::Off(AttrKind::VertAlign)));
             } else if el.get("pageBreak").is_some() {
                 items.push(Item::Code(Code::PageBreak));
+            } else if let Some(kind) = el.get("autoText").and_then(|a| str_of(a, "type")).filter(|t| matches!(*t, "PAGE_NUMBER" | "PAGE_COUNT")) {
+                // A page number or count: the simple field a `.docx` holds,
+                // so the page view substitutes it and Save As .docx keeps it.
+                let instr = if kind == "PAGE_NUMBER" { "PAGE" } else { "NUMPAGES" };
+                let id = self.next_wrapper;
+                self.next_wrapper += 1;
+                let label = wp_core::editor::field_label(instr);
+                items.push(Item::Code(Code::Opaque(OpaqueXml { xml: format!("<w:fldSimple w:instr=\"{}\">", instr), label: label.clone(), kind: OpaqueKind::Open(id), protected: false, deleted: false, hint: false, level: OpaqueLevel::Para })));
+                items.push(Item::Code(Code::Opaque(OpaqueXml { xml: "</w:fldSimple>".into(), label: label.to_lowercase(), kind: OpaqueKind::Close(id), protected: false, deleted: false, hint: false, level: OpaqueLevel::Para })));
             } else {
                 let key = el.as_object().and_then(|o| o.keys().find(|k| !matches!(k.as_str(), "startIndex" | "endIndex"))).cloned().unwrap_or_default();
                 let label = OPAQUE_LEVEL_LABELS.iter().find(|(k, _)| *k == key).map(|(_, l)| *l).unwrap_or("Element");

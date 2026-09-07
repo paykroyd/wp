@@ -1662,10 +1662,26 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
 }
 
 /// A command's title as it reads inside its menu: the menu name is already
-/// the context, so "Table: Insert…" becomes "Insert…".
-fn menu_label(cmd: crate::commands::Cmd) -> String {
+/// the context, so "Table: Insert…" becomes "Insert…", and a trailing
+/// qualifier ("— All", "(A→Z)") is dropped — unless another item in the
+/// same menu would then read the same, in which case the qualifier stays
+/// ("Lines: All", "Lines: None").
+pub(crate) fn menu_label(menu: usize, cmd: crate::commands::Cmd) -> String {
+    let short = short_label(cmd, false);
+    let clash = MENUS[menu].items.iter().any(|it| matches!(it, MenuItem::Cmd(c) if *c != cmd && short_label(*c, false) == short));
+    if clash {
+        short_label(cmd, true)
+    } else {
+        short
+    }
+}
+
+fn short_label(cmd: crate::commands::Cmd, keep_qualifier: bool) -> String {
     let t = crate::commands::info(cmd).title;
     let t = t.strip_prefix("Table: ").or_else(|| t.strip_prefix("Style: ")).or_else(|| t.strip_prefix("Find Option: ")).unwrap_or(t);
+    if keep_qualifier {
+        return t.replace(" — ", ": ");
+    }
     let t = t.split(" — ").next().unwrap_or(t);
     let t = t.split(" (").next().unwrap_or(t);
     t.to_string()
@@ -1677,7 +1693,7 @@ pub fn menu_width(app: &App, menu: usize) -> u16 {
     for it in MENUS[menu].items {
         if let MenuItem::Cmd(c) = it {
             let key = app.keymap.label_for(*c).unwrap_or_default();
-            w = w.max(2 + menu_label(*c).width() + 3 + key.width() + 1);
+            w = w.max(2 + menu_label(menu, *c).width() + 3 + key.width() + 1);
         }
     }
     (w + 2).min(app.size.0 as usize).max(8) as u16
@@ -1749,7 +1765,7 @@ fn draw_menu(f: &mut Frame, app: &mut App, area: Rect, th: &Theme, ch: &Chrome, 
             }
             MenuItem::Cmd(c) => {
                 let key = app.keymap.label_for(*c).unwrap_or_default();
-                let label = truncate(&menu_label(*c), (inner.width as usize).saturating_sub(key.width() + 5));
+                let label = truncate(&menu_label(menu, *c), (inner.width as usize).saturating_sub(key.width() + 5));
                 let pad = (inner.width as usize).saturating_sub(2 + label.width() + key.width() + 1);
                 let st = if i == item { th.menu_sel } else { th.menu };
                 lines.push(Line::from(vec![

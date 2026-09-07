@@ -832,7 +832,12 @@ impl App {
     /// After a successful save: keep the edited document (and its undo
     /// history) when the re-read agrees with it in shape, else reload.
     fn adopt_baseline(&mut self, id: &str, l: wp_gdoc::Loaded) {
-        let same_shape = self.gdoc.as_ref().map_or(false, |g| g.baseline.lists == l.baseline.lists && g.baseline.footnote_ids == l.baseline.footnote_ids) && l.doc.paragraphs.len() == self.ed.doc.paragraphs.len();
+        // Docs may have attached a new list paragraph to a neighbouring list
+        // rather than the one wp created, so list membership must agree
+        // paragraph by paragraph as well.
+        let same_shape = self.gdoc.as_ref().map_or(false, |g| g.baseline.lists == l.baseline.lists && g.baseline.footnote_ids == l.baseline.footnote_ids && g.baseline.header_ids == l.baseline.header_ids)
+            && l.doc.paragraphs.len() == self.ed.doc.paragraphs.len()
+            && l.doc.paragraphs.iter().zip(&self.ed.doc.paragraphs).all(|(a, b)| a.props.list == b.props.list);
         if same_shape {
             if let Some(g) = &mut self.gdoc {
                 g.baseline = l.baseline;

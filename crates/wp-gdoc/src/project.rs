@@ -359,8 +359,12 @@ pub fn project(ctx: &Ctx, p: &Paragraph) -> Result<Proj, String> {
     let mut stack: Vec<Attr> = Vec::new();
     let mut link: Option<String> = None;
     let mut sty = Sty::default();
+    // Inside a PAGE / NUMPAGES simple field: its stored result is not text
+    // Docs holds (the field is one `autoText` element there).
+    let mut in_field = false;
     for it in &p.items {
         match it {
+            Item::Char(_) if in_field => {}
             Item::Char(c) => {
                 let c = if *c == '\n' { ' ' } else { *c };
                 units.push(Unit { kind: UnitKind::Char(c), len: utf16_len(c), sty: sty.clone() });
@@ -381,7 +385,17 @@ pub fn project(ctx: &Ctx, p: &Paragraph) -> Result<Proj, String> {
                 Code::PageBreak => units.push(Unit { kind: UnitKind::PageBreak, len: 1, sty: Sty::default() }),
                 Code::Bookmark(_) | Code::BookmarkEnd(_) => {}
                 Code::Opaque(o) => {
-                    if o.xml.starts_with("<w:hyperlink") {
+                    if let Some(instr) = wp_core::editor::field_instr(o) {
+                        let kind = match instr.split_whitespace().next().unwrap_or("").to_ascii_uppercase().as_str() {
+                            "PAGE" => "PAGE_NUMBER",
+                            "NUMPAGES" => "PAGE_COUNT",
+                            _ => return Err(format!("a {} field (Google Docs has no fields)", instr)),
+                        };
+                        units.push(Unit { kind: UnitKind::Object(format!("autoText:{}", kind)), len: 1, sty: Sty::default() });
+                        in_field = true;
+                    } else if o.xml.starts_with("</w:fldSimple") {
+                        in_field = false;
+                    } else if o.xml.starts_with("<w:hyperlink") {
                         link = hyperlink_url(&o.xml, ctx.rels);
                         sty = Sty::from_attrs(&stack, link.as_deref());
                     } else if o.xml.starts_with("</w:hyperlink") {

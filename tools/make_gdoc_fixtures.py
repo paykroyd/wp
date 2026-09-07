@@ -114,12 +114,19 @@ def report(tabs=False):
     body.para([("Café — naïve \U0001F600 end.", {"italic": True, "fontSize": pt(14), "foregroundColor": {"color": {"rgbColor": {"red": 1}}}, "backgroundColor": {"color": {"rgbColor": {"red": 1, "green": 1}}}})], style={"spaceAbove": pt(12), "lineSpacing": 150})
     fn = Seg(0)
     fn.para([("Source: ", {}), ("annual filing", {"italic": True}), (".", {})])
+    hdr = Seg(0)
+    hdr.para([("Quarterly Report — draft", {})], style={"alignment": "END"})
+    ftr = Seg(0)
+    ftr.para([("Page ", {}), {"autoText": {"type": "PAGE_NUMBER", "textStyle": {}}}, (" of ", {}), {"autoText": {"type": "PAGE_COUNT", "textStyle": {}}}])
+    doc_style = dict(DOC_STYLE, defaultHeaderId="kix.hdr1", defaultFooterId="kix.ftr1")
     tab = {
         "body": {"content": body.content},
         "footnotes": {"kix.fn1": {"footnoteId": "kix.fn1", "content": fn.content}},
+        "headers": {"kix.hdr1": {"headerId": "kix.hdr1", "content": hdr.content}},
+        "footers": {"kix.ftr1": {"footerId": "kix.ftr1", "content": ftr.content}},
         "lists": {"kix.list1": {"listProperties": {"nestingLevels": [{"bulletAlignment": "START", "glyphSymbol": "●", "glyphFormat": "%0", "indentFirstLine": pt(18), "indentStart": pt(36), "textStyle": {"underline": False}, "startNumber": 1}] + [{"bulletAlignment": "START", "glyphSymbol": "○", "glyphFormat": "%1", "indentFirstLine": pt(54), "indentStart": pt(72), "startNumber": 1} for _ in range(8)]}}},
         "namedStyles": NAMED_STYLES,
-        "documentStyle": DOC_STYLE,
+        "documentStyle": doc_style,
         "inlineObjects": {"kix.img1": {"objectId": "kix.img1", "inlineObjectProperties": {"embeddedObject": {"imageProperties": {"contentUri": "https://lh7.example/img", "cropProperties": {}}, "size": {"height": pt(120), "width": pt(200)}, "marginTop": pt(9), "marginBottom": pt(9), "marginRight": pt(9), "marginLeft": pt(9)}}}},
         "suggestionsViewMode": "SUGGESTIONS_INLINE",
     }

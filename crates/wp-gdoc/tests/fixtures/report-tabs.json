@@ -629,6 +629,93 @@
       ]
      }
     },
+    "headers": {
+     "kix.hdr1": {
+      "headerId": "kix.hdr1",
+      "content": [
+       {
+        "startIndex": 0,
+        "endIndex": 25,
+        "paragraph": {
+         "elements": [
+          {
+           "startIndex": 0,
+           "endIndex": 25,
+           "textRun": {
+            "content": "Quarterly Report — draft\n",
+            "textStyle": {}
+           }
+          }
+         ],
+         "paragraphStyle": {
+          "namedStyleType": "NORMAL_TEXT",
+          "direction": "LEFT_TO_RIGHT",
+          "alignment": "END"
+         }
+        }
+       }
+      ]
+     }
+    },
+    "footers": {
+     "kix.ftr1": {
+      "footerId": "kix.ftr1",
+      "content": [
+       {
+        "startIndex": 0,
+        "endIndex": 12,
+        "paragraph": {
+         "elements": [
+          {
+           "startIndex": 0,
+           "endIndex": 5,
+           "textRun": {
+            "content": "Page ",
+            "textStyle": {}
+           }
+          },
+          {
+           "startIndex": 5,
+           "endIndex": 6,
+           "autoText": {
+            "type": "PAGE_NUMBER",
+            "textStyle": {}
+           }
+          },
+          {
+           "startIndex": 6,
+           "endIndex": 10,
+           "textRun": {
+            "content": " of ",
+            "textStyle": {}
+           }
+          },
+          {
+           "startIndex": 10,
+           "endIndex": 11,
+           "autoText": {
+            "type": "PAGE_COUNT",
+            "textStyle": {}
+           }
+          },
+          {
+           "startIndex": 11,
+           "endIndex": 12,
+           "textRun": {
+            "content": "\n",
+            "textStyle": {}
+           }
+          }
+         ],
+         "paragraphStyle": {
+          "namedStyleType": "NORMAL_TEXT",
+          "direction": "LEFT_TO_RIGHT"
+         }
+        }
+       }
+      ]
+     }
+    },
     "lists": {
      "kix.list1": {
       "listProperties": {
@@ -919,7 +1006,9 @@
       "magnitude": 36,
       "unit": "PT"
      },
-     "useCustomHeaderFooterMargins": true
+     "useCustomHeaderFooterMargins": true,
+     "defaultHeaderId": "kix.hdr1",
+     "defaultFooterId": "kix.ftr1"
     },
     "inlineObjects": {
      "kix.img1": {

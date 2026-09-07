@@ -47,6 +47,16 @@ pub fn detach(doc: &mut Document) -> Vec<String> {
         }
         i += 1;
     }
+    let hf_paras = doc.headers.values_mut().flat_map(|h| h.paragraphs.iter_mut());
+    for p in hf_paras {
+        p.items.retain(|it| match it {
+            Item::Code(Code::Opaque(o)) if o.xml.starts_with('{') => {
+                dropped.push(o.label.clone());
+                false
+            }
+            _ => true,
+        });
+    }
     for f in &mut doc.footnotes {
         for p in &mut f.paragraphs {
             p.items.retain(|it| match it {

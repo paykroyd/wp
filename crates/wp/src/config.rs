@@ -86,6 +86,10 @@ pub struct Config {
     /// Extra bindings: key → command id, e.g. `"ctrl+shift+b" = "bold"`.
     pub bindings: BTreeMap<String, String>,
     pub google: GoogleConfig,
+    /// Whether `save` writes the file. Off in headless tests, which would
+    /// otherwise overwrite the user's real configuration with defaults.
+    #[serde(skip)]
+    pub persist: bool,
 }
 
 impl Default for Config {
@@ -104,6 +108,7 @@ impl Default for Config {
             system_clipboard: true,
             bindings: BTreeMap::new(),
             google: GoogleConfig::default(),
+            persist: true,
         }
     }
 }
@@ -139,12 +144,23 @@ impl Config {
     pub fn load() -> (Config, bool) {
         let p = config_path();
         match std::fs::read_to_string(&p) {
-            Ok(s) => (toml::from_str(&s).unwrap_or_default(), true),
+            Ok(s) => match toml::from_str(&s) {
+                Ok(c) => (c, true),
+                Err(e) => {
+                    // Keep the file: defaults are used for this run, but a
+                    // save must not replace what the user wrote.
+                    eprintln!("{}: {}; using defaults", p.display(), e.message());
+                    (Config { persist: false, ..Config::default() }, true)
+                }
+            },
             Err(_) => (Config::default(), false),
         }
     }
 
     pub fn save(&self) -> std::io::Result<()> {
+        if !self.persist {
+            return Ok(());
+        }
         let p = config_path();
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d)?;

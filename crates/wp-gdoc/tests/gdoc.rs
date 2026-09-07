@@ -128,6 +128,58 @@ fn reads_lists_tables_footnotes_and_objects() {
 }
 
 #[test]
+fn reads_headers_and_footers() {
+    let l = load("report.json");
+    let d = &l.doc;
+    assert_eq!(l.baseline.header_ids, vec!["kix.hdr1".to_string(), "kix.ftr1".to_string()]);
+    let h = &d.headers["kix.hdr1"];
+    assert_eq!(h.kind, Some(HfKind::Header));
+    assert_eq!(h.paragraphs[0].text(), "Quarterly Report — draft");
+    assert_eq!(h.paragraphs[0].props.align, Some(Align::Right));
+    let f = &d.headers["kix.ftr1"];
+    assert_eq!(f.kind, Some(HfKind::Footer));
+    // Page number and count are the same simple fields a .docx holds.
+    let instrs: Vec<String> = f.paragraphs[0].items.iter().filter_map(|it| match it {
+        Item::Code(Code::Opaque(o)) => wp_core::editor::field_instr(o),
+        _ => None,
+    }).collect();
+    assert_eq!(instrs, vec!["PAGE", "NUMPAGES"]);
+    assert_eq!(f.paragraphs[0].text(), "Page  of ");
+    assert_eq!(d.section.hf.len(), 2);
+    assert_eq!((d.section.hf[0].kind, d.section.hf[0].pages, d.section.hf[0].id.as_str()), (HfKind::Header, HfPages::Default, "kix.hdr1"));
+    assert_eq!((d.section.hf[1].kind, d.section.hf[1].pages), (HfKind::Footer, HfPages::Default));
+    assert!(!d.section.title_page);
+    assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+    // Untouched, the headers produce no requests.
+    assert!(diff(&l.baseline, &l.doc).unwrap().is_empty());
+}
+
+#[test]
+fn header_edits_name_the_segment() {
+    let l = load("report.json");
+    let mut d = l.doc.clone();
+    d.headers.get_mut("kix.hdr1").unwrap().paragraphs[0].items.insert(0, Item::Char('*'));
+    let reqs = diff(&l.baseline, &d).unwrap();
+    assert_eq!(kind(&reqs[0]).0, "insertText");
+    assert_eq!(reqs[0]["insertText"]["location"]["segmentId"], "kix.hdr1");
+    assert_eq!(reqs[0]["insertText"]["location"]["index"], 0);
+    // Typing beside a page-number field leaves the field alone.
+    let mut d = l.doc.clone();
+    d.headers.get_mut("kix.ftr1").unwrap().paragraphs[0].items.insert(0, Item::Char('p'));
+    let reqs = diff(&l.baseline, &d).unwrap();
+    assert_eq!(kind(&reqs[0]).0, "insertText");
+    assert_eq!(reqs[0]["insertText"]["location"]["segmentId"], "kix.ftr1");
+    assert!(reqs.iter().all(|r| kind(r).0 != "deleteContentRange"), "{:?}", kinds(&reqs));
+    // Removing or creating a header is refused, naming it.
+    let mut d = l.doc.clone();
+    d.headers.remove("kix.hdr1");
+    assert!(diff(&l.baseline, &d).unwrap_err().contains("header"));
+    let mut d = l.doc.clone();
+    d.headers.insert("new".into(), HeaderFooter { kind: Some(HfKind::Footer), paragraphs: vec![Paragraph::new()], raw: None, root_tag: None, part: None });
+    assert!(diff(&l.baseline, &d).unwrap_err().contains("footer"));
+}
+
+#[test]
 fn reads_tabs_form() {
     let l = load("report-tabs.json");
     assert_eq!(l.baseline.tab_id.as_deref(), Some("t.0"));
@@ -507,8 +559,10 @@ fn page_breaks_and_images_move_with_their_paragraph_but_not_into_new_ones() {
     let mut d = l.doc.clone();
     d.paragraphs[0].items.push(Item::Code(Code::PageBreak));
     let reqs = diff(&l.baseline, &d).unwrap();
-    assert_eq!(kinds(&reqs), vec!["insertPageBreak"]);
+    // Docs adds a newline after the break; the writer removes it again.
+    assert_eq!(kinds(&reqs), vec!["insertPageBreak", "deleteContentRange"]);
     assert_eq!(reqs[0]["insertPageBreak"]["location"]["index"], 17);
+    assert_eq!(range(&reqs[1]["deleteContentRange"]), (18, 19));
     // An image cannot be moved into a brand-new paragraph (yet).
     let mut d = l.doc.clone();
     let img = d.paragraphs[9].items.pop().unwrap();
@@ -559,17 +613,15 @@ fn leaving_a_list_resets_its_indent() {
 }
 
 #[test]
-fn changing_list_level_changes_the_indent_not_the_list() {
+fn changing_list_level_is_refused() {
     let l = load("numbered.json");
     let mut d = l.doc.clone();
-    // Tab on "Second": level 0 → 1 within the same list.
+    // Tab on "Second": level 0 → 1. The API has no request that sets the
+    // level of a paragraph already in a list (DESIGN.md §6a.2), so the
+    // save is refused by name rather than indented to look nested.
     d.paragraphs[3].props.list.as_mut().unwrap().level = 1;
-    let reqs = diff(&l.baseline, &d).unwrap();
-    assert_eq!(kinds(&reqs), vec!["updateParagraphStyle"]);
-    let u = &reqs[0]["updateParagraphStyle"];
-    assert_eq!(u["fields"], "indentStart,indentFirstLine");
-    assert_eq!(u["paragraphStyle"]["indentStart"]["magnitude"], 72.0);
-    assert_eq!(u["paragraphStyle"]["indentFirstLine"]["magnitude"], 54.0);
+    let err = diff(&l.baseline, &d).unwrap_err();
+    assert!(err.contains("level"), "{}", err);
 }
 
 #[test]

@@ -18,6 +18,7 @@ impl Harness {
         let mut cfg = Config::default();
         cfg.keymap = keymap;
         cfg.show_hint = false;
+        cfg.persist = false;
         let mut app = App::new(cfg);
         app.drive_cache_path = None;
         app.resize(80, 24);
@@ -1111,6 +1112,24 @@ fn table_corpus_spans_and_merges_render() {
     }
     // Delete the whole document's text and undo: structure survives.
     h.key(KeyCode::Char('a'), CTRL | KeyModifiers::SHIFT);
+}
+
+/// No menu shows two items with the same label: a qualifier that the short
+/// form drops ("Lines — All") stays when siblings would otherwise collide.
+#[test]
+fn menu_labels_are_distinct_within_a_menu() {
+    for (mi, m) in crate::menu::MENUS.iter().enumerate() {
+        let labels: Vec<String> = m.items.iter().filter_map(|it| match it {
+            crate::menu::Item::Cmd(c) => Some(crate::ui::menu_label(mi, *c)),
+            _ => None,
+        }).collect();
+        for (i, l) in labels.iter().enumerate() {
+            assert!(!labels[..i].contains(l), "menu {} shows \"{}\" twice", m.title, l);
+        }
+    }
+    assert_eq!(crate::ui::menu_label(7, crate::commands::Cmd::TableBordersAll), "Lines: All");
+    assert_eq!(crate::ui::menu_label(7, crate::commands::Cmd::TableSortAsc), "Sort Rows by This Column (A→Z, 1→9)");
+    assert_eq!(crate::ui::menu_label(7, crate::commands::Cmd::TableInsert), "Insert…");
 }
 
 #[test]

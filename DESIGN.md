@@ -435,16 +435,23 @@ numbered in document order, with the bodies read into `Document::footnotes`.
 Tables with no spans become cell-tagged paragraphs (§3.7) with the grid from
 `tableColumnProperties`; a table with spans, a nested table, a table of
 contents and a section break after the first are preserved blocks.
-Everything else in a paragraph — inline image, equation, person chip, rich
-link, date, auto text, column break, horizontal rule — is a `Code::Opaque`
-whose `xml` is the element's JSON plus its index length. Suggestions
+Headers and footers named by `documentStyle` (default, first-page, even-page
+ids; `useFirstPageHeaderFooter` is the section's `title_page`,
+`useEvenPageHeaderFooter` the document's `even_odd_headers`) are read into
+`Document::headers` under their Docs ids with an `HfRef` on the section, so
+the header screen and the page view treat them as they do a `.docx`'s; a
+page-number or page-count `autoText` becomes the same `PAGE` / `NUMPAGES`
+simple field, which the projection maps back to one element. Everything
+else in a paragraph — inline image, equation, person chip, rich link, date,
+other auto text, column break, horizontal rule — is a `Code::Opaque` whose
+`xml` is the element's JSON plus its index length. Suggestions
 (`suggestedInsertionIds` / `suggestedDeletionIds`) are wrapped as protected
 `w:ins` / `w:del` tracked changes, which is what they are.
 
 Alongside the `Document`, the reader returns a `Baseline`: the paragraphs
 exactly as read, each with its Docs index range, grouped by container
-(body stretch between tables, table cell, footnote), plus the revision id
-and the list / footnote id maps.
+(body stretch between tables, table cell, footnote, header or footer), plus
+the revision id and the list / footnote / header id maps.
 
 ### 6a.2 Writing: the diff
 
@@ -471,11 +478,28 @@ delete / insert hunks; then its characters are compared unit by unit and
 neighbour's). Paragraph formatting is an `updateParagraphStyle` with a
 field mask of what changed, the indent being the *effective* one (the list
 level's unless set directly), because Docs keeps a list paragraph's indent
-on the paragraph and derives its nesting level from it. So a level change
-within a list is just an indent change; a paragraph joining a list gets
-`createParagraphBullets` after leading tabs for its level (which the
-request counts and removes); leaving one gets `deleteParagraphBullets`
-plus the indent reset.
+on the paragraph. A paragraph joining a list gets `createParagraphBullets`
+after leading tabs for its level (which the request counts and removes);
+leaving one gets `deleteParagraphBullets` plus the indent reset. Changing
+the level of a paragraph already in a list is **refused** for now: probed
+live (2026-09-07), the indent alone leaves `nestingLevel` as it was;
+`createParagraphBullets` on a paragraph that follows a list paragraph with
+the same preset joins that list at *that paragraph's* level, ignoring
+leading tabs (and may leave them in the text); tabs set levels only when
+the range starts a list, and then `deleteParagraphBullets` leaves a residual
+indent that counts as extra levels. The reliable form is to rebuild the
+whole list run — delete its bullets, zero its indents, insert tabs per
+level, create bullets over the run in one request — which needs exact
+post-edit indexes and so belongs to the two-phase save (structural requests
+against a fresh read) planned with tables and new footnotes.
+
+Verified live the same day: `insertPageBreak` inserts a newline after the
+break, so the writer deletes that newline again to keep the paragraph one;
+`createFootnote` gives the new footnote one placeholder space; a
+`startIndex` of 0 is omitted from the JSON; a re-read after a save can give
+a new list paragraph the neighbouring list's id rather than a new one, so
+the application reloads unless list membership agrees paragraph by
+paragraph.
 
 Two Docs rules shape the edit script. A container's final newline cannot be
 deleted, so deleting the last paragraph deletes from the previous
@@ -618,7 +642,11 @@ clean save or exit.
 | **0.1 Preview** | Model, editing, undo, character/paragraph formatting, styles, draft view with true page boundaries, `.docx` write, basic `.docx` read, plain text, both keymaps, palette, Reveal Codes (the model makes it nearly free, so it comes early) |
 | **0.2 Round-trip** | Corpus of 62 files with a stricter gate and the fixes it forced; lists from `numbering.xml` with real labels and list commands; regex / format / code search with replace preview; Markdown in and out; mouse; OSC 52 clipboard |
 | **0.3 Documents** | Tables as cell-tagged paragraphs (§3.7) with every P0-17 operation; sections (§3.8) with per-section page setup, text columns and column breaks; headers and footers edited on their own screen, page-number fields; page view (§5.1); pagination that follows Word's rules for rows, header space and section starts |
-| 1.0 | Footnotes, TOC, cross-refs, captions, index, images, spelling, macros, tutor |
+| **0.4 Google Docs** | The diff save exercised against the real API (`google_live.rs`, an ignored test that creates and edits a scratch Doc) and what that found; headers and footers read from a Doc; tables, new footnotes and moved objects in the diff |
+| **0.5 Images** | An image item with extent and media part (§3), placeholder boxes in both layouts, terminal graphics where supported, insert / resize / float, Markdown images |
+| **0.6 Spelling** | Hunspell-format dictionaries through a pure-Rust checker, checked on idle per paragraph, squiggles in both views, word lists |
+| **0.7 References** | Footnote layout at the page bottom, TOC / caption / cross-reference / index fields generated and regenerated |
+| 1.0 | Macros, tutor, page-view rules and borders, Word page-count comparison in the corpus tooling |
 
 ---
 
@@ -671,7 +699,7 @@ A Cmd/Super layer rides on top of the modern map for terminals that deliver
 it via the kitty keyboard protocol; every Cmd binding has a Ctrl or F-key
 twin, so nothing depends on it.
 
-## 11. Status (2026-09-02)
+## 11. Status (2026-09-03)
 
 **0.3 Documents is implemented.** On top of 0.2:
 
@@ -703,8 +731,7 @@ Measured on the 84-page `gen-long.docx`: page view first render 20 ms,
 - 1.0: footnotes (bodies are read for Markdown export; not laid out),
   TOC, cross-references, captions, index, images (placeholders only),
   spelling, macros, tutorial. Also: page view does not draw horizontal
-  table rules or paragraph borders; the Google Docs client does not read a
-  Doc's headers; Markdown images become links.
+  table rules or paragraph borders; Markdown images become links.
 - A file that declares WordprocessingML as the default namespace opens as
   preserved blocks by decision (E12).
 
@@ -717,10 +744,29 @@ UTF-16 surrogates, tabbed documents, suggestions. The binary's OAuth
 client, open / save / recovery and `--check` (2026-08-29, §6a.4); the Open
 from Drive modal — cached recents, type-to-filter with a paused-typing
 server search, and a folder view — with its listings on a worker thread
-(2026-08-30). Still to do: live verification against the API — the request
-shapes follow the reference and the newline / paragraph-style semantics in
-§6a.2 follow its documentation, but have not been exercised on a real
-document yet.
+(2026-08-30).
+
+**0.4 Google Docs, in progress (2026-09-03).** A Doc's headers and footers
+are read and diffed as their own segments, with page-number auto text as
+`PAGE` / `NUMPAGES` fields (§6a.1); removing or creating one is refused by
+name. `crates/wp/src/google_live.rs` holds the live verification: an
+ignored test that creates a scratch Doc in the signed-in account, seeds it
+with a heading, formatting, both list kinds, a table, a footnote and a page
+break, then runs twenty-three edit kinds through the `Editor`, saving each
+as a diff and re-reading, and fails if the re-read document would diff to
+anything against the edited one (`cargo test -p wp live_roundtrip --
+--ignored --nocapture`; `live_sign_in` signs in from the terminal). The
+run passes (2026-09-07): 22 edit kinds save and read back quietly, and the
+23rd — changing a list item's level — is refused by name, since the API has
+no single-request form for it (§6a.2). Still to do: the two-phase save
+(structural requests, re-read, then the content diff) for list-level
+changes, tables, new footnotes and moved objects.
+
+Two bugs found on the way: headless UI tests saved `Config::default()` over
+the user's real `config.toml` (every `Harness` now sets `persist = false`,
+and a config that fails to parse is never overwritten), and any 400 from
+the token endpoint — including a wrong client id — deleted the cached
+refresh token (now only `invalid_grant` does).
 
 **0.2 Round-trip** provided:
 

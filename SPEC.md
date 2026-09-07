@@ -497,13 +497,24 @@ engineering chunk.
 | **0.1 Preview** | Write and format a document, save it as `.docx`, and have Word open it correctly | Editing, character and paragraph formatting, styles, `.docx` write, draft view, both keymaps, palette |
 | **0.2 Round-trip** | Take a `.docx` someone sent them, edit it, and send it back safely | `.docx` read with full fidelity, lists, find/replace, undo, autosave, Markdown |
 | **0.3 Documents** | Produce a real structured document | Tables, sections, headers/footers, page view, accurate pagination, Reveal Codes |
-| **1.0** | Do everything the job requires | Footnotes, TOC, cross-references, captions, index, images, spell check, macros, tutorial |
+| **0.4 Google Docs** | Open a real Doc, edit it, and save it back with confidence | Diff save verified live and the fixes that forces; a Doc's headers and footers; the diff handles tables, new footnotes, and moving an image or footnote reference into a new paragraph |
+| **0.5 Images** | See and place pictures | Inline drawings read at their size (media kept), a correctly sized placeholder in both views, real rendering on Kitty / iTerm2 / Sixel terminals, insert from file, resize, alt text, floating with wrap, Markdown images |
+| **0.6 Spelling** | Write without typos | Hunspell dictionaries checked incrementally with squiggles and inline suggestions; per-document, per-user and per-project word lists; language per run |
+| **0.7 References** | Produce a document with apparatus | Footnotes and endnotes at the page bottom, table of contents, captions, cross-references, index |
+| **1.0** | Do everything the job requires | Macros, tutorial, the remaining page-view gaps, the measurable bar in §10.2 |
 | **1.1** | Deliver in more formats | PDF, RTF, ODT, HTML, outline pane, compare |
 | **2.0** | Participate in review workflows | Comments, tracked changes, `.wpd` |
 
 The 0.2 milestone is the real one. Until a document can make a full safe round
 trip, `wp` isn't usable for the primary job and shouldn't be recommended to
 anyone.
+
+The 0.4–0.7 sequence (planned 2026-09-03) puts Google Docs first because it is
+the smallest piece and the one most likely to be broken invisibly, images next
+because their read side also unblocks Docs images and Markdown, spelling third
+because it is self-contained, and the reference apparatus last because it is
+the largest block. If 0.7 runs long, cross-references (P0-21) and the index
+(P0-23) move to 1.1 rather than ship half-done.
 
 ---
 
