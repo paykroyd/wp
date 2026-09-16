@@ -57,6 +57,21 @@ impl GoogleConfig {
     }
 }
 
+/// `[spell]`: whether misspellings are underlined, and a word list to use
+/// instead of the machine's (`/usr/share/dict/words`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpellConfig {
+    pub enabled: bool,
+    pub dictionary: String,
+}
+
+impl Default for SpellConfig {
+    fn default() -> Self {
+        SpellConfig { enabled: true, dictionary: String::new() }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -86,6 +101,7 @@ pub struct Config {
     /// Extra bindings: key → command id, e.g. `"ctrl+shift+b" = "bold"`.
     pub bindings: BTreeMap<String, String>,
     pub google: GoogleConfig,
+    pub spell: SpellConfig,
     /// Whether `save` writes the file. Off in headless tests, which would
     /// otherwise overwrite the user's real configuration with defaults.
     #[serde(skip)]
@@ -108,6 +124,7 @@ impl Default for Config {
             system_clipboard: true,
             bindings: BTreeMap::new(),
             google: GoogleConfig::default(),
+            spell: SpellConfig::default(),
             persist: true,
         }
     }

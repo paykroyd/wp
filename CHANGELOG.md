@@ -17,6 +17,13 @@ user can do with it. DESIGN.md §11 has the current status and gaps.
   can be created in any folder; signing in again once grants it.
 - *Save As Word Document / Markdown / Plain Text* stay in the palette; the
   File menu has one *Save As…*.
+- Spelling, pulled ahead of images on the roadmap: misspellings underlined in
+  both views as you write, against the machine's word list
+  (`/usr/share/dict/words`) with English suffixes and contractions
+  understood. *Spell Check…* (`Alt+F1`, `Cmd+;`) walks the document with
+  suggestions, Skip, Ignore All and Add to Dictionary (`~/.config/wp/words.txt`);
+  a project's `.wp-words` is read too. `[spell]` in the config turns it off or
+  names another word list.
 
 ## 0.3.0 — Documents (2026-09-02)
 

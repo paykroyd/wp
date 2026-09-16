@@ -8,6 +8,7 @@ mod keymap;
 mod menu;
 mod pageview;
 mod palette;
+mod spell;
 mod ui;
 #[cfg(test)]
 mod tests;

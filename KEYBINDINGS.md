@@ -97,6 +97,7 @@ Selected with `keymap = "classic"`. `Esc` followed by a number repeats the next 
 | `Ctrl+F10` | Italic | Format ▸ Character |
 | `Ctrl+F2` | Find Next | Navigate |
 | `Ctrl+F1` | About wp | Help |
+| `Alt+F1` | Spell Check… | Edit |
 | `Ctrl+Z` | Undo | Edit |
 
 ## Modern
@@ -198,6 +199,7 @@ Part of the modern map. Delivered only by terminals that report the Cmd key thro
 | `Cmd+U` | Underline | Format ▸ Character |
 | `Cmd+D` | Font… | Format ▸ Character |
 | `Cmd+F` | Find… | Navigate |
+| `Cmd+;` | Spell Check… | Edit |
 | `Cmd+G` | Find Next | Navigate |
 | `Cmd+Shift+G` | Find Previous | Navigate |
 | `Cmd+Shift+H` | Replace… (preview, then all or one at a time) | Navigate |
@@ -293,6 +295,9 @@ Commands with no default key in either map:
 - Sign Out of Google
 - Space After Paragraph…
 - Space Before Paragraph…
+- Spelling: Add Word to Dictionary
+- Spelling: Ignore Word
+- Spelling: Show Misspellings
 - Style Browser (inheritance and overrides at cursor)
 - Style: Title
 - Tab Stops…

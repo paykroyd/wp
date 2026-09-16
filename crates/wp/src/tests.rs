@@ -20,8 +20,12 @@ impl Harness {
         cfg.keymap = keymap;
         cfg.show_hint = false;
         cfg.persist = false;
+        // Spelling would read the machine's word list; tests that want it
+        // install a small dictionary of their own.
+        cfg.spell.enabled = false;
         let mut app = App::new(cfg);
         app.drive_cache_path = None;
+        app.spell.user_file = None;
         app.resize(80, 24);
         let term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         Harness { app, term }
@@ -1622,6 +1626,97 @@ fn exit_with_unsaved_untitled_document_opens_save_as() {
     h.key(KeyCode::Esc, NONE);
     assert!(!h.app.quit_after_save);
     assert!(!h.app.quit);
+}
+
+// ----------------------------------------------------------------------
+// Spelling
+// ----------------------------------------------------------------------
+
+fn spelling_harness() -> Harness {
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.spell.set_dictionary(crate::spell::Dictionary::from_words(["this", "is", "a", "test", "of", "spelling", "the", "end", "cat", "cats"], "test"));
+    h.app.spell.enabled = true;
+    h
+}
+
+/// The column and row of the first cell of `word` on screen.
+fn locate(h: &mut Harness, word: &str) -> (u16, u16) {
+    let s = h.screen();
+    for (y, line) in s.lines().enumerate() {
+        if let Some(i) = line.find(word) {
+            return (line[..i].chars().count() as u16, y as u16);
+        }
+    }
+    panic!("{} not on screen:\n{}", word, s);
+}
+
+#[test]
+fn misspellings_are_underlined_except_the_word_being_typed() {
+    use ratatui::style::Modifier;
+    let mut h = spelling_harness();
+    h.type_str("This is a tset of speling");
+    let (x, y) = locate(&mut h, "tset");
+    assert!(h.cell(x, y).add_modifier.contains(Modifier::UNDERLINED));
+    let (x2, _) = locate(&mut h, "This");
+    assert!(!h.cell(x2, y).add_modifier.contains(Modifier::UNDERLINED));
+    // The word at the cursor is still being typed.
+    let (x3, _) = locate(&mut h, "speling");
+    assert!(!h.cell(x3, y).add_modifier.contains(Modifier::UNDERLINED));
+    h.type_str(" ");
+    assert!(h.cell(x3, y).add_modifier.contains(Modifier::UNDERLINED));
+    // Off, and on again.
+    h.app.exec(Cmd::SpellToggle);
+    assert!(!h.cell(x, y).add_modifier.contains(Modifier::UNDERLINED));
+    h.app.exec(Cmd::SpellToggle);
+    assert!(h.cell(x, y).add_modifier.contains(Modifier::UNDERLINED));
+    assert!(h.app.status_text().unwrap_or_default().contains("10 words from test"), "{:?}", h.app.status_text());
+    // Page view underlines too.
+    h.app.view = crate::app::View::Page;
+    h.app.needs_redraw = true;
+    let (px, py) = locate(&mut h, "tset");
+    assert!(h.cell(px, py).add_modifier.contains(Modifier::UNDERLINED));
+    let (qx, qy) = locate(&mut h, "This");
+    assert!(!h.cell(qx, qy).add_modifier.contains(Modifier::UNDERLINED));
+}
+
+#[test]
+fn spell_check_walks_the_document_and_replaces_or_learns() {
+    use wp_core::model::Pos;
+    let mut h = spelling_harness();
+    h.type_str("This is a tset of speling. The end.");
+    h.app.ed.move_doc_start(false);
+    h.app.exec(Cmd::SpellCheck);
+    // The first misspelling is selected and its suggestions listed.
+    assert_eq!(h.app.ed.anchor, Some(Pos::new(0, 10)));
+    assert_eq!(h.app.ed.cursor, Pos::new(0, 14));
+    let s = h.screen();
+    assert!(s.contains("Spelling: “tset”"), "{}", s);
+    match &h.app.overlay {
+        Overlay::List { items, .. } => assert_eq!(items[0].label, "test"),
+        o => panic!("{:?}", o),
+    }
+    h.key(KeyCode::Enter, NONE);
+    // Replaced, and on to the next one.
+    assert!(h.app.ed.doc.text().starts_with("This is a test of speling"), "{}", h.app.ed.doc.text());
+    assert!(matches!(&h.app.overlay, Overlay::List { title, .. } if title.contains("speling")), "{:?}", h.app.overlay);
+    // "spelling", then Skip, Ignore All, Add to Dictionary.
+    for _ in 0..3 {
+        h.key(KeyCode::Down, NONE);
+    }
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(h.app.overlay, Overlay::None));
+    assert!(h.app.status_text().unwrap_or_default().contains("Spell check complete"), "{:?}", h.app.status_text());
+    assert!(h.app.spell.known("speling"));
+    // The replacement is one undo step of its own.
+    h.app.ed.undo();
+    assert!(h.app.ed.doc.text().starts_with("This is a tset"), "{}", h.app.ed.doc.text());
+    // Ignore Word acts on the word at the cursor.
+    h.app.ed.move_to(Pos::new(0, 12), false);
+    h.app.exec(Cmd::SpellIgnore);
+    assert!(h.app.spell.known("tset"));
+    h.app.exec(Cmd::SpellCheck);
+    assert!(matches!(h.app.overlay, Overlay::None));
+    assert!(h.app.status_text().unwrap_or_default().contains("Spell check complete"));
 }
 
 #[test]

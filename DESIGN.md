@@ -674,6 +674,45 @@ clean save or exit.
 
 ---
 
+### 7.5 Spelling
+
+The first cut of P0-13 (`spell.rs`), built on what the machine already
+has rather than a dictionary format of its own. The word list is the first
+of: `[spell] dictionary` in the config, `dictionary.txt` in the config
+directory, `/usr/share/dict/words` (Webster's Second on macOS and most
+Linux systems; the system's `propernames` come along). Nothing is bundled
+and nothing is downloaded. A plain list has no affix rules, so an unlisted
+word is also tried with a regular suffix removed (-s, -es, -ies, -ed, -ing,
+-ly, -er, -est, -ness, -ment, a doubled consonant, a possessive) and a
+short list of contractions is built in; the price is that a non-word made
+of a real stem and a real suffix passes. Hunspell dictionaries, with real
+affix rules and other languages, are the planned second cut, behind the
+same `Dictionary` type.
+
+Words come from the item stream: letters and inner apostrophes, with
+zero-width codes transparent — a word bolded in the middle is one word —
+and everything else a separator. Left alone: single letters, words in
+capitals or CamelCase, and anything glued to a digit, `@`, `/` or a dot
+(URLs, addresses, `3rd`). The word the cursor is at the end of is not
+flagged while it is being typed.
+
+Checking is on demand, not on a timer: each view asks `Checker::ranges`
+for the paragraphs it draws, and the answer is cached per paragraph
+against a hash of its items, so an unchanged paragraph costs a hash and a
+changed one a few microseconds per word. The misspelled ranges are
+underlined in the theme's `misspell` style (a red underline where the
+terminal has colour) in both draft and page view. `Spell Check…` walks the
+document from the cursor, wrapping once and stopping where it began,
+selecting each misspelling and listing suggestions — words one edit away
+(Norvig's deletes, transposes, replaces, inserts), then two when that
+gives fewer than three — with Skip, Ignore All and Add to Dictionary under
+them; a pick replaces the word as its own undo step and moves on. Ignored
+words last the session; added words go to `words.txt` in the config
+directory. A project's `.wp-words`, found by walking up from the
+document's directory, is read as well. Still to do from P0-13: a
+per-document list (a `.docx` has no standard place for one) and language
+per run (the `w:lang` run property is not yet modelled).
+
 ## 8. Milestone mapping
 
 | Spec release | What this design delivers |
@@ -682,8 +721,8 @@ clean save or exit.
 | **0.2 Round-trip** | Corpus of 62 files with a stricter gate and the fixes it forced; lists from `numbering.xml` with real labels and list commands; regex / format / code search with replace preview; Markdown in and out; mouse; OSC 52 clipboard |
 | **0.3 Documents** | Tables as cell-tagged paragraphs (§3.7) with every P0-17 operation; sections (§3.8) with per-section page setup, text columns and column breaks; headers and footers edited on their own screen, page-number fields; page view (§5.1); pagination that follows Word's rules for rows, header space and section starts |
 | **0.4 Google Docs** | The diff save exercised against the real API (`google_live.rs`, an ignored test that creates and edits a scratch Doc) and what that found; headers and footers read from a Doc; tables, new footnotes and moved objects in the diff |
-| **0.5 Images** | An image item with extent and media part (§3), placeholder boxes in both layouts, terminal graphics where supported, insert / resize / float, Markdown images |
-| **0.6 Spelling** | Hunspell-format dictionaries through a pure-Rust checker, checked on idle per paragraph, squiggles in both views, word lists |
+| **0.5 Spelling** | The machine's word list through a checker with suffix rules (§7.5), checked per paragraph as it is drawn, underlines in both views, suggestions, user and project word lists; Hunspell dictionaries next |
+| **0.6 Images** | An image item with extent and media part (§3), placeholder boxes in both layouts, terminal graphics where supported, insert / resize / float, Markdown images |
 | **0.7 References** | Footnote layout at the page bottom, TOC / caption / cross-reference / index fields generated and regenerated |
 | 1.0 | Macros, tutor, page-view rules and borders, Word page-count comparison in the corpus tooling |
 
@@ -810,6 +849,15 @@ document in `wp` and end up with a Google Doc. That needed the full
 `drive` scope in place of `drive.readonly`; a token from before is treated
 as signed out so the next action re-consents. `live_upload` in `google.rs`
 exercises the upload against the real API.
+
+**Spelling pulled ahead of images (2026-09-15).** The first cut of §7.5
+shipped: the machine's word list with suffix rules, underlines in both
+views as you type, `Spell Check…` with suggestions / Skip / Ignore All /
+Add, user and project word lists. The 0.5 / 0.6 order in the roadmap is
+swapped to match: spelling depends on nothing that is missing and is used
+every day, and the images-first argument was sequencing, not a
+dependency. Left for a later cut: Hunspell dictionaries and other
+languages, a per-document word list, language per run.
 
 Two bugs found on the way: headless UI tests saved `Config::default()` over
 the user's real `config.toml` (every `Harness` now sets `persist = false`,

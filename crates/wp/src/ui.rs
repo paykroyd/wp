@@ -133,6 +133,8 @@ pub struct Theme {
     pub popup: Style,
     /// A code in Reveal Codes.
     pub code: Style,
+    /// Laid over a misspelled word.
+    pub misspell: Style,
 }
 
 pub fn theme(app: &App, caps: Caps) -> Theme {
@@ -157,6 +159,7 @@ pub fn theme(app: &App, caps: Caps) -> Theme {
             confirm: rev,
             popup: Style::default(),
             code: rev,
+            misspell: Style::default().add_modifier(Modifier::UNDERLINED),
         };
     }
     match app.theme() {
@@ -179,6 +182,7 @@ pub fn theme(app: &App, caps: Caps) -> Theme {
             confirm: Style::default().bg(Color::Red).fg(Color::White),
             popup: Style::default(),
             code: Style::default().fg(Color::Black).bg(Color::Cyan),
+            misspell: Style::default().add_modifier(Modifier::UNDERLINED).underline_color(Color::Red),
         },
         ThemeChoice::Classic => {
             let blue = cga(caps, CGA_BLUE);
@@ -206,6 +210,7 @@ pub fn theme(app: &App, caps: Caps) -> Theme {
                 confirm: bright,
                 popup: ground,
                 code: reverse,
+                misspell: Style::default().add_modifier(Modifier::UNDERLINED).underline_color(cga(caps, CGA_RED)),
             }
         }
     }
@@ -979,6 +984,7 @@ fn render_screen_line(app: &mut App, pi: usize, line: usize, width: u16, caps: C
     let cols = app.ed.cols();
     let runs = app.ed.doc.runs(pi);
     let p = &app.ed.doc.paragraphs[pi];
+    let miss = app.spell.ranges(pi, &p.items);
     let mut cursor_x: Option<u16> = None;
     let align_off = layout::align_offset(&pp, &sl, width);
     let mut spans: Vec<Span> = Vec::new();
@@ -1021,6 +1027,10 @@ fn render_screen_line(app: &mut App, pi: usize, line: usize, width: u16, caps: C
         let mut st = style_for(&runs[ri].props, base_hp, caps, &th);
         if sel.map_or(false, |r| r.contains(pos)) {
             st = st.add_modifier(Modifier::REVERSED);
+        }
+        // Not the word still being typed: it is wrong until it is finished.
+        if miss.iter().any(|&(a, b)| i >= a && i < b && !(cursor.para == pi && cursor.idx == b)) {
+            st = st.patch(th.misspell);
         }
         let adv = layout::screen_advance(it, rel_x, &pp);
         let text: String = match it {

@@ -150,6 +150,24 @@ The refresh token is cached, mode 0600, in `~/.local/state/wp/`; *File ▸ Sign
 Out of Google* deletes it. Nothing runs in the background and nothing else is
 sent anywhere.
 
+## Spelling
+
+Misspelled words are underlined as you write, in both views, once the word
+is finished. *Spell Check…* (`Alt+F1`, `Cmd+;` on a Mac) walks the document
+from the cursor: each misspelling is selected with its suggestions listed;
+pick one, or Skip, Ignore All for the session, or Add to Dictionary, which
+puts the word in `~/.config/wp/words.txt`. A `.wp-words` file in the
+document's directory (or any above it) adds a project's own words, one per
+line. *Spelling: Show Misspellings* turns the underlines off and on;
+`enabled = false` under `[spell]` in the config keeps them off.
+
+The words come from the machine's own list — `/usr/share/dict/words` on
+macOS and most Linux systems (on Debian and Ubuntu, `apt install wamerican`)
+— with the regular English suffixes and contractions understood, so nothing
+is downloaded and nothing is bundled. A list of your own goes at
+`~/.config/wp/dictionary.txt` or `dictionary = "path"` under `[spell]`.
+Hunspell dictionaries and other languages are planned.
+
 ## Find and replace
 
 The find box takes plain text (smart case), or:

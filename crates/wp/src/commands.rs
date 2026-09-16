@@ -223,6 +223,10 @@ pub enum Cmd {
     Enter,
     // Repeat-count prefix (classic Esc)
     RepeatPrefix,
+    SpellCheck,
+    SpellIgnore,
+    SpellAdd,
+    SpellToggle,
 }
 
 pub struct Command {
@@ -408,6 +412,10 @@ pub static COMMANDS: &[Command] = &[
     cmd!(FindNext, "find-next", "Find Next", "Navigate"),
     cmd!(FindPrev, "find-prev", "Find Previous", "Navigate"),
     cmd!(Replace, "replace", "Replace… (preview, then all or one at a time)", "Navigate", "search and replace"),
+    cmd!(SpellCheck, "spell-check", "Spell Check…", "Edit", "spelling misspelling next suggest"),
+    cmd!(SpellIgnore, "spell-ignore", "Spelling: Ignore Word", "Edit", "misspelling skip session"),
+    cmd!(SpellAdd, "spell-add", "Spelling: Add Word to Dictionary", "Edit", "misspelling learn word list"),
+    cmd!(SpellToggle, "spell-toggle", "Spelling: Show Misspellings", "Edit", "underline squiggle on off"),
     cmd!(FindRegex, "find-regex", "Find with Regular Expression…", "Navigate ▸ Find", "regex pattern capture groups"),
     cmd!(FindToggleCase, "find-toggle-case", "Find Option: Match Case", "Navigate ▸ Find", "sensitive"),
     cmd!(FindToggleWord, "find-toggle-word", "Find Option: Whole Words", "Navigate ▸ Find"),

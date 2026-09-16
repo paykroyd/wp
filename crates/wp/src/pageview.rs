@@ -305,6 +305,7 @@ pub fn glyphs(app: &mut App, placed: &Placed, page: usize, g: &Geom, caps: Caps,
     let Some(line) = pl.lines.get(li) else { return (Vec::new(), None) };
     let p = &doc.paragraphs[para];
     let runs = doc.runs(para);
+    let miss = if is_body { app.spell.ranges(para, &p.items) } else { Vec::new() };
     let xs = layout::item_x_positions(doc, para, line);
     let mut out: Vec<Glyph> = Vec::new();
     let mut last_col: Option<u16> = None;
@@ -355,6 +356,9 @@ pub fn glyphs(app: &mut App, placed: &Placed, page: usize, g: &Geom, caps: Caps,
         let mut st = ui::style_for(&runs[ri].props, base_hp, caps, &th);
         if is_body && sel.map_or(false, |r| r.contains(Pos::new(para, i))) {
             st = st.add_modifier(Modifier::REVERSED);
+        }
+        if miss.iter().any(|&(a, b)| i >= a && i < b && !(cursor.para == para && cursor.idx == b)) {
+            st = st.patch(th.misspell);
         }
         match &p.items[i] {
             Item::Char(c) if field.is_none() && !complex_skip => {

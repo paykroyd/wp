@@ -3,6 +3,7 @@
 use crate::commands::{info, Cmd, COMMANDS};
 use crate::config::{state_dir, Config, KeymapChoice, ThemeChoice, WrapChoice};
 use crate::google::{self, DriveEntry, DriveKind, DriveQuery};
+use crate::spell;
 use crate::keymap::{Key, Keymap};
 use crate::palette;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -146,6 +147,8 @@ pub enum ListAction {
     HighlightColor,
     ListFormat,
     CellShading,
+    /// Suggestions for the misspelled word at `para[start..end]`.
+    Spell { para: usize, start: usize, end: usize, word: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -385,6 +388,9 @@ pub struct App {
     mouse_down: bool,
     last_click: Option<(Pos, Instant)>,
     pub gdoc: Option<GdocState>,
+    pub spell: spell::Checker,
+    /// Where the running spell check began, so it stops after one pass.
+    spell_run_start: Option<Pos>,
     pub hf_edit: Option<HfEdit>,
     google: Option<google::Client>,
     pub pending: Option<Pending>,
@@ -413,6 +419,7 @@ impl App {
         let keymap = Keymap::build(&cfg);
         let hint = cfg.show_hint;
         let (drive_tx, drive_rx) = mpsc::channel();
+        let spell = spell::Checker::new(cfg.spell.enabled, &cfg.spell.dictionary);
         App {
             ed: Editor::new(Document::new()),
             path: None,
@@ -449,6 +456,8 @@ impl App {
             hf_edit: None,
             google: None,
             pending: None,
+            spell,
+            spell_run_start: None,
             drive_tx,
             drive_rx,
             drive_seq: 0,
@@ -619,6 +628,7 @@ impl App {
         }
         self.path = Some(path.to_path_buf());
         self.gdoc = None;
+        self.spell.set_project_dir(path.parent());
         self.scroll = (0, 0);
         self.reveal_para_code = None;
         self.needs_redraw = true;
@@ -837,6 +847,7 @@ impl App {
         self.path = Some(path.to_path_buf());
         self.format = format;
         self.gdoc = None;
+        self.spell.set_project_dir(path.parent());
         self.ed.dirty = false;
         if dropped.is_empty() {
             self.message(format!("Saved {}", path.display()));
@@ -948,6 +959,7 @@ impl App {
         self.sticky_status = None;
         let title = l.baseline.title.clone();
         self.gdoc = Some(GdocState { id: id.to_string(), title: title.clone(), baseline: l.baseline });
+        self.spell.set_project_dir(None);
         self.scroll = (0, 0);
         self.reveal_para_code = None;
         self.sync_editor_layout();
@@ -2320,6 +2332,46 @@ impl App {
                     self.list("Go to heading", items, ListAction::GoToHeading);
                 }
             }
+            Cmd::SpellCheck => {
+                if !self.spell.ready() {
+                    let why = self.spell.error.clone().unwrap_or_default();
+                    self.message(format!("Spelling is off: {}", why));
+                } else {
+                    self.spell.enabled = true;
+                    let from = self.ed.cursor;
+                    self.spell_run_start = Some(from);
+                    self.spell_next(from, true);
+                }
+            }
+            Cmd::SpellIgnore => match self.spell_word_at_cursor() {
+                Some((_, _, w)) => {
+                    self.spell.ignore(&w);
+                    self.message(format!("Ignoring “{}” for this session", w));
+                    self.needs_redraw = true;
+                }
+                None => self.message("No misspelled word at the cursor"),
+            },
+            Cmd::SpellAdd => match self.spell_word_at_cursor() {
+                Some((_, _, w)) => match self.spell.add(&w) {
+                    Ok(()) => {
+                        let file = self.spell.user_file.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+                        self.message(format!("Added “{}” to your word list ({})", w, file));
+                        self.needs_redraw = true;
+                    }
+                    Err(e) => self.message(format!("Could not add “{}”: {}", w, e)),
+                },
+                None => self.message("No misspelled word at the cursor"),
+            },
+            Cmd::SpellToggle => {
+                self.spell.enabled = !self.spell.enabled;
+                if self.spell.enabled && !self.spell.ready() {
+                    let why = self.spell.error.clone().unwrap_or_default();
+                    self.message(format!("Spelling is off: {}", why));
+                } else {
+                    self.message(if self.spell.enabled { format!("Misspellings are underlined — {}", self.spell.describe()) } else { "Misspellings are not shown".to_string() });
+                }
+                self.needs_redraw = true;
+            }
             Cmd::GoToBookmark => {
                 let items: Vec<ListItem> = self
                     .ed
@@ -2884,6 +2936,7 @@ impl App {
         self.path = None;
         self.package = None;
         self.gdoc = None;
+        self.spell.set_project_dir(None);
         self.format = Format::Docx;
         self.warnings.clear();
         self.scroll = (0, 0);
@@ -2911,6 +2964,71 @@ impl App {
         self.find.backward = false;
         self.sticky_status = None;
         self.find_step(false);
+    }
+
+    // ------------------------------------------------------------------
+    // Spelling (DESIGN.md §7.5)
+    // ------------------------------------------------------------------
+
+    /// The misspelled word the cursor is in or right after.
+    fn spell_word_at_cursor(&mut self) -> Option<(usize, usize, String)> {
+        let c = self.ed.cursor;
+        let items = &self.ed.doc.paragraphs.get(c.para)?.items;
+        let ranges = self.spell.ranges(c.para, items);
+        let (a, b) = ranges.into_iter().find(|&(a, b)| a <= c.idx && c.idx <= b)?;
+        Some((a, b, spell::word_text(&items[a..b])))
+    }
+
+    /// Select the next misspelling from `from` — the word at `from` too
+    /// when `include_at` — and offer suggestions; wrapping round, and
+    /// stopping where the run began. Nothing left: the run is complete.
+    fn spell_next(&mut self, from: Pos, include_at: bool) {
+        let n = self.ed.doc.paragraphs.len();
+        let stop = self.spell_run_start;
+        let mut found: Option<(usize, usize, usize)> = None;
+        'scan: for step in 0..=n {
+            let pi = (from.para + step) % n;
+            let wrapped = from.para + step >= n;
+            let ranges = self.spell.ranges(pi, &self.ed.doc.paragraphs[pi].items);
+            for (a, b) in ranges {
+                let in_order = if step == 0 {
+                    if include_at { b >= from.idx } else { a > from.idx }
+                } else if step == n {
+                    a < from.idx
+                } else {
+                    true
+                };
+                if !in_order {
+                    continue;
+                }
+                if let Some(s) = stop {
+                    if wrapped && (pi > s.para || (pi == s.para && a >= s.idx)) {
+                        break 'scan;
+                    }
+                }
+                found = Some((pi, a, b));
+                break 'scan;
+            }
+        }
+        self.block_mode = false;
+        match found {
+            None => {
+                self.ed.anchor = None;
+                self.spell_run_start = None;
+                self.message("Spell check complete");
+            }
+            Some((pi, a, b)) => {
+                self.ed.anchor = Some(Pos::new(pi, a));
+                self.ed.cursor = Pos::new(pi, b);
+                let word = spell::word_text(&self.ed.doc.paragraphs[pi].items[a..b]);
+                let mut items: Vec<ListItem> = self.spell.suggest(&word, 8).into_iter().map(|s| ListItem { label: s.clone(), detail: String::new(), value: format!("use:{}", s) }).collect();
+                items.push(ListItem { label: "Skip".into(), detail: "leave it and go on".into(), value: "skip".into() });
+                items.push(ListItem { label: "Ignore All".into(), detail: "for this session".into(), value: "ignore".into() });
+                items.push(ListItem { label: "Add to Dictionary".into(), detail: "your word list".into(), value: "add".into() });
+                self.list(&format!("Spelling: “{}” — Enter picks, Esc stops", word), items, ListAction::Spell { para: pi, start: a, end: b, word });
+            }
+        }
+        self.needs_redraw = true;
     }
 
     fn select_match(&mut self, m: &Match) {
@@ -3637,6 +3755,32 @@ impl App {
                 if let Ok(pi) = item.value.parse::<usize>() {
                     self.ed.move_to(Pos::new(pi, 0), false);
                 }
+            }
+            ListAction::Spell { para, start, end, word } => {
+                let mut next_from = Pos::new(para, end);
+                match item.value.as_str() {
+                    "skip" => {}
+                    "ignore" => self.spell.ignore(&word),
+                    "add" => {
+                        if let Err(e) = self.spell.add(&word) {
+                            self.message(format!("Could not add “{}”: {}", word, e));
+                        }
+                    }
+                    v => {
+                        if let Some(s) = v.strip_prefix("use:") {
+                            if !self.guard_edit() {
+                                return;
+                            }
+                            self.ed.commit();
+                            let items: Vec<Item> = s.chars().map(Item::Char).collect();
+                            let n = items.len();
+                            self.ed.replace_range(Range { start: Pos::new(para, start), end: Pos::new(para, end) }, items);
+                            self.ed.anchor = None;
+                            next_from = Pos::new(para, start + n);
+                        }
+                    }
+                }
+                self.spell_next(next_from, false);
             }
             ListAction::GoToBookmark => {
                 if let Some((a, b)) = item.value.split_once(':') {

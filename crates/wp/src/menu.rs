@@ -78,6 +78,11 @@ pub static MENUS: &[Menu] = &[
             C(Cmd::GoToPage),
             C(Cmd::GoToHeading),
             C(Cmd::GoToBookmark),
+            Sep,
+            C(Cmd::SpellCheck),
+            C(Cmd::SpellIgnore),
+            C(Cmd::SpellAdd),
+            C(Cmd::SpellToggle),
         ],
     },
     Menu {

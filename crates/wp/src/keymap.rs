@@ -250,6 +250,9 @@ const CLASSIC: &[(&str, &str)] = &[
     ("ctrl+f10", "italic"),
     ("ctrl+f2", "find-next"),
     ("ctrl+f1", "about"),
+    // WordPerfect's Spell was Ctrl+F2, which find-next has; Alt+F1 was
+    // the Thesaurus, the nearest thing.
+    ("alt+f1", "spell-check"),
     ("ctrl+z", "undo"),
 ];
 
@@ -353,6 +356,7 @@ const MAC: &[(&str, &str)] = &[
     ("cmd+u", "underline"),
     ("cmd+d", "font"),
     ("cmd+f", "find"),
+    ("cmd+;", "spell-check"),
     ("cmd+g", "find-next"),
     ("cmd+shift+g", "find-prev"),
     ("cmd+shift+h", "replace"),
