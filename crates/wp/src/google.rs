@@ -1,8 +1,9 @@
 //! The Google Docs / Drive client (DESIGN.md §6a.4): OAuth sign-in through
 //! a loopback redirect, a cached refresh token, and the calls `wp` makes —
-//! fetch a document, post a `batchUpdate`, list Drive. Every call blocks;
-//! open and save run on the main thread, listings on a worker thread the
-//! Open from Drive dialog spawns (DESIGN.md §6a.4).
+//! fetch a document, post a `batchUpdate`, list Drive, upload a `.docx` as
+//! a new Doc. Every call blocks; open and save run on the main thread,
+//! listings on a worker thread the Drive place of the Open / Save As dialog
+//! spawns (DESIGN.md §6a.4).
 
 use crate::config::{state_dir, GoogleConfig};
 use serde::{Deserialize, Serialize};
@@ -14,9 +15,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const SCOPES: &str = "https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive.readonly";
+/// `documents` for reading and diff-saving a Doc; `drive` (the full scope,
+/// not `drive.readonly` + `drive.file`) so listings see every folder *and*
+/// Save As can create a Doc in any of them — `drive.file` only sees files
+/// the app made, so a folder it didn't create is "not found" as a parent.
+/// Both are restricted scopes, so nothing changes for the consent screen.
+const SCOPES: &str = "https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive";
 const DOCS_URL: &str = "https://docs.googleapis.com/v1/documents";
 const DRIVE_FILES_URL: &str = "https://www.googleapis.com/drive/v3/files";
+const DRIVE_UPLOAD_URL: &str = "https://www.googleapis.com/upload/drive/v3/files";
 const DRIVES_URL: &str = "https://www.googleapis.com/drive/v3/drives";
 /// How long the sign-in page may take before `wp` gives up waiting.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -27,11 +34,18 @@ struct Token {
     refresh_token: String,
     /// Unix seconds.
     expires_at: u64,
+    /// The scopes the token was granted with; a token from before a scope
+    /// was added is treated as signed out, so the next call re-consents.
+    #[serde(default)]
+    scopes: String,
 }
 
 /// What a Drive row is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DriveKind {
+    /// The "This computer" entry at the top of the folder view: the way
+    /// back to the local place of the dialog.
+    Local,
     Doc,
     Folder,
     /// The "Shared with me" pseudo-folder.
@@ -68,6 +82,7 @@ pub enum DriveQuery {
 
 const DOC_MIME: &str = "application/vnd.google-apps.document";
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
+const DOCX_MIME: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 /// Why a request failed, as Google reported it.
 #[derive(Debug)]
@@ -123,7 +138,7 @@ impl Client {
     }
 
     pub fn signed_in(&self) -> bool {
-        self.token.as_ref().map_or(false, |t| !t.refresh_token.is_empty())
+        self.token.as_ref().map_or(false, |t| !t.refresh_token.is_empty() && t.scopes == SCOPES)
     }
 
     /// Forget the cached token; the next call signs in again.
@@ -229,7 +244,7 @@ impl Client {
 
     fn store_token(&mut self, v: &Value, refresh_token: String) -> anyhow::Result<()> {
         let expires_in = v.get("expires_in").and_then(Value::as_u64).unwrap_or(3600);
-        let t = Token { access_token: v.get("access_token").and_then(Value::as_str).unwrap_or("").to_string(), refresh_token, expires_at: now() + expires_in.saturating_sub(60) };
+        let t = Token { access_token: v.get("access_token").and_then(Value::as_str).unwrap_or("").to_string(), refresh_token, expires_at: now() + expires_in.saturating_sub(60), scopes: SCOPES.to_string() };
         if let Some(d) = self.token_path.parent() {
             std::fs::create_dir_all(d)?;
         }
@@ -275,19 +290,53 @@ impl Client {
     fn call(&mut self, method: &str, url: &str, body: Option<&Value>) -> anyhow::Result<Value> {
         let tok = self.access_token()?;
         let auth = format!("Bearer {}", tok);
-        let mut resp = match (method, body) {
+        let resp = match (method, body) {
             ("POST", Some(b)) => self.agent.post(url).header("Authorization", &auth).send_json(b)?,
             _ => self.agent.get(url).header("Authorization", &auth).call()?,
         };
-        let status = resp.status().as_u16();
-        let text = resp.body_mut().with_config().limit(256 * 1024 * 1024).read_to_string()?;
-        if status < 200 || status >= 300 {
-            let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            let message = v.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or(&text).to_string();
-            return Err(ApiError { status, message, invalid_grant: false }.into());
-        }
-        Ok(serde_json::from_str(&text)?)
+        read_response(resp)
     }
+
+    /// `files.create` with `uploadType=multipart`: a `.docx` converted by
+    /// Drive into a new Google Doc named `title`, in `folder` (a folder or
+    /// shared-drive id; None is the top of My Drive). Returns the new Doc's
+    /// id, which is also its Drive file id.
+    pub fn upload_docx(&mut self, docx: &[u8], title: &str, folder: Option<&str>) -> anyhow::Result<String> {
+        let tok = self.access_token()?;
+        let mut meta = serde_json::json!({ "name": title, "mimeType": DOC_MIME });
+        if let Some(f) = folder {
+            meta["parents"] = serde_json::json!([f]);
+        }
+        let boundary = format!("wp-{}", random_token());
+        let mut body = Vec::with_capacity(docx.len() + 512);
+        write!(body, "--{}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{}\r\n--{}\r\nContent-Type: {}\r\n\r\n", boundary, meta, boundary, DOCX_MIME)?;
+        body.extend_from_slice(docx);
+        write!(body, "\r\n--{}--\r\n", boundary)?;
+        let url = format!("{}?uploadType=multipart&supportsAllDrives=true&fields=id", DRIVE_UPLOAD_URL);
+        let resp = self
+            .agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", tok))
+            .header("Content-Type", &format!("multipart/related; boundary={}", boundary))
+            .send(&body[..])?;
+        let v = read_response(resp)?;
+        v.get("id").and_then(Value::as_str).map(str::to_string).ok_or_else(|| anyhow::anyhow!("files.create returned no id"))
+    }
+}
+
+/// The JSON a call returned, or the `ApiError` Google reported.
+fn read_response(mut resp: ureq::http::Response<ureq::Body>) -> anyhow::Result<Value> {
+    let status = resp.status().as_u16();
+    let text = resp.body_mut().with_config().limit(256 * 1024 * 1024).read_to_string()?;
+    if status < 200 || status >= 300 {
+        let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        let message = v.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or(&text).to_string();
+        return Err(ApiError { status, message, invalid_grant: false }.into());
+    }
+    Ok(serde_json::from_str(&text)?)
+}
+
+impl Client {
 
     /// `documents.get`, as the JSON text `wp_gdoc::read` takes.
     pub fn get_document(&mut self, id: &str) -> anyhow::Result<String> {
@@ -347,6 +396,7 @@ impl Client {
 /// The top of the folder view.
 pub fn drive_roots() -> Vec<DriveEntry> {
     vec![
+        DriveEntry { id: String::new(), name: "This computer".into(), kind: DriveKind::Local, detail: "local files".into() },
         DriveEntry { id: "root".into(), name: "My Drive".into(), kind: DriveKind::Folder, detail: String::new() },
         DriveEntry { id: String::new(), name: "Shared with me".into(), kind: DriveKind::SharedWithMe, detail: String::new() },
         DriveEntry { id: String::new(), name: "Shared drives".into(), kind: DriveKind::SharedDrives, detail: String::new() },
@@ -356,7 +406,7 @@ pub fn drive_roots() -> Vec<DriveEntry> {
 /// The listing an entry opens onto, or None for a document.
 pub fn query_for(e: &DriveEntry) -> Option<DriveQuery> {
     match e.kind {
-        DriveKind::Doc => None,
+        DriveKind::Doc | DriveKind::Local => None,
         DriveKind::Folder => Some(DriveQuery::Folder(e.id.clone())),
         DriveKind::SharedWithMe => Some(DriveQuery::SharedWithMe),
         DriveKind::SharedDrives => Some(DriveQuery::SharedDrives),
@@ -479,9 +529,10 @@ mod tests {
     fn drive_quoting_and_roots() {
         assert_eq!(drive_quote("it's a \\ test"), "it\\'s a \\\\ test");
         let roots = drive_roots();
-        assert_eq!(roots.len(), 3);
-        assert_eq!(query_for(&roots[0]), Some(DriveQuery::Folder("root".into())));
-        assert_eq!(query_for(&roots[1]), Some(DriveQuery::SharedWithMe));
+        assert_eq!(roots.len(), 4);
+        assert_eq!(query_for(&roots[0]), None);
+        assert_eq!(query_for(&roots[1]), Some(DriveQuery::Folder("root".into())));
+        assert_eq!(query_for(&roots[2]), Some(DriveQuery::SharedWithMe));
         assert_eq!(query_for(&DriveEntry { id: "x".into(), name: "d".into(), kind: DriveKind::Doc, detail: String::new() }), None);
     }
 
@@ -506,9 +557,40 @@ mod tests {
         }
     }
 
+    /// Uploads a corpus `.docx` as a new Doc and reads it back: `cargo test
+    /// -p wp live_upload -- --ignored --nocapture`. The Doc is left in My
+    /// Drive with a "wp live test" title.
+    #[test]
+    #[ignore]
+    fn live_upload() {
+        let (cfg, _) = crate::config::Config::load();
+        let mut c = Client::new(cfg.google);
+        assert!(c.signed_in(), "not signed in (or signed in before the drive scope: sign in again)");
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/gen-report.docx");
+        let bytes = std::fs::read(&path).unwrap();
+        let t = Instant::now();
+        let id = c.upload_docx(&bytes, "wp live test upload", None).unwrap();
+        println!("uploaded as {} in {:?}", id, t.elapsed());
+        let l = wp_gdoc::read(&c.get_document(&id).unwrap()).unwrap();
+        println!("read back: {} paragraphs, title {:?}, warnings {:?}", l.doc.paragraphs.len(), l.baseline.title, l.warnings);
+        assert!(l.doc.text().contains("Quarterly Report"));
+    }
+
     #[test]
     fn conflict_detection() {
         assert!(ApiError { status: 400, message: "The document revision is not the latest".into(), invalid_grant: false }.is_conflict());
         assert!(!ApiError { status: 404, message: "Requested entity was not found".into(), invalid_grant: false }.is_conflict());
+    }
+
+    /// A token cached before a scope was added is not "signed in": the
+    /// next Google action re-consents instead of failing with 403.
+    #[test]
+    fn old_token_needs_consent() {
+        let (cfg, _) = (crate::config::Config::default(), ());
+        let mut c = Client::new(cfg.google);
+        c.token = Some(Token { access_token: "a".into(), refresh_token: "r".into(), expires_at: now() + 100, scopes: String::new() });
+        assert!(!c.signed_in());
+        c.token.as_mut().unwrap().scopes = SCOPES.to_string();
+        assert!(c.signed_in());
     }
 }

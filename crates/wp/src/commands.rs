@@ -251,11 +251,11 @@ macro_rules! cmd {
 
 pub static COMMANDS: &[Command] = &[
     cmd!(New, "new", "New Document", "File"),
-    cmd!(Open, "open", "Open…", "File", "retrieve list files"),
+    cmd!(Open, "open", "Open…", "File", "retrieve list files google drive"),
     cmd!(OpenFromDrive, "open-drive", "Open from Google Drive…", "File", "google docs cloud gdoc"),
     cmd!(GoogleSignOut, "google-sign-out", "Sign Out of Google", "File", "drive docs token"),
     cmd!(Save, "save", "Save", "File"),
-    cmd!(SaveAs, "save-as", "Save As…", "File"),
+    cmd!(SaveAs, "save-as", "Save As…", "File", "google drive docx"),
     cmd!(SaveAsDocx, "save-as-docx", "Save As Word Document (.docx)…", "File", "export"),
     cmd!(SaveAsMarkdown, "save-as-markdown", "Save As Markdown (.md)…", "File", "export commonmark"),
     cmd!(SaveAsText, "save-as-text", "Save As Plain Text (.txt)…", "File", "export"),

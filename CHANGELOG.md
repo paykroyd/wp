@@ -3,6 +3,21 @@
 Releases follow the plan in SPEC.md §9.3: each one is named for what the
 user can do with it. DESIGN.md §11 has the current status and gaps.
 
+## Unreleased — 0.4 Google Docs (in progress)
+
+- Google Drive is a place in the *Open…* and *Save As…* dialogs rather than
+  a separate command: a **Google Drive** row (or `Alt+D`) crosses over, and
+  **This computer** leads back. *Save As…* is a modal file dialog like
+  *Open…*, on both places; it asks before replacing a file.
+- Save any document — new, `.docx`, Markdown — to Google Drive as a new
+  Google Doc: pick a folder, type a name. The upload is a `.docx` that Drive
+  converts, read back at once so every later *Save* is a diff.
+- The status line names where the document lives (`Title · Google Drive`).
+- The OAuth scope is `drive` instead of `drive.readonly`, so that a new Doc
+  can be created in any folder; signing in again once grants it.
+- *Save As Word Document / Markdown / Plain Text* stay in the palette; the
+  File menu has one *Save As…*.
+
 ## 0.3.0 — Documents (2026-09-02)
 
 Produce a real structured document.

@@ -1496,21 +1496,27 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             }
             f.render_widget(RParagraph::new(lines), Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2)));
         }
-        Overlay::Browse { dir, entries, selected, filter, all } => {
-            let rows = crate::app::browse_rows(&entries, &filter, all);
+        Overlay::Browse { dir, entries, selected, filter, all, action } => {
+            let saving = action.is_save();
+            let rows = crate::app::browse_rows(&entries, &filter, all, saving);
             let w = area.width.saturating_sub(4).min(96).max(34);
             let n = rows.len().clamp(1, crate::app::BROWSE_ROWS) as u16;
             let h = n + 4;
             let x = (area.width.saturating_sub(w)) / 2;
             let r = Rect::new(x, 1.min(area.height.saturating_sub(h)), w, h.min(area.height));
             clear(f, r, &th);
-            let title = format!("Open — {}", dir.display());
+            let title = format!("{} — {}", action.title(), dir.display());
             f.render_widget(boxed(&tail(&title, w.saturating_sub(4) as usize)), r);
             let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
             let prompt = Line::from(vec![Span::styled("name: ", Style::default().fg(th.dim)), Span::raw(filter.clone())]);
             f.render_widget(RParagraph::new(prompt), Rect::new(inner.x, inner.y, inner.width, 1));
             f.set_cursor_position((inner.x + 6 + filter.width() as u16, inner.y));
-            let hint = if all { "Enter open · ←→ up/into · Tab complete · Alt+A documents only" } else { "Enter open · ←→ up/into · Tab complete · Alt+A all files" };
+            let hint = match (saving, all) {
+                // Each fits the 74 columns an 80-column terminal leaves the box.
+                (true, _) => "Enter save (.docx, .md or .txt) · ←→ up/into · Tab complete · Alt+D Drive",
+                (false, true) => "Enter open · ←→ up/into · Tab complete · Alt+A docs only · Alt+D Drive",
+                (false, false) => "Enter open · ←→ up/into · Tab complete · Alt+A all files · Alt+D Drive",
+            };
             f.render_widget(RParagraph::new(Line::from(Span::styled(truncate(hint, inner.width as usize), Style::default().fg(th.dim)))), Rect::new(inner.x, inner.y + 1, inner.width, 1));
             let sel_i = selected.min(rows.len().saturating_sub(1));
             let first = sel_i.saturating_sub(crate::app::BROWSE_ROWS - 1);
@@ -1577,14 +1583,15 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect, caps: Caps, ch: &Chrom
             let x = (area.width.saturating_sub(w)) / 2;
             let r = Rect::new(x, 1.min(area.height.saturating_sub(h)), w, h.min(area.height));
             clear(f, r, &th);
-            f.render_widget(boxed(&tail(&d.title(), w.saturating_sub(4) as usize)), r);
+            f.render_widget(boxed(&tail(&format!("{} — {}", d.action.title(), d.title()), w.saturating_sub(4) as usize)), r);
             let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
             let prompt = Line::from(vec![Span::styled("name: ", Style::default().fg(th.dim)), Span::raw(d.filter.clone())]);
             f.render_widget(RParagraph::new(prompt), Rect::new(inner.x, inner.y, inner.width, 1));
             f.set_cursor_position((inner.x + 6 + d.filter.width() as u16, inner.y));
-            let hint = match d.mode {
-                crate::app::DriveMode::Recent => "Enter open · Tab folders · type to filter (a pause searches Drive) or paste a Docs URL",
-                crate::app::DriveMode::Folders => "Enter open · ←→ up/into · Tab recent",
+            let hint = match (d.action.is_save(), d.mode) {
+                (true, _) => "Enter save as a Doc · ←→ up/into · Tab complete · Alt+D this computer",
+                (false, crate::app::DriveMode::Recent) => "Enter open · Tab folders · filter or paste a URL · Alt+D this computer",
+                (false, crate::app::DriveMode::Folders) => "Enter open · ←→ up/into · Tab recent · Alt+D this computer",
             };
             f.render_widget(RParagraph::new(Line::from(Span::styled(truncate(hint, inner.width as usize), Style::default().fg(th.dim)))), Rect::new(inner.x, inner.y + 1, inner.width, 1));
             let sel_line = lines.iter().position(|(i, _)| *i == Some(sel_i)).unwrap_or(0);

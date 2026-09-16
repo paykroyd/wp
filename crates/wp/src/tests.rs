@@ -2,6 +2,7 @@
 //! buffer.
 
 use crate::app::{App, Overlay};
+use crate::commands::Cmd;
 use crate::config::{Config, KeymapChoice};
 use crate::ui;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -819,7 +820,7 @@ fn open_dialog_browses_filters_and_opens() {
         return;
     }
     let mut h = Harness::new(KeymapChoice::Modern);
-    h.app.browse(&dir, false);
+    h.app.browse(&dir, false, crate::app::FileAction::Open);
     let s = h.screen();
     assert!(s.contains("Open —"), "{}", s);
     assert!(s.contains("parent directory"), "{}", s);
@@ -851,7 +852,7 @@ fn open_dialog_navigates_by_arrows_and_typed_paths() {
         return;
     }
     let mut h = Harness::new(KeymapChoice::Modern);
-    h.app.browse(&dir, false);
+    h.app.browse(&dir, false, crate::app::FileAction::Open);
     // Left goes to the parent, which lists the corpus directory again.
     h.key(KeyCode::Left, NONE);
     let parent = match &h.app.overlay {
@@ -1412,10 +1413,12 @@ fn drive_dialog_browses_folders() {
     h.key(KeyCode::Tab, NONE);
     let s = h.screen();
     assert!(s.contains("Google Drive — Drive "), "{}", s);
-    assert!(s.contains("My Drive/") && s.contains("Shared with me/") && s.contains("Shared drives/"), "{}", s);
+    assert!(s.contains("This computer/") && s.contains("My Drive/") && s.contains("Shared with me/") && s.contains("Shared drives/"), "{}", s);
     assert!(!h.app.drive_active());
 
-    // Enter on My Drive lists it (root) once the worker answers.
+    // Enter on My Drive (under "This computer") lists it (root) once the
+    // worker answers.
+    h.key(KeyCode::Down, NONE);
     h.key(KeyCode::Enter, NONE);
     assert!(matches!(&h.app.overlay, Overlay::Drive(d) if d.loading && d.query() == DriveQuery::Folder("root".into())));
     assert!(h.screen().contains("Drive / My Drive · loading…"), "{}", h.screen());
@@ -1450,6 +1453,175 @@ fn drive_dialog_browses_folders() {
     let s = h.screen();
     assert!(s.contains("Google Drive — Recent") && s.contains("Annual plan") && !s.contains("loading"), "{}", s);
     assert!(matches!(&h.app.overlay, Overlay::Drive(d) if d.mode == DriveMode::Recent));
+}
+
+#[test]
+fn open_dialog_has_a_google_drive_row() {
+    use crate::app::{FileAction, Overlay};
+    let dir = corpus("");
+    if !dir.exists() {
+        return;
+    }
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.app.browse(&dir, false, FileAction::Open);
+    let s = h.screen();
+    assert!(s.contains("Google Drive/"), "{}", s);
+    assert!(s.contains("Alt+D Drive"), "{}", s);
+    // Enter on the row (it sits right under "..") crosses to Drive — or,
+    // with no Google client configured, says so and keeps the dialog.
+    h.key(KeyCode::Down, NONE);
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(&h.app.overlay, Overlay::Browse { action: FileAction::Open, .. }), "{:?}", h.app.overlay);
+    assert!(h.app.status_text().unwrap_or_default().contains("needs an OAuth desktop client"), "{:?}", h.app.status_text());
+    h.key(KeyCode::Char('d'), ALT);
+    assert!(matches!(&h.app.overlay, Overlay::Browse { .. }));
+    assert!(h.app.pending.is_none());
+}
+
+#[test]
+fn save_as_dialog_saves_under_typed_name_and_asks_before_replacing() {
+    use crate::app::{ConfirmAction, FileAction, Format, Overlay};
+    let dir = std::env::temp_dir().join(format!("wp-saveas-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("taken.docx"), b"").unwrap();
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("Hello");
+    h.app.exec(Cmd::SaveAs);
+    let s = h.screen();
+    assert!(s.contains("Save As —"), "{}", s);
+    assert!(s.contains("Enter save"), "{}", s);
+    // Typing a path hops to its directory; the tail is the name; no
+    // extension means the default format.
+    h.type_str(&format!("{}/note", dir.display()));
+    match &h.app.overlay {
+        Overlay::Browse { dir: d, filter, action, .. } => {
+            assert_eq!(d, &std::fs::canonicalize(&dir).unwrap());
+            assert_eq!(filter, "note");
+            assert_eq!(*action, FileAction::Save { format: Format::Docx });
+        }
+        o => panic!("{:?}", o),
+    }
+    // The listing is not narrowed by the name being typed.
+    assert!(h.screen().contains("taken.docx"), "{}", h.screen());
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(h.app.overlay, Overlay::None));
+    assert!(dir.join("note.docx").exists());
+    assert_eq!(h.app.path.as_ref().unwrap().file_name().unwrap(), "note.docx");
+    assert!(!h.app.ed.dirty);
+
+    // Save As again offers the document's own name; Enter saves over it
+    // without asking, since it is the document's own file.
+    h.type_str("!");
+    h.app.exec(Cmd::SaveAs);
+    assert!(matches!(&h.app.overlay, Overlay::Browse { filter, .. } if filter == "note.docx"));
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(h.app.overlay, Overlay::None));
+    assert!(!h.app.ed.dirty);
+
+    // Another file's name asks first; n keeps the document where it was.
+    h.app.exec(Cmd::SaveAs);
+    h.key(KeyCode::Char('u'), CTRL);
+    h.type_str("taken.docx");
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(&h.app.overlay, Overlay::Confirm { action: ConfirmAction::Overwrite { .. }, .. }), "{:?}", h.app.overlay);
+    assert!(h.screen().contains("Replace"), "{}", h.screen());
+    h.key(KeyCode::Char('n'), NONE);
+    assert_eq!(h.app.path.as_ref().unwrap().file_name().unwrap(), "note.docx");
+    assert_eq!(std::fs::metadata(dir.join("taken.docx")).unwrap().len(), 0);
+    h.app.exec(Cmd::SaveAs);
+    h.key(KeyCode::Char('u'), CTRL);
+    h.type_str("taken.md");
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(h.app.overlay, Overlay::None));
+    assert_eq!(h.app.path.as_ref().unwrap().file_name().unwrap(), "taken.md");
+    assert_eq!(h.app.format, Format::Markdown);
+    assert!(std::fs::read_to_string(dir.join("taken.md")).unwrap().contains("Hello"));
+
+    // Picking a listed file with Enter puts its name in the field.
+    h.app.exec(Cmd::SaveAs);
+    h.key(KeyCode::Char('u'), CTRL);
+    h.key(KeyCode::End, NONE);
+    h.key(KeyCode::Up, NONE);
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(&h.app.overlay, Overlay::Browse { filter, .. } if filter == "taken.docx"), "{:?}", h.app.overlay);
+    h.key(KeyCode::Esc, NONE);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn save_as_on_drive_picks_a_folder_and_uploads() {
+    use crate::app::{DriveMode, FileAction, Format, Overlay, Pending};
+    use crate::google::DriveQuery;
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("Hello");
+    let local = corpus("");
+    h.app.open_drive_as(FileAction::Save { format: Format::GoogleDoc }, local.clone(), false, "Plan".into());
+    let s = h.screen();
+    assert!(s.contains("Save As — Google Drive — Drive"), "{}", s);
+    assert!(s.contains("This computer/") && s.contains("My Drive/"), "{}", s);
+    assert!(s.contains("name: Plan"), "{}", s);
+    assert!(!h.app.drive_active());
+    // The roots are not a folder: Enter says so and stays.
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(&h.app.overlay, Overlay::Drive(d) if d.mode == DriveMode::Folders));
+    assert!(h.screen().contains("Pick a folder"), "{}", h.screen());
+    assert!(h.app.pending.is_none());
+    // Into My Drive: the name stays while the folder listing arrives.
+    h.key(KeyCode::Down, NONE);
+    h.key(KeyCode::Right, NONE);
+    assert!(matches!(&h.app.overlay, Overlay::Drive(d) if d.loading && d.query() == DriveQuery::Folder("root".into()) && d.filter == "Plan"));
+    let seq = h.app.drive_list_seq;
+    h.app.drive_reply(seq, DriveQuery::Folder("root".into()), Ok(vec![drive_folder("f1", "Projects"), drive_doc("d1", "Notes")]));
+    // Not narrowed by the name; Tab completes a folder and walks into it.
+    let s = h.screen();
+    assert!(s.contains("Projects/") && s.contains("Notes"), "{}", s);
+    h.key(KeyCode::Char('u'), CTRL);
+    h.type_str("pro");
+    h.key(KeyCode::Tab, NONE);
+    assert!(matches!(&h.app.overlay, Overlay::Drive(d) if d.query() == DriveQuery::Folder("f1".into()) && d.filter.is_empty()));
+    let seq = h.app.drive_list_seq;
+    h.app.drive_reply(seq, DriveQuery::Folder("f1".into()), Ok(vec![]));
+    // Back up, then save at the top of My Drive under the typed name.
+    h.key(KeyCode::Left, NONE);
+    h.type_str("Plan 2027");
+    h.key(KeyCode::Enter, NONE);
+    assert!(matches!(&h.app.pending, Some(Pending::Upload { folder: None, ref title }) if title == "Plan 2027"), "no upload queued");
+    assert!(matches!(h.app.overlay, Overlay::None));
+
+    // Alt+D crosses to the local place with the name; Left from the Drive
+    // roots does the same.
+    h.app.pending = None;
+    h.app.open_drive_as(FileAction::Save { format: Format::GoogleDoc }, local.clone(), false, "Plan".into());
+    h.key(KeyCode::Char('d'), ALT);
+    match &h.app.overlay {
+        Overlay::Browse { dir, filter, action, .. } => {
+            assert_eq!(dir, &std::fs::canonicalize(&local).unwrap());
+            assert_eq!(filter, "Plan");
+            assert!(action.is_save());
+        }
+        o => panic!("{:?}", o),
+    }
+    assert!(h.screen().contains("Save As —"), "{}", h.screen());
+    h.app.open_drive_as(FileAction::Open, local.clone(), false, String::new());
+    h.key(KeyCode::Tab, NONE);
+    h.key(KeyCode::Left, NONE);
+    assert!(matches!(&h.app.overlay, Overlay::Browse { action: FileAction::Open, .. }), "{:?}", h.app.overlay);
+}
+
+#[test]
+fn exit_with_unsaved_untitled_document_opens_save_as() {
+    use crate::app::{FileAction, Overlay};
+    let mut h = Harness::new(KeymapChoice::Modern);
+    h.type_str("Draft");
+    h.app.exec(Cmd::Exit);
+    assert!(matches!(&h.app.overlay, Overlay::Confirm { .. }));
+    h.key(KeyCode::Char('y'), NONE);
+    assert!(matches!(&h.app.overlay, Overlay::Browse { action: FileAction::Save { .. }, .. }), "{:?}", h.app.overlay);
+    assert!(h.app.quit_after_save);
+    // Esc gives up on exiting as well as on saving.
+    h.key(KeyCode::Esc, NONE);
+    assert!(!h.app.quit_after_save);
+    assert!(!h.app.quit);
 }
 
 #[test]

@@ -100,8 +100,15 @@ Everything is rebindable in `~/.config/wp/config.toml`.
 
 ## Google Docs
 
-`wp` opens and saves Google Docs directly — *File ▸ Open from Google Drive…*
-(recents, search-as-you-type, folders), or from the shell:
+`wp` opens and saves Google Docs directly. Google Drive is a place in the
+*Open…* and *Save As…* dialogs, next to your own directories: choose the
+**Google Drive** row (or press `Alt+D`) to see recent Docs, search as you
+type, or browse My Drive, shared folders and shared drives; **This computer**
+leads back. *Save As…* into a Drive folder turns any document — a new one, a
+`.docx`, a Markdown file — into a new Google Doc there, and from then on
+*Save* sends your changes to that Doc. *Save As…* from a Doc onto this
+computer writes a `.docx`, `.md` or `.txt` copy and makes that the document.
+The status line shows where the document lives. From the shell:
 
 ```
 wp gdoc:<id>                       open a Google Doc
@@ -134,10 +141,14 @@ about five minutes:
    ```
 
 The first Docs command opens your browser to sign in; `wp` listens on a
-loopback port for the redirect. It asks for the `documents` and
-`drive.readonly` scopes only. The refresh token is cached, mode 0600, in
-`~/.local/state/wp/`; *File ▸ Sign Out of Google* deletes it. Nothing runs in
-the background and nothing else is sent anywhere.
+loopback port for the redirect. It asks for the `documents` and `drive`
+scopes: `drive` (rather than `drive.readonly` plus `drive.file`) so that the
+dialog can list every folder *and* save a new Doc into any of them —
+`drive.file` only sees files the app itself created. If you signed in with an
+earlier version, the next Google action signs you in again for the new scope.
+The refresh token is cached, mode 0600, in `~/.local/state/wp/`; *File ▸ Sign
+Out of Google* deletes it. Nothing runs in the background and nothing else is
+sent anywhere.
 
 ## Find and replace
 

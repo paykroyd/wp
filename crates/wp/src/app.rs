@@ -51,8 +51,14 @@ pub struct GdocState {
 pub enum Pending {
     Open { id: String, force: bool },
     Save,
-    /// Show the Open from Drive dialog (after signing in).
-    Drive,
+    /// Show the Drive place of the Open / Save As dialog (after signing
+    /// in): `dir` / `all` are the local place it came from, `name` what
+    /// was typed in the name field.
+    Drive { action: FileAction, dir: PathBuf, all: bool, name: String },
+    /// Save As onto Drive: the document goes up as a `.docx` that Drive
+    /// converts into a new Doc called `title` in `folder` (None: the top
+    /// of My Drive), which is then read back and becomes the document.
+    Upload { folder: Option<String>, title: String },
     SignIn { flow: google::SignIn, then: Box<Pending> },
 }
 
@@ -68,9 +74,37 @@ pub enum View {
     Page,
 }
 
+/// What the file dialog (`Overlay::Browse` / `Overlay::Drive`) is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileAction {
+    Open,
+    /// Save As; `format` is what a name without an extension saves as
+    /// (`GoogleDoc` is what the Drive place always saves as).
+    Save { format: Format },
+}
+
+impl FileAction {
+    pub fn is_save(self) -> bool {
+        matches!(self, FileAction::Save { .. })
+    }
+
+    pub fn format(self) -> Format {
+        match self {
+            FileAction::Open => Format::Docx,
+            FileAction::Save { format } => format,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            FileAction::Open => "Open",
+            FileAction::Save { .. } => "Save As",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PromptKind {
-    SaveAs(Format),
     Find { backward: bool },
     FindStyle,
     FindCode,
@@ -98,6 +132,8 @@ pub enum ConfirmAction {
     OpenDiscard(PathBuf),
     OpenDriveDiscard(String),
     Recover(PathBuf),
+    /// Save As onto a file that exists.
+    Overwrite { path: PathBuf, format: Format },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,11 +171,17 @@ pub struct DriveFolder {
     pub query: DriveQuery,
 }
 
-/// The Open from Drive dialog. The rows shown are the listing for the
-/// current place (recents, or a folder's contents) narrowed by `filter`,
-/// then — in Recent mode — whatever a server-side name search added.
+/// The Drive place of the Open / Save As dialog. The rows shown are the
+/// listing for the current place (recents, or a folder's contents)
+/// narrowed by `filter`, then — in Recent mode — whatever a server-side
+/// name search added. When saving, `filter` is the new Doc's name and
+/// narrows nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DriveDialog {
+    pub action: FileAction,
+    /// The local place to go back to ("This computer", Alt+D).
+    pub local_dir: PathBuf,
+    pub local_all: bool,
     pub mode: DriveMode,
     /// Folder mode's breadcrumb; `path[0]` is the roots listing.
     pub path: Vec<DriveFolder>,
@@ -157,8 +199,22 @@ pub struct DriveDialog {
 }
 
 impl DriveDialog {
-    fn new() -> DriveDialog {
-        DriveDialog { mode: DriveMode::Recent, path: vec![DriveFolder { name: "Drive".into(), query: DriveQuery::Roots }], filter: String::new(), rows: Vec::new(), extra: Vec::new(), selected: 0, loading: false, searching: false, error: None }
+    /// Opening starts on Recent; saving on the folder view, since a new
+    /// Doc needs a folder to go in.
+    fn new(action: FileAction, local_dir: PathBuf, local_all: bool, name: String) -> DriveDialog {
+        let mode = if action.is_save() { DriveMode::Folders } else { DriveMode::Recent };
+        DriveDialog { action, local_dir, local_all, mode, path: vec![DriveFolder { name: "Drive".into(), query: DriveQuery::Roots }], filter: name, rows: Vec::new(), extra: Vec::new(), selected: 0, loading: false, searching: false, error: None }
+    }
+
+    /// Where Save As puts the new Doc: the folder being viewed, as the
+    /// `parents` entry (None at the top of My Drive). None outside when the
+    /// view is not a folder — the roots, Shared with me, the drives list.
+    pub fn save_folder(&self) -> Option<Option<String>> {
+        match self.query() {
+            DriveQuery::Folder(id) if id == "root" => Some(None),
+            DriveQuery::Folder(id) => Some(Some(id)),
+            _ => None,
+        }
     }
 
     /// The listing this view shows.
@@ -172,7 +228,8 @@ impl DriveDialog {
     /// The rows for the filter: local matches, then the search's extras
     /// (flagged true).
     pub fn visible(&self) -> Vec<(&DriveEntry, bool)> {
-        let mut v: Vec<(&DriveEntry, bool)> = self.rows.iter().filter(|e| palette::score(&self.filter, &e.name).is_some()).map(|e| (e, false)).collect();
+        let saving = self.action.is_save();
+        let mut v: Vec<(&DriveEntry, bool)> = self.rows.iter().filter(|e| saving || palette::score(&self.filter, &e.name).is_some()).map(|e| (e, false)).collect();
         v.extend(self.extra.iter().map(|e| (e, true)));
         v
     }
@@ -200,6 +257,8 @@ pub struct FileEntry {
     pub is_doc: bool,
     /// Size and modified date, shown greyed to the right.
     pub detail: String,
+    /// The "Google Drive" row: the way to the dialog's Drive place.
+    pub drive: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,11 +267,12 @@ pub enum Overlay {
     Palette { input: String, selected: usize },
     Prompt { kind: PromptKind, label: String, input: String },
     List { title: String, items: Vec<ListItem>, selected: usize, action: ListAction, filter: String },
-    /// The Open dialog: a browsable listing of `dir`. `filter` narrows the rows
-    /// as you type; typing a `/` navigates instead. `all` shows every file, not
-    /// just the ones wp opens as documents.
-    Browse { dir: PathBuf, entries: Vec<FileEntry>, selected: usize, filter: String, all: bool },
-    /// The Open from Google Drive dialog (DESIGN.md §6a.4).
+    /// The local place of the Open / Save As dialog: a browsable listing of
+    /// `dir`. When opening, `filter` narrows the rows as you type; when
+    /// saving it is the name to save under. Typing a `/` navigates instead.
+    /// `all` shows every file, not just the ones wp opens as documents.
+    Browse { dir: PathBuf, entries: Vec<FileEntry>, selected: usize, filter: String, all: bool, action: FileAction },
+    /// The Google Drive place of the same dialog (DESIGN.md §6a.4).
     Drive(DriveDialog),
     Confirm { question: String, action: ConfirmAction },
     Help,
@@ -505,7 +565,7 @@ impl App {
 
     pub fn title(&self) -> String {
         if let Some(g) = &self.gdoc {
-            return format!("{} (Google Docs)", g.title);
+            return format!("{} · Google Drive", g.title);
         }
         self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| UNTITLED.into())
     }
@@ -566,34 +626,146 @@ impl App {
         Ok(())
     }
 
-    /// Show the Open dialog listing `dir`. Keeps the current overlay (with a
-    /// message) if the directory can't be read.
-    pub fn browse(&mut self, dir: &Path, all: bool) {
+    /// Show the file dialog's local place listing `dir`. Keeps the current
+    /// overlay (with a message) if the directory can't be read.
+    pub fn browse(&mut self, dir: &Path, all: bool, action: FileAction) {
         let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         match read_entries(&dir) {
-            Ok(entries) => self.overlay = Overlay::Browse { dir, entries, selected: 0, filter: String::new(), all },
+            Ok(mut entries) => {
+                // The other place, listed like a volume, right under "..".
+                let at = entries.iter().position(|e| e.name != "..").unwrap_or(entries.len());
+                entries.insert(at, FileEntry { name: DRIVE_ENTRY.into(), is_dir: true, is_doc: false, detail: "Google Docs".into(), drive: true });
+                self.overlay = Overlay::Browse { dir, entries, selected: 0, filter: String::new(), all, action };
+            }
             Err(e) => self.message(format!("Could not read {}: {}", dir.display(), e)),
         }
         self.needs_redraw = true;
     }
 
-    /// If the Open dialog's filter names a directory in everything up to its
-    /// last `/`, move there and keep the rest as the filter. False when no such
-    /// directory exists, leaving the overlay untouched.
+    /// The directory the file dialog opens on: the document's, else the
+    /// current one.
+    fn local_dir(&self) -> PathBuf {
+        self.path.as_ref().and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()).map(|d| d.to_path_buf()).unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    /// If the local place's name field names a directory in everything up to
+    /// its last `/`, move there and keep the rest as the name. False when no
+    /// such directory exists, leaving the overlay untouched.
     fn browse_retarget(&mut self) -> bool {
-        let Overlay::Browse { dir, filter, all, .. } = &self.overlay else { return false };
+        let Overlay::Browse { dir, filter, all, action, .. } = &self.overlay else { return false };
         let Some(i) = filter.rfind('/') else { return false };
         let (head, tail) = (filter[..i + 1].to_string(), filter[i + 1..].to_string());
         let target = if head.starts_with('/') || head.starts_with('~') { expand_path(&head) } else { dir.join(&head) };
         if !target.is_dir() {
             return false;
         }
-        let all = *all;
-        self.browse(&target, all);
+        let (all, action) = (*all, *action);
+        self.browse(&target, all, action);
         if let Overlay::Browse { filter, .. } = &mut self.overlay {
             *filter = tail;
         }
         true
+    }
+
+    /// Enter / Right / Tab on a directory row: descend, or — on the "Google
+    /// Drive" row — cross to the Drive place (keeping the dialog up when
+    /// there is no Google client to cross with).
+    #[allow(clippy::too_many_arguments)]
+    fn browse_into(&mut self, dir: PathBuf, entries: Vec<FileEntry>, selected: usize, filter: String, all: bool, action: FileAction, e: &FileEntry) {
+        if e.drive {
+            let name = if action.is_save() && filter != DRIVE_ENTRY { filter.clone() } else { String::new() };
+            if !self.enter_drive(action, &dir, all, name) {
+                self.overlay = Overlay::Browse { dir, entries, selected, filter, all, action };
+            }
+        } else {
+            self.browse(&dir.join(&e.name), all, action);
+        }
+    }
+
+    /// Switch the file dialog to its Drive place, signing in first if need
+    /// be. False (with a message) when there is no Google client configured,
+    /// so the caller can keep the local place up.
+    fn enter_drive(&mut self, action: FileAction, dir: &Path, all: bool, name: String) -> bool {
+        if !self.ensure_google() {
+            return false;
+        }
+        if self.google.as_ref().unwrap().signed_in() {
+            self.open_drive_as(action, dir.to_path_buf(), all, name);
+        } else {
+            self.queue(Pending::Drive { action, dir: dir.to_path_buf(), all, name });
+        }
+        true
+    }
+
+    /// Save As on the local place, on the document's directory, with `name`
+    /// in the name field.
+    fn save_as_local(&mut self, format: Format, name: String) {
+        let dir = self.local_dir();
+        self.browse(&dir, false, FileAction::Save { format });
+        if let Overlay::Browse { filter, .. } = &mut self.overlay {
+            *filter = name;
+        }
+    }
+
+    /// The document's name with `ext`: the file's, or the Doc's title;
+    /// empty for an untitled document.
+    fn name_with_ext(&self, ext: &str) -> String {
+        if let Some(p) = &self.path {
+            return p.with_extension(ext).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        }
+        match &self.gdoc {
+            Some(g) => format!("{}.{}", g.title, ext),
+            None => String::new(),
+        }
+    }
+
+    /// Enter in the local place while saving: `name` under `dir` — with
+    /// the extension deciding the format, `hint` when there is none — after
+    /// asking before replacing a file that isn't the document's own.
+    fn save_local_from_dialog(&mut self, dir: &Path, name: &str, hint: Format) {
+        let mut p = if name.starts_with('/') || name.starts_with('~') { expand_path(name) } else { dir.join(name) };
+        let ext = p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+        let format = match ext.as_deref() {
+            Some("txt") | Some("text") => Format::Text,
+            Some("md") | Some("markdown") => Format::Markdown,
+            Some("docx") => Format::Docx,
+            _ => {
+                p.set_extension(match hint {
+                    Format::Text => "txt",
+                    Format::Markdown => "md",
+                    Format::Docx | Format::GoogleDoc => "docx",
+                });
+                if hint == Format::GoogleDoc {
+                    Format::Docx
+                } else {
+                    hint
+                }
+            }
+        };
+        let own = self.path.as_ref().map_or(false, |cur| std::fs::canonicalize(cur).ok() == std::fs::canonicalize(&p).ok());
+        if p.exists() && !own {
+            self.overlay = Overlay::Confirm { question: format!("Replace {}? (y/n)", p.display()), action: ConfirmAction::Overwrite { path: p, format } };
+            self.needs_redraw = true;
+            return;
+        }
+        self.finish_save(&p, format);
+    }
+
+    /// Save to `path` from the dialog, then exit if that was what the save
+    /// was for.
+    fn finish_save(&mut self, path: &Path, format: Format) {
+        if format == Format::Text && self.format == Format::Docx && self.package.is_some() {
+            self.message("Saved as plain text — formatting, styles, and page setup were dropped from the .txt copy.");
+        }
+        match self.save_to(path, format) {
+            Ok(()) => {
+                if self.quit_after_save {
+                    self.quit = true;
+                }
+            }
+            Err(e) => self.message(format!("Save failed: {}", e)),
+        }
+        self.quit_after_save = false;
     }
 
     /// Open `path`, confirming first if the current document has unsaved edits.
@@ -604,7 +776,7 @@ impl App {
         } else if let Err(e) = self.open_path(path) {
             self.message(format!("Could not open {}: {}", path.display(), e));
             if let Some((dir, all)) = fallback {
-                self.browse(dir, all);
+                self.browse(dir, all, FileAction::Open);
             }
         } else {
             self.check_recovery();
@@ -680,7 +852,7 @@ impl App {
 
     /// Run `p` after the next draw.
     pub fn queue(&mut self, p: Pending) {
-        if !matches!(p, Pending::SignIn { .. } | Pending::Drive) {
+        if !matches!(p, Pending::SignIn { .. } | Pending::Drive { .. }) {
             self.message("Contacting Google…");
         }
         self.pending = Some(p);
@@ -728,7 +900,8 @@ impl App {
         match p {
             Pending::Open { id, force } => self.open_gdoc(&id, force),
             Pending::Save => self.save_gdoc(),
-            Pending::Drive => self.open_drive(),
+            Pending::Drive { action, dir, all, name } => self.open_drive_as(action, dir, all, name),
+            Pending::Upload { folder, title } => self.save_drive(folder, title),
             Pending::SignIn { .. } => {}
         }
     }
@@ -851,19 +1024,81 @@ impl App {
         }
     }
 
+    /// Save As onto Drive (`Pending::Upload`): the document as a `.docx`,
+    /// uploaded for Drive to convert into a new Doc, which is then read
+    /// back and becomes the document — so every later Save is a diff.
+    fn save_drive(&mut self, folder: Option<String>, title: String) {
+        if self.hf_edit.is_some() {
+            // The re-read replaces the document, so the header screen
+            // closes first (its edits go into the document on the way).
+            self.hf_close();
+        }
+        self.ed.commit();
+        // A copy: what only Docs can hold is dropped for the .docx, and if
+        // the upload fails the document must be as it was.
+        let mut doc = self.ed.doc.clone();
+        let dropped = if self.gdoc.is_some() { wp_gdoc::detach(&mut doc) } else { Vec::new() };
+        let bytes = match wp_docx::write_bytes(&doc, self.package.as_ref()) {
+            Ok(b) => b,
+            Err(e) => return self.message(format!("Save to Google Drive failed: {}", e)),
+        };
+        let client = self.google.as_mut().unwrap();
+        let id = match client.upload_docx(&bytes, &title, folder.as_deref()) {
+            Ok(id) => id,
+            Err(e) => {
+                self.quit_after_save = false;
+                return self.message(format!("Save to Google Drive failed: {}", e));
+            }
+        };
+        match client.get_document(&id).and_then(|j| wp_gdoc::read(&j).map_err(anyhow::Error::msg)) {
+            Ok(l) => {
+                self.remove_recovery();
+                let cursor = self.ed.cursor;
+                let mut notes = l.warnings.clone();
+                if !dropped.is_empty() {
+                    notes.insert(0, format!("not carried over from the old Doc: {}", dropped.join(", ")));
+                }
+                self.load_gdoc(&id, l);
+                let c = self.ed.doc.clamp(cursor);
+                self.ed.move_to(c, false);
+                self.ed.dirty = false;
+                // The folder's listing (and Recent) have a new row now.
+                self.drive_cache.remove(&DriveQuery::Recent);
+                self.drive_cache.remove(&DriveQuery::Folder(folder.clone().unwrap_or_else(|| "root".into())));
+                if notes.is_empty() {
+                    self.message(format!("Saved to Google Drive as “{}”", title));
+                } else {
+                    self.message(format!("Saved to Google Drive as “{}” — {}", title, notes.join("; ")));
+                }
+                if self.quit_after_save {
+                    self.quit = true;
+                }
+            }
+            Err(e) => self.message(format!("Uploaded “{}” to Google Drive, but could not read it back ({}); open it from Drive to keep editing", title, e)),
+        }
+        self.quit_after_save = false;
+    }
+
     // ------------------------------------------------------------------
-    // Open from Drive (DESIGN.md §6a.4)
+    // The Drive place of the file dialog (DESIGN.md §6a.4)
     // ------------------------------------------------------------------
 
-    /// Show the Drive dialog on Recent, from the cached rows, and ask Drive
-    /// for a fresh listing.
+    /// Show the Drive place for opening, on Recent.
+    #[cfg(test)]
     pub fn open_drive(&mut self) {
+        let dir = self.local_dir();
+        self.open_drive_as(FileAction::Open, dir, false, String::new());
+    }
+
+    /// Show the Drive place: Recent (from the cached rows, while a fresh
+    /// listing is fetched) when opening, the folder view when saving.
+    pub fn open_drive_as(&mut self, action: FileAction, local_dir: PathBuf, local_all: bool, name: String) {
         if !self.drive_cache.contains_key(&DriveQuery::Recent) {
             if let Some(rows) = self.drive_cache_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str::<Vec<DriveEntry>>(&s).ok()) {
                 self.drive_cache.insert(DriveQuery::Recent, rows);
             }
         }
-        self.drive_show(DriveDialog::new(), true);
+        self.drive_show(DriveDialog::new(action, local_dir, local_all, name), true);
     }
 
     /// Put `d` up showing the listing for its current place: from the cache
@@ -914,27 +1149,54 @@ impl App {
         seq
     }
 
-    /// Descend into a folder-like entry.
+    /// Descend into a folder-like entry; "This computer" goes back to the
+    /// local place.
     fn drive_enter(&mut self, mut d: DriveDialog, e: &DriveEntry) {
+        if e.kind == DriveKind::Local {
+            return self.drive_to_local(d);
+        }
         let Some(q) = google::query_for(e) else { return self.overlay = Overlay::Drive(d) };
         d.mode = DriveMode::Folders;
         d.path.push(DriveFolder { name: e.name.clone(), query: q });
-        d.filter.clear();
+        if !d.action.is_save() {
+            d.filter.clear();
+        }
         self.drive_show(d, false);
     }
 
-    /// Up one level in the folder view; at the top, or in Recent, nothing.
+    /// Up one level in the folder view; from its top, on to the local
+    /// place. In Recent, nothing.
     fn drive_up(&mut self, mut d: DriveDialog) {
         if d.mode == DriveMode::Folders && d.path.len() > 1 {
             d.path.pop();
-            d.filter.clear();
+            if !d.action.is_save() {
+                d.filter.clear();
+            }
             self.drive_show(d, false);
+        } else if d.mode == DriveMode::Folders {
+            self.drive_to_local(d);
         } else {
             self.overlay = Overlay::Drive(d);
         }
     }
 
+    /// The dialog's local place, where the Drive place was entered from;
+    /// a name being typed for Save As comes along.
+    fn drive_to_local(&mut self, d: DriveDialog) {
+        self.drive_search_due = None;
+        self.browse(&d.local_dir, d.local_all, d.action);
+        if d.action.is_save() {
+            if let Overlay::Browse { filter, .. } = &mut self.overlay {
+                *filter = d.filter;
+            }
+        }
+    }
+
     fn drive_toggle_mode(&mut self, mut d: DriveDialog) {
+        if d.action.is_save() {
+            // Recent is not a place to save into.
+            return self.overlay = Overlay::Drive(d);
+        }
         d.mode = match d.mode {
             DriveMode::Recent => DriveMode::Folders,
             DriveMode::Folders => DriveMode::Recent,
@@ -1054,8 +1316,7 @@ impl App {
                     self.message(format!("Save failed: {}", e));
                 }
             }
-            None => self.prompt(PromptKind::SaveAs(Format::Docx), "Save as (.docx, .md or .txt): ", ""),
-
+            None => self.save_as_local(Format::Docx, String::new()),
         }
     }
 
@@ -1310,23 +1571,26 @@ impl App {
                 }
             }
             Cmd::Open => {
-                let dir = self.path.as_ref().and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()).map(|d| d.to_path_buf()).unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-                self.browse(&dir, false);
+                let dir = self.local_dir();
+                self.browse(&dir, false, FileAction::Open);
             }
             Cmd::Save => self.save(),
             Cmd::SaveAs => {
-                let init = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-                let f = if self.format == Format::GoogleDoc { Format::Docx } else { self.format };
-                self.prompt(PromptKind::SaveAs(f), "Save as: ", &init);
+                // On the document's own place: a Doc offers Drive (a new
+                // Doc beside it), a file its directory, a new document the
+                // current one — with the other place a row away.
+                if let Some(g) = &self.gdoc {
+                    let (title, dir) = (g.title.clone(), self.local_dir());
+                    self.enter_drive(FileAction::Save { format: Format::GoogleDoc }, &dir, false, title);
+                } else {
+                    let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let f = self.format;
+                    self.save_as_local(f, name);
+                }
             }
             Cmd::OpenFromDrive => {
-                if self.ensure_google() {
-                    if self.google.as_ref().unwrap().signed_in() {
-                        self.open_drive();
-                    } else {
-                        self.queue(Pending::Drive);
-                    }
-                }
+                let dir = self.local_dir();
+                self.enter_drive(FileAction::Open, &dir, false, String::new());
             }
             Cmd::GoogleSignOut => {
                 if let Some(c) = &mut self.google {
@@ -1337,19 +1601,19 @@ impl App {
                 self.message("Signed out of Google; the next Drive open or save signs in again");
             }
             Cmd::SaveAsDocx => {
-                let init = self.path.as_ref().map(|p| p.with_extension("docx").display().to_string()).unwrap_or_default();
-                self.prompt(PromptKind::SaveAs(Format::Docx), "Save as .docx: ", &init);
+                let name = self.name_with_ext("docx");
+                self.save_as_local(Format::Docx, name);
             }
             Cmd::SaveAsMarkdown => {
-                let init = self.path.as_ref().map(|p| p.with_extension("md").display().to_string()).unwrap_or_default();
-                self.prompt(PromptKind::SaveAs(Format::Markdown), "Save as .md: ", &init);
+                let name = self.name_with_ext("md");
+                self.save_as_local(Format::Markdown, name);
             }
             Cmd::SaveAsText => {
-                let init = self.path.as_ref().map(|p| p.with_extension("txt").display().to_string()).unwrap_or_default();
                 if self.format == Format::Docx && !self.ed.doc.paragraphs.iter().all(|p| p.items.iter().all(|i| !i.is_code())) {
                     self.message("Saving as plain text drops all formatting, styles, and page setup.");
                 }
-                self.prompt(PromptKind::SaveAs(Format::Text), "Save as .txt: ", &init);
+                let name = self.name_with_ext("txt");
+                self.save_as_local(Format::Text, name);
             }
             Cmd::Exit => {
                 if self.ed.dirty {
@@ -3053,16 +3317,6 @@ impl App {
                     }
                     self.overlay = Overlay::Prompt { kind, label, input };
                 }
-                KeyCode::Tab => {
-                    if matches!(kind, PromptKind::SaveAs(_)) {
-                        let (completed, rest) = complete_path(&input);
-                        input = completed;
-                        if let Some(names) = rest {
-                            self.message(format!("{} matches: {}", names.len(), names.join("  ")));
-                        }
-                    }
-                    self.overlay = Overlay::Prompt { kind, label, input };
-                }
                 _ => self.overlay = Overlay::Prompt { kind, label, input },
             },
             Overlay::List { title, items, mut selected, action, mut filter } => {
@@ -3097,45 +3351,66 @@ impl App {
                     _ => self.overlay = Overlay::List { title, items, selected, action, filter },
                 }
             }
-            Overlay::Browse { dir, entries, mut selected, mut filter, mut all } => {
-                let rows = browse_rows(&entries, &filter, all);
+            Overlay::Browse { dir, entries, mut selected, mut filter, mut all, action } => {
+                let saving = action.is_save();
+                let rows = browse_rows(&entries, &filter, all, saving);
                 let n = rows.len();
                 let chosen = rows.get(selected.min(n.saturating_sub(1))).map(|e| (*e).clone());
                 // Completion is prefix-based even though the filter is fuzzy:
                 // a shared prefix is the only thing Tab can meaningfully extend.
                 let lower = filter.to_lowercase();
                 let pfx: Vec<&FileEntry> = rows.iter().copied().filter(|e| e.name.to_lowercase().starts_with(&lower)).collect();
-                let cand = if pfx.is_empty() { &rows } else { &pfx };
-                let tab_dir = (cand.len() == 1 && cand[0].is_dir).then(|| cand[0].name.clone());
+                let cand = if pfx.is_empty() && !saving { &rows } else { &pfx };
+                let tab_dir = (cand.len() == 1 && cand[0].is_dir).then(|| cand[0].clone());
                 let tab_lcp = common_prefix(cand.iter().map(|e| e.name.as_str())).filter(|l| l.len() > filter.len() && l.to_lowercase().starts_with(&lower));
                 match ev.code {
-                    KeyCode::Esc => {}
+                    KeyCode::Esc => self.quit_after_save = false,
+                    KeyCode::Enter if saving => {
+                        let name = filter.trim().to_string();
+                        match chosen {
+                            _ if !name.is_empty() => {
+                                let target = if name.starts_with('/') || name.starts_with('~') { expand_path(&name) } else { dir.join(&name) };
+                                if name == DRIVE_ENTRY {
+                                    self.browse_into(dir, entries, selected, String::new(), all, action, &FileEntry { name: DRIVE_ENTRY.into(), is_dir: true, is_doc: false, detail: String::new(), drive: true });
+                                } else if target.is_dir() {
+                                    self.browse(&target, all, action);
+                                } else {
+                                    self.save_local_from_dialog(&dir, &name, action.format());
+                                }
+                            }
+                            Some(e) if e.is_dir => self.browse_into(dir, entries, selected, filter, all, action, &e),
+                            // A file picked from the list: its name goes in the
+                            // field, and Enter again replaces it (after asking).
+                            Some(e) => self.overlay = Overlay::Browse { dir, entries, selected, filter: e.name.clone(), all, action },
+                            None => self.overlay = Overlay::Browse { dir, entries, selected, filter, all, action },
+                        }
+                    }
                     KeyCode::Enter | KeyCode::Right => match chosen {
-                        Some(e) if e.is_dir => self.browse(&dir.join(&e.name), all),
+                        Some(e) if e.is_dir => self.browse_into(dir, entries, selected, filter, all, action, &e),
                         Some(e) if ev.code == KeyCode::Enter => self.open_file(&dir.join(&e.name), Some((&dir, all))),
                         // Right on a file, or Enter with nothing listed, keeps the dialog.
-                        _ => self.overlay = Overlay::Browse { dir, entries, selected, filter, all },
+                        _ => self.overlay = Overlay::Browse { dir, entries, selected, filter, all, action },
                     },
-                    KeyCode::Left => self.browse(&dir.join(".."), all),
-                    KeyCode::Backspace if filter.is_empty() => self.browse(&dir.join(".."), all),
+                    KeyCode::Left => self.browse(&dir.join(".."), all, action),
+                    KeyCode::Backspace if filter.is_empty() => self.browse(&dir.join(".."), all, action),
                     KeyCode::Tab => match tab_dir {
                         // One candidate left: Tab walks into it, as a shell would.
-                        Some(name) => self.browse(&dir.join(name), all),
+                        Some(e) => self.browse_into(dir, entries, selected, filter, all, action, &e),
                         None => {
                             if let Some(lcp) = tab_lcp {
                                 filter = lcp;
                                 selected = 0;
                             }
-                            self.overlay = Overlay::Browse { dir, entries, selected, filter, all };
+                            self.overlay = Overlay::Browse { dir, entries, selected, filter, all, action };
                         }
                     },
                     KeyCode::Up => {
                         selected = selected.saturating_sub(1);
-                        self.overlay = Overlay::Browse { dir, entries, selected, filter, all };
+                        self.overlay = Overlay::Browse { dir, entries, selected, filter, all, action };
                     }
                     KeyCode::Down => {
                         selected = (selected + 1).min(n.saturating_sub(1));
-                        self.overlay = Overlay::Browse { dir, entries, selected, filter, all };
+                        self.overlay = Overlay::Browse { dir, entries, selected, filter, all, action };
                     }
                     KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
                         selected = match ev.code {
@@ -3144,23 +3419,29 @@ impl App {
                             KeyCode::Home => 0,
                             _ => n.saturating_sub(1),
                         };
-                        self.overlay = Overlay::Browse { dir, entries, selected, filter, all };
+                        self.overlay = Overlay::Browse { dir, entries, selected, filter, all, action };
                     }
                     KeyCode::Backspace => {
                         filter.pop();
-                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all };
+                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all, action };
                     }
                     KeyCode::Char('u') if key.ctrl => {
                         filter.clear();
-                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all };
+                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all, action };
                     }
                     KeyCode::Char('a') if key.alt => {
                         all = !all;
-                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all };
+                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all, action };
+                    }
+                    KeyCode::Char('d') if key.alt => {
+                        let name = if saving { filter.clone() } else { String::new() };
+                        if !self.enter_drive(action, &dir, all, name) {
+                            self.overlay = Overlay::Browse { dir, entries, selected, filter, all, action };
+                        }
                     }
                     KeyCode::Char(c) if !key.ctrl && !key.alt && !key.sup => {
                         filter.push(c);
-                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all };
+                        self.overlay = Overlay::Browse { dir, entries, selected: 0, filter, all, action };
                         // A slash means the typed text is a path, not a filter.
                         if c == '/' && !self.browse_retarget() {
                             if let Overlay::Browse { filter, .. } = &mut self.overlay {
@@ -3168,14 +3449,36 @@ impl App {
                             }
                         }
                     }
-                    _ => self.overlay = Overlay::Browse { dir, entries, selected, filter, all },
+                    _ => self.overlay = Overlay::Browse { dir, entries, selected, filter, all, action },
                 }
             }
             Overlay::Drive(mut d) => {
+                let saving = d.action.is_save();
                 let n = d.visible().len();
                 let chosen = d.visible().get(d.selected.min(n.saturating_sub(1))).map(|(e, _)| (*e).clone());
                 match ev.code {
-                    KeyCode::Esc => self.drive_search_due = None,
+                    KeyCode::Esc => {
+                        self.drive_search_due = None;
+                        self.quit_after_save = false;
+                    }
+                    KeyCode::Enter if saving => {
+                        let name = d.filter.trim().to_string();
+                        match chosen {
+                            _ if !name.is_empty() => match d.save_folder() {
+                                Some(folder) => self.queue(Pending::Upload { folder, title: name }),
+                                None => {
+                                    self.message("Pick a folder to save into: My Drive, one of its folders, or a shared drive");
+                                    self.overlay = Overlay::Drive(d);
+                                }
+                            },
+                            Some(e) if e.kind == DriveKind::Doc => {
+                                d.filter = e.name.clone();
+                                self.overlay = Overlay::Drive(d);
+                            }
+                            Some(e) => self.drive_enter(d, &e),
+                            None => self.overlay = Overlay::Drive(d),
+                        }
+                    }
                     KeyCode::Enter => match google::parse_doc_ref(&d.filter) {
                         Some(id) => self.queue(Pending::Open { id, force: false }),
                         None => match chosen {
@@ -3190,8 +3493,24 @@ impl App {
                     },
                     KeyCode::Left => self.drive_up(d),
                     KeyCode::Backspace if d.filter.is_empty() => self.drive_up(d),
+                    KeyCode::Tab if saving => {
+                        // Complete the name from what is listed, as the local
+                        // place does; one folder left walks into it.
+                        let lower = d.filter.to_lowercase();
+                        let cand: Vec<DriveEntry> = d.visible().iter().filter(|(e, _)| e.name.to_lowercase().starts_with(&lower)).map(|(e, _)| (*e).clone()).collect();
+                        if cand.len() == 1 && cand[0].kind != DriveKind::Doc {
+                            d.filter.clear();
+                            self.drive_enter(d, &cand[0]);
+                        } else {
+                            if let Some(lcp) = common_prefix(cand.iter().map(|e| e.name.as_str())).filter(|l| l.len() > d.filter.len()) {
+                                d.filter = lcp;
+                            }
+                            self.overlay = Overlay::Drive(d);
+                        }
+                    }
                     KeyCode::Tab => self.drive_toggle_mode(d),
                     KeyCode::Char('f') if key.alt => self.drive_toggle_mode(d),
+                    KeyCode::Char('d') if key.alt => self.drive_to_local(d),
                     KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
                         d.selected = match ev.code {
                             KeyCode::Up => d.selected.saturating_sub(1),
@@ -3378,7 +3697,7 @@ impl App {
                             }
                         }
                         None => {
-                            self.prompt(PromptKind::SaveAs(Format::Docx), "Save as (.docx or .txt), then exit: ", "");
+                            self.save_as_local(Format::Docx, String::new());
                             self.quit_after_save = true;
                         }
                     }
@@ -3405,6 +3724,13 @@ impl App {
                 if yes {
                     self.remove_recovery();
                     self.queue(Pending::Open { id, force: true });
+                }
+            }
+            ConfirmAction::Overwrite { path, format } => {
+                if yes {
+                    self.finish_save(&path, format);
+                } else {
+                    self.quit_after_save = false;
                 }
             }
             ConfirmAction::Recover(p) => {
@@ -3452,38 +3778,6 @@ impl App {
     fn finish_prompt(&mut self, kind: PromptKind, input: String) {
         let v = input.trim().to_string();
         match kind {
-            PromptKind::SaveAs(fmt) => {
-                if v.is_empty() {
-                    return;
-                }
-                let mut p = expand_path(&v);
-                let ext = p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
-                let fmt = match ext.as_deref() {
-                    Some("txt") | Some("text") => Format::Text,
-                    Some("md") | Some("markdown") => Format::Markdown,
-                    Some("docx") => Format::Docx,
-                    _ => {
-                        p.set_extension(match fmt {
-                            Format::Text => "txt",
-                            Format::Markdown => "md",
-                            Format::Docx | Format::GoogleDoc => "docx",
-                        });
-                        fmt
-                    }
-                };
-                if fmt == Format::Text && self.format == Format::Docx && self.package.is_some() {
-                    self.message("Saved as plain text — formatting, styles, and page setup were dropped from the .txt copy.");
-                }
-                match self.save_to(&p, fmt) {
-                    Ok(()) => {
-                        if self.quit_after_save {
-                            self.quit = true;
-                        }
-                    }
-                    Err(e) => self.message(format!("Save failed: {}", e)),
-                }
-                self.quit_after_save = false;
-            }
             PromptKind::Find { backward } => {
                 self.find.query = v.clone();
                 self.find.backward = backward;
@@ -3739,10 +4033,10 @@ fn read_entries(dir: &Path) -> std::io::Result<Vec<FileEntry>> {
         // Follow symlinks, so a linked directory browses as one.
         let md = std::fs::metadata(e.path()).or_else(|_| e.metadata())?;
         if md.is_dir() {
-            dirs.push(FileEntry { name, is_dir: true, is_doc: false, detail: String::new() });
+            dirs.push(FileEntry { name, is_dir: true, is_doc: false, detail: String::new(), drive: false });
         } else {
             let when = md.modified().ok().map(stamp).unwrap_or_default();
-            files.push(FileEntry { is_doc: is_doc(&name), name, is_dir: false, detail: format!("{}  {}", size(md.len()), when) });
+            files.push(FileEntry { is_doc: is_doc(&name), name, is_dir: false, detail: format!("{}  {}", size(md.len()), when), drive: false });
         }
     }
     let key = |e: &FileEntry| e.name.to_lowercase();
@@ -3750,25 +4044,29 @@ fn read_entries(dir: &Path) -> std::io::Result<Vec<FileEntry>> {
     files.sort_by_key(key);
     let mut out = Vec::with_capacity(dirs.len() + files.len() + 1);
     if dir.parent().is_some() {
-        out.push(FileEntry { name: "..".into(), is_dir: true, is_doc: false, detail: "parent directory".into() });
+        out.push(FileEntry { name: "..".into(), is_dir: true, is_doc: false, detail: "parent directory".into(), drive: false });
     }
     out.append(&mut dirs);
     out.append(&mut files);
     Ok(out)
 }
 
-/// The rows the Open dialog shows: dot-files only when asked for by name or by
-/// `all`, non-document files only when `all`.
-pub fn browse_rows<'a>(entries: &'a [FileEntry], filter: &str, all: bool) -> Vec<&'a FileEntry> {
+/// The rows the local place shows: dot-files only when asked for by name or
+/// by `all`, non-document files only when `all`. When `saving`, the typed
+/// text is a name, not a filter, so every row stays.
+pub fn browse_rows<'a>(entries: &'a [FileEntry], filter: &str, all: bool, saving: bool) -> Vec<&'a FileEntry> {
     let hidden_ok = all || filter.starts_with('.');
     entries
         .iter()
         .filter(|e| {
             let hidden = e.name.starts_with('.') && e.name != "..";
-            (hidden_ok || !hidden) && (all || e.is_dir || e.is_doc) && subsequence(filter, &e.name)
+            (hidden_ok || !hidden) && (all || e.is_dir || e.is_doc) && (saving || subsequence(filter, &e.name))
         })
         .collect()
 }
+
+/// The name of the local place's row that leads to Google Drive.
+pub const DRIVE_ENTRY: &str = "Google Drive";
 
 /// Case-insensitive subsequence: the filter's letters in order. Deliberately
 /// not `palette::score`, whose one-typo tolerance would let `gen-l` match every
@@ -3800,45 +4098,6 @@ fn stamp(t: std::time::SystemTime) -> String {
     let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
     let (y, m, d) = civil(secs.div_euclid(86400));
     format!("{:04}-{:02}-{:02}", y, m, d)
-}
-
-/// Returns `(input, Some(candidates))` when the completion is ambiguous, so the
-/// caller can show what a bare Tab could not decide between.
-fn complete_path(input: &str) -> (String, Option<Vec<String>>) {
-    let p = expand_path(input);
-    let (dir, prefix) = if input.ends_with('/') {
-        (p.clone(), String::new())
-    } else {
-        (p.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")), p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())
-    };
-    let dir_read = if dir.as_os_str().is_empty() { PathBuf::from(".") } else { dir.clone() };
-    let Ok(rd) = std::fs::read_dir(&dir_read) else { return (input.to_string(), None) };
-    let mut matches: Vec<String> = rd
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with(&prefix) && !name.starts_with('.') {
-                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                Some(if is_dir { format!("{}/", name) } else { name })
-            } else {
-                None
-            }
-        })
-        .collect();
-    matches.sort();
-    if matches.is_empty() {
-        return (input.to_string(), None);
-    }
-    // Longest common prefix.
-    let mut lcp = matches[0].clone();
-    for m in &matches[1..] {
-        while !m.starts_with(&lcp) {
-            lcp.pop();
-        }
-    }
-    let base = if input.ends_with('/') { input.to_string() } else { input[..input.len() - prefix.len()].to_string() };
-    let ambiguous = (matches.len() > 1 && lcp.len() == prefix.len()).then(|| matches.into_iter().take(12).collect());
-    (format!("{}{}", base, lcp), ambiguous)
 }
 
 fn today() -> String {

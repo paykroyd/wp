@@ -539,21 +539,60 @@ SPEC §8 says *no network access*. That stays true by default: nothing in
 — no background sync, no token refresh on a timer, no telemetry.
 Authentication is OAuth 2.0 with the loopback redirect (`wp` listens on a
 random `127.0.0.1` port for the one redirect, then closes it), scopes
-`documents` and `drive.readonly`, against a "Desktop app" client the user
-creates in the Google Cloud console and puts in `config.toml` under
-`[google]`. The refresh token is cached, mode 0600, in the state directory;
-`Sign Out of Google` deletes it.
+`documents` and `drive`, against a "Desktop app" client the user creates in
+the Google Cloud console and puts in `config.toml` under `[google]`. It is
+the full `drive` scope rather than `drive.readonly` + `drive.file` because
+Save As must create a Doc in a folder the user picked from a listing, and
+`drive.file` only sees files the app itself made — a folder it didn't
+create is "not found" as a parent. Both are restricted scopes, so the
+consent screen asks no more of the user than before. The token file
+records the scopes it was granted with; a token from before a scope was
+added counts as signed out, so the next Google action re-consents instead
+of failing with a 403. The refresh token is cached, mode 0600, in the state
+directory; `Sign Out of Google` deletes it.
 
 Network calls run from a small queue (`App::pending`) that the main loop
 drains *after* drawing, so the screen shows "Contacting Google…" or the
-sign-in URL while the call blocks; Esc cancels a sign-in. Opening is
-`Open from Google Drive…`, the `gdoc:<id>` / URL argument on the command
-line, and `--check` / `--text` / `--md` on a `gdoc:` reference for a
-read-only look.
+sign-in URL while the call blocks; Esc cancels a sign-in. Opening is the
+Drive place of the Open dialog, the `gdoc:<id>` / URL argument on the
+command line, and `--check` / `--text` / `--md` on a `gdoc:` reference for
+a read-only look.
 
-`Open from Google Drive…` is a modal like the local Open dialog
-(`Overlay::Drive`), and it is the one place `wp` does network work off the
-main thread. It opens at once on **Recent** — Google Docs ordered by
+**One dialog, two places.** Drive is a *place*, not a format, so it is not
+a separate command: `Open…` and `Save As…` are one file dialog with a
+local place (`Overlay::Browse`, a directory listing) and a Drive place
+(`Overlay::Drive`), and both carry a `FileAction` — open, or save with a
+default format. The local listing has a "Google Drive" row under `..`,
+like a mounted volume, and the Drive folder view has "This computer" at
+its top; Enter, Right and Tab cross over as they descend into any other
+folder, Left / Backspace come back up, and `Alt+D` jumps either way. A
+name being typed for Save As travels across with the user. Entering the
+Drive place signs in first if need be (`Pending::Drive` carries the local
+place to return to) and, with no `[google]` client configured, says so and
+stays put. `Open from Google Drive…` survives in the palette as a shortcut
+onto the Drive place; the three `Save As .docx / .md / .txt` commands are
+the same dialog with a name pre-filled, and only `Save As…` is in the menu.
+
+Saving in the local place: the field is the name, the listing (not
+narrowed by it) is for navigation and collisions; Enter on a listed file
+copies its name into the field; the extension picks the format, the
+action's default format is appended when there is none; a file that isn't
+the document's own asks before being replaced. In the Drive place saving
+is only the folder view (Recent is not somewhere to save into): Enter with
+a name uploads the document as a `.docx` for Drive to convert into a new
+Doc of that name in the folder being viewed (`files.create` with
+`uploadType=multipart`, `parents` = the folder, `supportsAllDrives`),
+which is then read back with `documents.get` and *becomes* the document —
+every Save after that is a diff (§6a.2). Creating by upload rather than by
+an insert-everything diff is deliberate: the `.docx` writer is the release
+gate, and Google's converter carries tables, footnotes and images that the
+diff cannot yet express. A Doc saved onto this computer goes through
+`wp_gdoc::detach` as before; a Doc saved as a new Doc detaches a copy, so a
+failed upload leaves the document as it was. The status line names the
+place: a file by name, a Doc as `Title · Google Drive`.
+
+The Drive place is the one spot `wp` does network work off the main
+thread. Opening starts on **Recent** — Google Docs ordered by
 Drive's `recency` (last viewed, edited, or shared), the same list the Drive
 web app calls Recent — from a copy cached on disk (`drive-recent.json` in
 the state directory), while a worker thread fetches a fresh listing. Typing
@@ -761,6 +800,16 @@ run passes (2026-09-07): 22 edit kinds save and read back quietly, and the
 no single-request form for it (§6a.2). Still to do: the two-phase save
 (structural requests, re-read, then the content diff) for list-level
 changes, tables, new footnotes and moved objects.
+
+**One file dialog (2026-09-12).** `Open from Google Drive…` and the
+Save As prompt line are gone as separate paths: Drive is a place in the
+Open / Save As dialog, reached from a row or `Alt+D` (§6a.4), and Save As
+into a Drive folder creates a Doc by uploading the document as a `.docx`
+for Drive to convert, then reading it back — the first way to start a
+document in `wp` and end up with a Google Doc. That needed the full
+`drive` scope in place of `drive.readonly`; a token from before is treated
+as signed out so the next action re-consents. `live_upload` in `google.rs`
+exercises the upload against the real API.
 
 Two bugs found on the way: headless UI tests saved `Config::default()` over
 the user's real `config.toml` (every `Harness` now sets `persist = false`,
