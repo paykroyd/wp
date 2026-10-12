@@ -766,7 +766,7 @@ Spec §6.2 names `Ctrl+K` as the palette key. In the **modern** map `Ctrl+K`
 is kill-to-end-of-line instead, because the modern map follows emacs / macOS
 readline movement and deletion (`Ctrl+F/B/N/P/A/E/D/H/K/U`, `Alt+F/B/D`),
 which the primary user asked for out of the box. The palette is
-`Ctrl+Shift+P` (VS Code muscle memory), `Cmd+P`, `Cmd+Shift+P`, and `Alt+=`;
+`Ctrl+Shift+P` (VS Code muscle memory), `Cmd+P` and `Cmd+Shift+P`;
 the classic map keeps `Ctrl+K`. `Cmd+P` earns its place because Ghostty 1.2
 took `Cmd+Shift+P` for its own palette, and `wp` has no Print to collide
 with. On macOS the *advertised* label never picks an `Alt+` binding when the

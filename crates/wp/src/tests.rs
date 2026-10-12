@@ -548,9 +548,10 @@ fn emacs_and_cmd_keys() {
     assert!(matches!(h.app.overlay, Overlay::Palette { .. }));
     h.key(KeyCode::Esc, NONE);
     // The advertised palette key is one the terminal certainly delivers —
-    // never Alt+= on macOS, where Option is not Alt by default.
+    // never a Cmd key, nor an Alt one on macOS, where Option is not Alt by
+    // default. (Alt+= went to the menu bar.)
     let label = h.app.keymap.label_for(crate::commands::Cmd::Palette).unwrap();
-    assert_eq!(label, if cfg!(target_os = "macos") { "Ctrl+Shift+P" } else { "Alt+=" });
+    assert_eq!(label, "Ctrl+Shift+P");
 }
 
 #[test]
